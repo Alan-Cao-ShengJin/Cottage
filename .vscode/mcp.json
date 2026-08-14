@@ -1,0 +1,9 @@
+{
+  "//": "Agent Room MCP server for VS Code / Claude Code. Start the backend first: see README.",
+  "servers": {
+    "agent-room": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}

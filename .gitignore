@@ -1,0 +1,33 @@
+# secrets
+.env
+.env.local
+backend/.env
+frontend/.env.local
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# data (SQLite, kept locally for debugging)
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+
+# node / next
+node_modules/
+.next/
+out/
+npm-debug.log*
+*.tsbuildinfo
+
+# editors / os
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/mcp.json
