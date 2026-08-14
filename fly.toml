@@ -1,0 +1,54 @@
+# One concrete fast path to a stable URL. Not a commitment to this provider: the Dockerfile
+# is host-agnostic, and `docs/DEPLOY.md` covers the alternatives. Fly is here because a
+# volume plus a hostname is two commands, which is what "quickly" required.
+#
+# Change `app` to something unique before the first deploy; `fly launch` will offer to.
+
+app = "agent-rooms"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  DATABASE_PATH = "/data/agent_rooms.db"
+  CONSOLE_DIR = "/srv/console"
+  # Any agent host reaching a public URL must present an OAuth token. The startup guard
+  # refuses to boot a reachable instance without this, so it is stated rather than assumed.
+  MCP_REQUIRE_AUTH = "true"
+  # PUBLIC_BASE_URL and OPERATOR_TOKEN are deliberately absent — see docs/DEPLOY.md. The
+  # first is per-app, the second is a secret and belongs in `fly secrets`, never in a file
+  # that gets committed.
+
+# The event log is the source of truth, so it has to outlive the machine. Without this
+# mount, `/data` is a container layer and every deploy silently discards every room.
+[[mounts]]
+  source = "agent_rooms_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Single instance, on purpose (D-020): SQLite on one volume, and an in-process
+  # notify-then-read bus. Two machines would each hold a different half of the truth.
+  # Horizontal scale is M5 and needs PostgreSQL first.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    # /healthz rather than /: the root serves the console, and a health check must not
+    # depend on whether the frontend compiled.
+    path = "/healthz"
+    interval = "15s"
+    timeout = "4s"
+    grace_period = "10s"
+
+[[vm]]
+  # Long-poll connections are cheap but not free: each agent host holds one open request for
+  # up to MAX_LONG_POLL_SECONDS. This is sized for a first deployment, and the honest scaling
+  # move here is a bigger machine, not more of them.
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

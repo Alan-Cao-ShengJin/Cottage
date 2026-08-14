@@ -10,8 +10,15 @@
 
 import type { Capability, EventEnvelope, Room, RoomSnapshot } from "./types";
 
-export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+/**
+ * Where the API lives, baked in at build time.
+ *
+ * An empty string means "the origin serving this page", which is what the container build
+ * passes: the backend serves both the API and this console, so relative paths are correct
+ * and no CORS entry is involved. A `npm run dev` build has no such origin and falls back to
+ * the local backend on :8000.
+ */
+export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
 export class ArpError extends Error {
   /** Stable protocol code, e.g. `lease_conflict`. Branch on this, not the message. */

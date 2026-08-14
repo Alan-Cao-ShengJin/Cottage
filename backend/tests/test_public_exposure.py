@@ -16,8 +16,8 @@ import dataclasses
 import pytest
 
 from app.config import (
-    DEFAULT_DEV_TOKEN,
-    UNSAFE_PUBLIC_BOOTSTRAP,
+    DEFAULT_OPERATOR_TOKEN,
+    UNSAFE_PUBLIC_OPERATOR,
     Settings,
     check_public_safety,
 )
@@ -59,14 +59,14 @@ def test_local_urls_are_not_treated_as_public(base_url):
 )
 def test_public_url_with_the_published_default_token_refuses_to_start(base_url):
     config = _settings(
-        public_base_url=base_url, dev_bootstrap=True, dev_bootstrap_token=DEFAULT_DEV_TOKEN
+        public_base_url=base_url, bootstrap_operator=True, operator_token=DEFAULT_OPERATOR_TOKEN
     )
     assert config.is_publicly_reachable is True
     with pytest.raises(RuntimeError) as exc:
         check_public_safety(config)
     # The message must tell them how to fix it, not just that they are wrong.
-    assert "DEV_BOOTSTRAP" in str(exc.value)
-    assert str(exc.value) == UNSAFE_PUBLIC_BOOTSTRAP
+    assert "BOOTSTRAP_OPERATOR" in str(exc.value)
+    assert str(exc.value) == UNSAFE_PUBLIC_OPERATOR
 
 
 def test_public_url_with_a_real_secret_is_allowed():
@@ -74,8 +74,8 @@ def test_public_url_with_a_real_secret_is_allowed():
     test is about the bootstrap one specifically."""
     config = _settings(
         public_base_url="https://romantic-hippo.trycloudflare.com",
-        dev_bootstrap=True,
-        dev_bootstrap_token="s6xk2p9qw4m7v1t8z3r5n0h6j2c4b8d1f7g9k3l5",
+        bootstrap_operator=True,
+        operator_token="s6xk2p9qw4m7v1t8z3r5n0h6j2c4b8d1f7g9k3l5",
         mcp_require_auth=True,
     )
     check_public_safety(config)
@@ -84,8 +84,8 @@ def test_public_url_with_a_real_secret_is_allowed():
 def test_public_url_with_bootstrap_disabled_is_allowed():
     config = _settings(
         public_base_url="https://agent-rooms.example.com",
-        dev_bootstrap=False,
-        dev_bootstrap_token=DEFAULT_DEV_TOKEN,
+        bootstrap_operator=False,
+        operator_token=DEFAULT_OPERATOR_TOKEN,
         mcp_require_auth=True,
     )
     check_public_safety(config)
@@ -94,7 +94,7 @@ def test_public_url_with_bootstrap_disabled_is_allowed():
 def test_the_two_guards_are_independent():
     """Satisfying one must not excuse the other — otherwise flipping a single switch
     reopens the endpoint."""
-    from app.config import UNSAFE_PUBLIC_BOOTSTRAP, UNSAFE_PUBLIC_MCP
+    from app.config import UNSAFE_PUBLIC_MCP, UNSAFE_PUBLIC_OPERATOR
 
     public = "https://romantic-hippo.trycloudflare.com"
 
@@ -103,8 +103,8 @@ def test_the_two_guards_are_independent():
         check_public_safety(
             _settings(
                 public_base_url=public,
-                dev_bootstrap=True,
-                dev_bootstrap_token="s6xk2p9qw4m7v1t8z3r5n0h6j2c4b8d1f7g9k3l5",
+                bootstrap_operator=True,
+                operator_token="s6xk2p9qw4m7v1t8z3r5n0h6j2c4b8d1f7g9k3l5",
                 mcp_require_auth=False,
             )
         )
@@ -115,12 +115,12 @@ def test_the_two_guards_are_independent():
         check_public_safety(
             _settings(
                 public_base_url=public,
-                dev_bootstrap=True,
-                dev_bootstrap_token=DEFAULT_DEV_TOKEN,
+                bootstrap_operator=True,
+                operator_token=DEFAULT_OPERATOR_TOKEN,
                 mcp_require_auth=True,
             )
         )
-    assert str(exc.value) == UNSAFE_PUBLIC_BOOTSTRAP
+    assert str(exc.value) == UNSAFE_PUBLIC_OPERATOR
 
 
 # ---------------------------------------------------------------------------

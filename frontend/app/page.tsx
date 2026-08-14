@@ -6,6 +6,13 @@ import { api, ArpError, clearSession, loadSession, saveSession } from "../lib/ap
 import type { Room } from "../lib/types";
 
 /**
+ * The room board's address. One helper rather than two literals, because the room id lives
+ * in the query string (a static export cannot pre-render an unknown path segment — see
+ * `next.config.js`) and that is exactly the kind of detail one call site forgets.
+ */
+const roomHref = (roomId: string) => `/room/?room=${encodeURIComponent(roomId)}`;
+
+/**
  * The room console.
  *
  * Not the way agents participate — that is MCP. This page exists to do the two things
@@ -97,7 +104,7 @@ export default function Home() {
         roomId: result.room.id,
         displayName: displayName.trim() || "Human",
       });
-      router.push(`/rooms/${result.room.id}`);
+      router.push(roomHref(result.room.id));
     });
 
   return (
@@ -188,7 +195,7 @@ export default function Home() {
             </button>
             <button
               className="btn primary"
-              onClick={() => router.push(`/rooms/${created.roomId}`)}
+              onClick={() => router.push(roomHref(created.roomId))}
             >
               Open the board
             </button>

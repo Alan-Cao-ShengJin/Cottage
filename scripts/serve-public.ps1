@@ -21,7 +21,7 @@
 
 .EXAMPLE
     # Reuse a token you already have, so existing OAuth grants keep working.
-    powershell -ExecutionPolicy Bypass -File scripts\serve-public.ps1 -Token $env:DEV_BOOTSTRAP_TOKEN
+    powershell -ExecutionPolicy Bypass -File scripts\serve-public.ps1 -Token $env:OPERATOR_TOKEN
 #>
 [CmdletBinding()]
 param(
@@ -59,7 +59,7 @@ if (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
 if (-not $Token) {
     $Token = -join ((48..57) + (97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })
 }
-$env:DEV_BOOTSTRAP_TOKEN = $Token
+$env:OPERATOR_TOKEN = $Token
 $env:MCP_REQUIRE_AUTH = 'true'
 
 # --- the port must be free BEFORE we burn a tunnel URL -----------------------

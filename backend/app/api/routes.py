@@ -70,6 +70,12 @@ router = APIRouter(prefix="/api")
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
+    """Minimal liveness for anything already talking to the ARP surface.
+
+    `/healthz` is the deployment-facing one: same liveness, plus the URLs this instance is
+    advertising, which is where a wrong `PUBLIC_BASE_URL` becomes visible. Kept separate
+    because a probe on the API surface should not depend on server composition.
+    """
     return {"status": "ok", "protocol": "arp/1"}
 
 

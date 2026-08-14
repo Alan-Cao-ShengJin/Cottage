@@ -15,7 +15,7 @@ plumbing (`docs/DECISIONS.md` D-019).
 quick tunnel or a LAN address.
 
 - **Reach:** whoever holds the current tunnel URL, until it rotates.
-- **Identity:** the owner's `DEV_BOOTSTRAP_TOKEN` is the human credential. Agents either
+- **Identity:** the owner's `OPERATOR_TOKEN` is the human credential. Agents either
   present an OAuth token bound at consent, or — on the permissive local path — name
   themselves.
 - **Storage:** SQLite on that machine.
@@ -27,35 +27,56 @@ quick tunnel or a LAN address.
 
 Cottage is a legitimate mode and worth keeping working. It is not the product.
 
+## Hosted-lite
+
+**One always-on container at a fixed hostname.** This is what the central claim actually
+requires — *anyone starts a room and invites anyone over the internet* — and it is
+deliberately the smallest thing that delivers it (D-020).
+
+- **Reach:** a permanent URL. A join token survives restarts and can be emailed to a
+  stranger.
+- **Identity:** **one operator** holds `OPERATOR_TOKEN` and creates rooms. Everyone else is
+  invited, and needs no account: an invitation token is the invitee's whole credential.
+  Agents bind their identity at OAuth consent, so an agent cannot name itself.
+- **Storage:** SQLite on a mounted volume. One instance only — the notify-then-read bus is
+  in-process, so a second machine would hold half the truth.
+- **Good for:** the real thing at small scale. Cross-company rooms work; mixed agent fleets
+  work; the audit trail is durable.
+- **Not for:** a second person creating rooms, or traffic beyond one machine.
+- **Status:** **implemented, not yet verified** — the container has never been deployed. See
+  `docs/DEPLOY.md` §0, and `docs/INTEROP.md` for what that vocabulary means.
+
 ## Hosted
 
-**A stable, always-on instance at a fixed hostname**, which is what the product's central
-claim requires: *anyone starts a room and invites anyone over the internet.*
+Hosted-lite plus the things scale demands, each waiting for the demand (M5):
 
-- **Reach:** a permanent URL. An invitation link survives restarts and can be emailed to a
-  stranger.
-- **Identity:** real accounts (OIDC), org boundaries that mean something, per-agent
-  credentials, and a consent step whose binding outlives the session.
-- **Storage:** PostgreSQL. Every domain invariant is already engine-neutral by construction
-  (D-011), so this is deployment work rather than a redesign.
-- **Good for:** the actual product — cross-company rooms, mixed agent fleets, audit that
-  someone else can rely on.
-- **Status:** **not built.** This is M2.5 in `docs/ROADMAP.md`.
+- **PostgreSQL**, closing the D-011 blocker. Engine-neutral invariants make it a driver swap.
+- **OIDC login**, wanted the moment a second person must create rooms.
+- **Horizontal scale-out**, which needs the notification to cross processes. Tractable
+  precisely because a *dropped* notification costs latency and not data — consumers re-read
+  the log.
 
 ---
 
 ## What changes between them
 
-| | Cottage | Hosted |
-|---|---|---|
-| URL | rotates per run | stable |
-| Invitation lifetime | dies with the tunnel | survives restarts |
-| Token audience | rebound each run | stable |
-| Human auth | pasted bootstrap token | OIDC login |
-| Agent identity binding | OAuth consent, or self-named locally | OAuth consent, operator-backed |
-| Cross-org rooms | technically allowed, practically pointless | the primary use |
-| Storage | SQLite | PostgreSQL |
-| Who operates it | you | an operator |
+| | Cottage | Hosted-lite | Hosted |
+|---|---|---|---|
+| URL | rotates per run | stable | stable |
+| Invitation lifetime | dies with the tunnel | survives restarts | survives restarts |
+| Token audience | rebound each run | stable | stable |
+| Human auth | pasted operator token | pasted operator token | OIDC login |
+| Who can create rooms | you | you | anyone with an account |
+| Who can be invited | anyone with the URL | **anyone, no account** | anyone, no account |
+| Agent identity binding | OAuth consent, or self-named locally | OAuth consent | OAuth consent |
+| Cross-org rooms | technically allowed, practically pointless | works | the primary use |
+| Storage | SQLite, local file | SQLite on a volume | PostgreSQL |
+| Instances | 1 | 1 | many |
+| Who operates it | you | you | an operator |
+
+The middle column is the one worth internalising: **Hosted-lite is limited in who can
+*create*, not in who can *join*.** That is why it is enough to test the product's central
+claim, and why the login work is not on the critical path.
 
 ## What does *not* change
 
@@ -76,3 +97,6 @@ progress toward Hosted.** A tunnel script does not become a deployment.
 
 > Before investing in exposure, ask which mode it serves. If the answer is Cottage, cap the
 > effort: it is developer convenience. The product needs Hosted.
+
+As of M2.0 the Cottage tooling is **frozen** — it still works, and receives no further
+investment. There is now a deployment to reach for instead.

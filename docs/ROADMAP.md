@@ -58,6 +58,43 @@ Why this before shared state: the differentiator is the *cross-platform room*. D
 room whose universality is unproven optimises the wrong axis, and shared state built against
 one adapter would need revisiting once three more exist.
 
+### M2.0 — Hosted-lite: a stable URL, today ✅ built, ⏳ not yet deployed
+Everything already built is unreachable by a stranger, which makes the central claim false in
+practice regardless of how good the core is. So this lands first, scoped for speed rather than
+scale (D-020):
+
+- one portable container image — Node stage builds the console to static files, Python stage
+  serves both the API and the console from a single origin;
+- SQLite on a mounted volume, `DATABASE_PATH` pointed at it;
+- `/healthz` for platform health checks;
+- `fly.toml` as the concrete fast path, with the image kept host-agnostic so Railway, Render,
+  or a plain Docker VPS work identically;
+- `docs/DEPLOY.md`: exact commands, and the honest limits.
+
+**Deliberately not in scope:** PostgreSQL, OIDC login, horizontal scale. Each is a scale
+concern, and none is needed for a stranger's agent to join a room. The invitee path already
+requires no account — an invitation token is the credential. Deferred to M5 (below) and
+reachable without redesign, because every invariant is already engine-neutral (D-011).
+
+**Honest limits this ships with**, stated in `docs/DEPLOYMENT_MODES.md` rather than
+discovered: one instance only (SQLite on a volume does not survive horizontal scale-out), and
+one operator (rooms are created by whoever holds the instance's owner credential; anyone can
+be *invited*).
+
+**Where it stands.** Built and gated: the console exports statically, the server serves it and
+the API on one origin, and `tests/test_deployment_shape.py` pins the composition — including
+that the mount at `/` cannot swallow `/api` or `/mcp`, which is how this fails silently.
+**Not deployed**, so Hosted-lite is `implemented`, not `verified`. The remaining step is
+`fly deploy --remote-only` plus `scripts/verify_oauth_flow.py` against the live URL; nothing
+blocks it but a hosting account. `docs/DEPLOY.md` §0 carries the same caveat where someone
+following the instructions will see it.
+
+Also resolved here, because a deploy guide would otherwise have contradicted the code:
+`DEV_BOOTSTRAP*` became `BOOTSTRAP_OPERATOR` / `OPERATOR_TOKEN`. The old name asserted "never
+enable in a deployed environment" while the deploy path requires exactly that. The real rule
+was never about environment but about secrecy — a published default token must not guard a
+reachable instance — and `check_public_safety` already enforced it.
+
 ### M2.1 — Interop conformance harness
 Put N host families in one room simultaneously and assert the six properties in
 `docs/INTEROP.md` §3 — including the one that only appears in a mixed room: an
@@ -81,10 +118,11 @@ For a host that cannot call tools at all: a digest read ("what changed, what nee
 human pastes in, and a compact command block accepted back. This is the difference between
 universal and "universal if your vendor shipped an integration".
 
-### M2.5 — Hosted deployment
-Stable hostname, PostgreSQL, container image, real login (OIDC). Removes the tunnel from the
-product path entirely and closes the D-011 Postgres blocker. **Cottage tooling is frozen at
-this point** — no further investment.
+### M2.5 — ~~Hosted deployment~~ → split (D-020)
+The reachable-instance half moved forward to **M2.0** and ships now. The scale half —
+PostgreSQL, OIDC login, horizontal scale-out — moved back to **M5**, because neither is needed
+for a stranger's agent to join a room, and building them first would delay the only test that
+matters. **Cottage tooling is frozen as of M2.0** — no further investment.
 
 ### M2.6 — Cross-org invitation over the internet
 Two orgs, two hosts, one room, exercised for real: identity minimisation across the boundary,
@@ -96,6 +134,9 @@ Two orgs, two hosts, one room, exercised for real: identity minimisation across 
 3. The conformance harness passes for every path marked `implemented` or better in
    `docs/INTEROP.md` — and every row's status reflects observed reality.
 4. `python scripts/check.py` passes.
+
+Criterion 2 is the one M2.0 exists to make possible, and it is the first place the whole
+product either works or does not.
 
 ---
 
@@ -166,9 +207,19 @@ be forgotten.
 Proposals with accept/reject/delegate chains (schema, event types and `_propose_tx` exist;
 resolution does not); dependencies and blocking propagation; capability-aware routing.
 
-### M5 — Multi-tenancy & policy hardening
-Org admin surfaces, room policies, rate limiting, per-recipient privacy filtering matrix.
-Partly absorbed into M2.5, since Hosted requires real accounts.
+### M5 — Scale & multi-tenancy: when scale requires it, not before
+Deferred here from M2.5 by D-020, and deliberately demand-driven:
+
+- **PostgreSQL** — closes the D-011 blocker. Needed the moment one instance is not enough, or
+  a volume is not durable enough. Every invariant is already engine-neutral, so this is a
+  driver swap plus a migration path, not a redesign.
+- **OIDC login** — needed the moment more than one person must create rooms on the same
+  instance. Until then the operator credential is sufficient and honest.
+- **Horizontal scale-out** — blocked on PostgreSQL, since the notify-then-read bus is currently
+  in-process. Multi-instance needs the notification to cross processes (LISTEN/NOTIFY or
+  equivalent). The design already tolerates a *dropped* notification — it costs latency, not
+  data — which is what makes this tractable.
+- Org admin surfaces, room policies, rate limiting, per-recipient privacy filtering matrix.
 
 ### M6 — Retention, audit, deletion
 TTL expiry and purge with tombstones, event-log truncation with `resume_gap`, audit export.
@@ -185,12 +236,14 @@ Deepen M2.4: richer digests, pasteable turn output, lease tuning for `attended` 
   design property, not an observed one. **This is the most important open item.**
 - **PostgreSQL compatibility is argued, not demonstrated** (D-011). No invariant depends on
   SQLite locking, but that needs proving: a migration mechanism, a `TEXT` vs `timestamptz`
-  review, and the concurrency invariants (I1, I3) run against Postgres. Folded into M2.5.
-- **Hosted mode does not exist.** Everything runs on a laptop behind a rotating tunnel, so
-  "invite someone over the internet" is currently false in practice.
+  review, and the concurrency invariants (I1, I3) run against Postgres. Deferred to M5 by
+  D-020 — it is a scale blocker, not a launch blocker.
 - **A2A is a 5-line placeholder.**
-- **Consent takes a pasted principal token, not a login.** Adequate for Cottage; blocking for
-  Hosted.
+- **Consent takes a pasted principal token, not a login.** This caps Hosted-lite at one
+  operator: that person can create rooms, and anyone they invite can join without an account.
+  Blocking only when a second person needs to create rooms on the same instance (M5).
+- **Hosted-lite is single-instance.** SQLite on a volume plus an in-process bus means one
+  machine. Vertical scaling only until M5.
 - **Attended hosts are inherently weak on liveness.** No fix we are willing to build (no
   browser automation — ADR-007). M2.4/M7 mitigate with digests, not synthetic wake-ups.
 - **Duplicate detection is lexical only.** Embeddings would require inference we do not pay

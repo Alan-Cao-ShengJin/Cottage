@@ -363,7 +363,7 @@ def test_public_url_without_mcp_auth_refuses_to_start():
     config = dataclasses.replace(
         Settings(),
         public_base_url="https://romantic-hippo.trycloudflare.com",
-        dev_bootstrap=False,
+        bootstrap_operator=False,
         mcp_require_auth=False,
     )
     with pytest.raises(RuntimeError) as exc:
@@ -377,8 +377,8 @@ def test_public_url_with_mcp_auth_and_a_real_secret_is_allowed():
     config = dataclasses.replace(
         Settings(),
         public_base_url="https://romantic-hippo.trycloudflare.com",
-        dev_bootstrap=True,
-        dev_bootstrap_token="s6xk2p9qw4m7v1t8z3r5n0h6j2c4b8d1f7g9k3l5",
+        bootstrap_operator=True,
+        operator_token="s6xk2p9qw4m7v1t8z3r5n0h6j2c4b8d1f7g9k3l5",
         mcp_require_auth=True,
     )
     check_public_safety(config)

@@ -21,6 +21,19 @@ _Last updated: 2026-08-15._
 
 ---
 
+## 0. Reachability, which every row below assumes
+
+A join path is only real if a host can *get here*. Two ways to be reachable
+(`docs/DEPLOYMENT_MODES.md`):
+
+| | Status |
+|---|---|
+| **Cottage** — a laptop behind a quick tunnel | **verified**, and frozen. URL dies on restart |
+| **Hosted-lite** — one container at a stable hostname | **implemented** — built at M2.0, never deployed |
+
+Until a Hosted-lite instance answers over the internet, every row below has only ever been
+exercised against a laptop. That is the honest reading of this whole document.
+
 ## 1. Join paths
 
 A host joins through whichever adapter fits what it can speak. All four translate into ARP

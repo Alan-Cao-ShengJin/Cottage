@@ -10,10 +10,10 @@
     Uses `npx` so nothing has to be installed. Cloudflare's quick tunnel is the default
     because it needs no account; localtunnel is the fallback.
 
-    SECURITY: the server refuses to start publicly while DEV_BOOTSTRAP is on with the
+    SECURITY: the server refuses to start publicly while BOOTSTRAP_OPERATOR is on with the
     published default token (see app/config.py). Set a real secret first:
 
-        $env:DEV_BOOTSTRAP_TOKEN = -join ((48..57)+(97..122) | Get-Random -Count 40 | % {[char]$_})
+        $env:OPERATOR_TOKEN = -join ((48..57)+(97..122) | Get-Random -Count 40 | % {[char]$_})
 
     Treat the tunnel URL as a secret too: anyone holding it plus a token can act in your
     rooms. Quick tunnels are unauthenticated and world-reachable.
@@ -36,11 +36,11 @@ if (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
 }
 
 # Warn about the exact footgun the startup guard blocks, before they hit it.
-if (-not $env:DEV_BOOTSTRAP_TOKEN -or $env:DEV_BOOTSTRAP_TOKEN -eq 'dev-owner-token') {
+if (-not $env:OPERATOR_TOKEN -or $env:OPERATOR_TOKEN -eq 'dev-owner-token') {
     Write-Host ''
-    Write-Host 'WARNING: DEV_BOOTSTRAP_TOKEN is unset or still the published default.' -ForegroundColor Yellow
+    Write-Host 'WARNING: OPERATOR_TOKEN is unset or still the published default.' -ForegroundColor Yellow
     Write-Host 'The server will refuse to start once PUBLIC_BASE_URL is public. Set one:' -ForegroundColor Yellow
-    Write-Host '  $env:DEV_BOOTSTRAP_TOKEN = -join ((48..57)+(97..122) | Get-Random -Count 40 | % {[char]$_})' -ForegroundColor DarkGray
+    Write-Host '  $env:OPERATOR_TOKEN = -join ((48..57)+(97..122) | Get-Random -Count 40 | % {[char]$_})' -ForegroundColor DarkGray
     Write-Host ''
 }
 

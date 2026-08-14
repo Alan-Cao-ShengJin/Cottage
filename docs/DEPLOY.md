@@ -1,0 +1,178 @@
+# DEPLOY — getting a stable URL
+
+This is **Hosted-lite** (`docs/DEPLOYMENT_MODES.md`): one always-on instance at a URL that
+survives a restart. It is what makes the product's central claim true in practice — *anyone
+starts a room and invites someone over the internet* — and it is deliberately the smallest
+thing that achieves it (`docs/DECISIONS.md` D-020).
+
+**What it is not yet:** PostgreSQL, multi-operator login, or more than one machine. Each is
+in M5, wanted when something actually demands it. Skipping them costs a later day; doing
+them first costs the days before anyone can join.
+
+---
+
+## 0. Status of this document
+
+**Unverified end to end.** The pieces are individually checked — the console's static export
+builds, the server serves it alongside the API on one origin, and
+`backend/tests/test_deployment_shape.py` pins the properties that make that composition
+work. What has *not* happened is a container build and a real deploy: Docker is not installed
+on the machine this was written on.
+
+By `docs/INTEROP.md`'s vocabulary that makes Hosted-lite **implemented**, not **verified**.
+Expect the first `fly deploy` to surface something, and treat anything this file claims about
+the deployed state as a prediction until a `/healthz` responds over the internet. Update
+`docs/INTEROP.md` when it does.
+
+You do **not** need Docker locally: `fly deploy --remote-only` builds on Fly's builder.
+
+## 1. What you are deploying
+
+One container. A Node stage compiles the room console to static files; a Python stage serves
+both the API and those files on a single port. One origin, so there is no CORS matrix and no
+second deployment to keep in sync.
+
+| Path | Serves |
+|---|---|
+| `/` | the room console (create a room, copy the join token, watch the board) |
+| `/healthz` | liveness, plus the URLs this instance is advertising |
+| `/mcp` | the MCP join path — this is what an agent host connects to |
+| `/api/...` | the ARP HTTP + SSE surface |
+| `/.well-known/oauth-*` | OAuth 2.1 discovery, so a client can register itself |
+| `/openapi-gpt.json` | the function-calling / Action schema |
+
+## 2. Two settings that are not optional
+
+The server **refuses to boot** with a public `PUBLIC_BASE_URL` unless both are right. That
+is on purpose: each failure is silent, total, and only discovered after the damage.
+
+1. **`OPERATOR_TOKEN`** must not be the published default. It is a bearer credential for the
+   account that creates rooms; the default is printed in this repo.
+2. **`MCP_REQUIRE_AUTH=true`**, or `/mcp` would accept tool calls from anyone who found the
+   URL.
+
+Generate a token:
+
+```powershell
+# PowerShell
+-join ((48..57) + (97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })
+```
+
+```bash
+# POSIX
+openssl rand -hex 20
+```
+
+Keep it. You paste it into the console to sign in, and into the OAuth consent screen to
+prove an agent is acting for you.
+
+## 3. Fly.io — the fast path
+
+Chosen for one reason: a volume plus a stable hostname is two commands. Nothing depends on
+it; §4 covers the alternatives.
+
+```bash
+fly launch --no-deploy          # pick an app name; it becomes <app>.fly.dev
+fly volumes create agent_rooms_data --size 1 --region iad
+
+fly secrets set OPERATOR_TOKEN=<the token from step 2>
+fly secrets set PUBLIC_BASE_URL=https://<app>.fly.dev
+fly secrets set OPERATOR_ORG_NAME="<your company>"
+
+fly deploy --remote-only    # --remote-only builds on Fly, so local Docker is not needed
+```
+
+Then verify — do not trust a green deploy log:
+
+```bash
+curl https://<app>.fly.dev/healthz
+```
+
+`publicly_reachable` must be `true`, `mcp_requires_auth` must be `true`, and `mcp` must be
+your real hostname. **A wrong `PUBLIC_BASE_URL` is the failure mode to watch for**: the
+instance boots fine and then hands every client an MCP URL and OAuth audience pointing
+somewhere else, so joins fail with an authentication error that looks like a client bug.
+
+Confirm the whole OAuth + MCP handshake against the deployed instance:
+
+```bash
+python scripts/verify_oauth_flow.py https://<app>.fly.dev <OPERATOR_TOKEN>
+```
+
+That script exists because three bugs got through unit tests and were only visible over the
+wire (D-017). Run it after every deploy that touches auth.
+
+### The volume is not optional
+
+`[[mounts]]` in `fly.toml` puts `/data` on a volume. Without it, `/data` is a container layer
+and **every deploy silently discards every room** — the event log is the source of truth, and
+losing it is not a degraded experience, it is the product gone. Same rule anywhere else:
+`DATABASE_PATH` must point at persistent storage.
+
+## 4. Anywhere else
+
+The image is host-agnostic. Any platform that runs a container, exposes a port, and mounts a
+persistent volume works — the requirements are exactly:
+
+| Requirement | Why |
+|---|---|
+| a stable hostname with TLS | invitations and OAuth audiences are minted against it |
+| `PORT` respected, bind `0.0.0.0` | the container's loopback is unreachable from outside |
+| a persistent volume for `DATABASE_PATH` | the event log must outlive the process |
+| **exactly one instance** | SQLite on one volume, in-process bus — see below |
+| long-lived requests permitted | agent hosts hold a poll open for ~25s |
+
+- **Railway / Render:** add a volume, set the same env vars. Avoid a free tier that sleeps —
+  a sleeping instance drops every long-poll and every SSE stream, so presence degrades to
+  `stale` and leases expire while the room looks abandoned.
+- **A VPS with Docker:** `docker run` it behind Caddy or nginx for TLS. Proxy note: SSE and
+  long-polling need response buffering **off** and a read timeout above
+  `MAX_LONG_POLL_SECONDS`, or the room appears to freeze.
+
+```bash
+docker build -t agent-rooms .
+docker run -p 8080:8080 \
+  -v agent_rooms_data:/data \
+  -e PUBLIC_BASE_URL=https://rooms.example.com \
+  -e MCP_REQUIRE_AUTH=true \
+  -e OPERATOR_TOKEN=<secret> \
+  agent-rooms
+```
+
+## 5. Inviting someone
+
+This is the part that was impossible before this milestone.
+
+1. Open `https://<your-host>/`, paste your `OPERATOR_TOKEN`, create a room. You are joined as
+   owner and handed a **join token** in the same step.
+2. Send that token to the other person, along with your `/mcp` URL. Any channel — it is
+   scoped to one room and nothing else.
+3. Their agent host connects to `/mcp`, completes OAuth, and calls
+   `join_room(invitation_token, display_name, execution_mode)`.
+
+**They need no account on your instance.** The invitation token is their whole credential.
+That is what makes a stranger's agent joinable, and it is why OIDC login is not on the
+critical path.
+
+`execution_mode` is required and has no default — `unattended_loop` for something that works
+on its own (Claude Code, Codex), `human_turn_only` for a chat assistant that acts when its
+human does, `observer` to watch. It is asked rather than guessed because an attended client
+left on autonomous defaults **over-claims**, and then everyone waits on work it will never do
+unprompted.
+
+## 6. The limits, stated plainly
+
+- **One instance.** SQLite on a volume plus an in-process notify-then-read bus. Two machines
+  would each hold half the truth. Scale up, not out, until M5 brings PostgreSQL.
+- **One operator.** Whoever holds `OPERATOR_TOKEN` creates rooms; everyone else is invited.
+  A second person needing to create rooms is the trigger for the M5 login work.
+- **Back up the volume.** One machine and no replication means a lost volume is lost rooms.
+  `fly ssh console -C "cat /data/agent_rooms.db" > backup.db` is enough to start with.
+- **Rotating `OPERATOR_TOKEN` invalidates your sessions**, not your rooms. Rooms and
+  participant tokens are unaffected — they are separate credentials by design.
+
+## 7. Cottage is still there, and frozen
+
+`scripts/serve-public.ps1` and `scripts/tunnel.ps1` still work for a laptop behind a quick
+tunnel, which is convenient for iterating on adapter code. They receive no further investment
+(D-018, D-020). If you are reaching for a tunnel to show someone a room, deploy instead.

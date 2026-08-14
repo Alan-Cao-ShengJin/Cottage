@@ -454,3 +454,83 @@ claim has to be evidenced per host family rather than asserted once.
 client software. Until a second vendor's client actually joins a room, cross-platform is a design
 property, not an observed one. That is now the top item in the roadmap's blocker list.
 
+
+---
+
+## D-020 — Hosted-lite ships now; PostgreSQL and OIDC wait for demand
+**Date:** 2026-08-15 · **Status:** accepted · **Splits M2.5 from D-019**
+
+D-019 put Hosted deployment at M2.5 and bundled three things into it: a reachable instance,
+PostgreSQL, and OIDC login. Asked which host to deploy to, the product owner had none in mind, and
+named the actual constraint: *a working product quickly, race against time; could scale if
+required.*
+
+That reframes the bundle. Only one of the three is on the critical path.
+
+**What the central claim actually needs.** "Anyone starts a room and invites someone over the
+internet" needs a URL that survives a restart. It does not need PostgreSQL, and it does not need
+accounts — the invitee's credential *is* the invitation token, which was already true at M1.5
+(D-013). The room creator needs a credential, and on a single-operator instance the existing
+provisioned principal token is one.
+
+**So M2.5 splits.** The reachable half becomes M2.0 and lands before the conformance harness,
+because until it exists every other item in M2 is validated only against a laptop. The scale half —
+PostgreSQL, OIDC, horizontal scale-out — moves to M5, to be built when something demands it.
+
+**Hosted-lite, concretely:** one container image; a Node stage builds the console to static files
+and a Python stage serves both API and console from a single origin (so there is no CORS
+configuration to get wrong, and no second deployment to keep in sync); SQLite on a mounted volume;
+`/healthz`; `fly.toml` as the concrete fast path with the image kept host-agnostic.
+
+**Why deferring PostgreSQL is safe rather than lazy.** D-011 made every invariant engine-neutral by
+construction — UNIQUE constraints, CHECK constraints, and conditional `UPDATE ... WHERE <expected>`
+with an inspected rowcount, never SQLite locking. The swap is a driver and a migration path, not a
+redesign. Deferring it costs a later day; doing it first costs the days before anyone can join.
+
+**Two honest limits this ships with**, documented rather than discovered:
+
+1. **One instance.** SQLite on a volume, and a notify-then-read bus that is in-process, mean no
+   horizontal scale-out. Vertical only. Multi-instance needs the notification to cross processes,
+   which the design tolerates precisely because a *dropped* notification costs latency and not data
+   — consumers re-read the log.
+2. **One operator.** Rooms are created by whoever holds the instance's owner credential. Anyone can
+   be invited. This is a real product limit, not a bug, and it is the trigger condition for the M5
+   OIDC work.
+
+**The failure mode being avoided.** D-019's lesson was effort flowing into work that felt like
+progress. The mirror of tunnel plumbing is *infrastructure* plumbing: a Postgres migration and an
+OIDC integration are respectable, unarguable, and would consume the week in which a second vendor's
+client could instead have joined a room. Scale work that precedes a user is the same mistake wearing
+better clothes.
+
+---
+
+## D-021 — The bootstrap credential is the instance operator, not a dev convenience
+**Date:** 2026-08-15 · **Status:** accepted · **Renames the D-013 bootstrap path**
+
+Writing `docs/DEPLOY.md` surfaced a contradiction of exactly the kind `CLAUDE.md` says to stop
+and resolve rather than drift past. `config.py` documented the bootstrap credential as *"Never
+enable in a deployed environment"*, while the deployment path requires enabling precisely that:
+somebody has to be able to create a room on the instance.
+
+**Which side was wrong.** The code, not the plan. The real rule was never about *environment* —
+it was about *secrecy*, and `check_public_safety` already enforced the correct version: a
+publicly reachable instance may not run on the **published default** token. Secrecy is
+checkable; "is this a deployment?" is not, so a guard phrased that way could only ever have
+been advice.
+
+**Renamed accordingly:** `DEV_BOOTSTRAP` → `BOOTSTRAP_OPERATOR`, `DEV_BOOTSTRAP_TOKEN` →
+`OPERATOR_TOKEN`, and the seeded identity became configurable (`OPERATOR_ORG_NAME`,
+`OPERATOR_EMAIL`, `OPERATOR_DISPLAY_NAME`) because in a cross-company room the org name is one
+of the few fields deliberately *not* minimised away — it is what the other side sees. The slug
+is derived rather than configured: two sources for one identity is a way for them to disagree.
+
+**Why a rename earned its churn** during a milestone whose whole point was speed. A name that
+tells you not to do the thing the deploy guide tells you to do does not merely read badly — the
+next person resolves the contradiction by guessing, and half the guesses are "this deployment
+is unsafe, disable it", which locks them out of their own instance. Nothing about the *concept*
+was wrong, so the fix was one `sed` and a corrected comment.
+
+**What did not change:** `check_public_safety`'s two independent guards, the published default
+token remaining a recognisable sentinel, or the property that an agent cannot name itself
+(identity is bound by a human at OAuth consent — D-016).

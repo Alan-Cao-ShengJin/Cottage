@@ -66,6 +66,14 @@ class Settings:
         )
     )
 
+    #: Statically exported room console, served from this same origin when present.
+    #: One origin means no CORS to misconfigure and one deployment to keep in sync; when
+    #: the directory is absent (a plain `uvicorn` dev run) the API simply serves alone and
+    #: `npm run dev` supplies the console on :3000 instead.
+    console_dir: Path = field(
+        default_factory=lambda: Path(os.getenv("CONSOLE_DIR", str(REPO_ROOT / "frontend" / "out")))
+    )
+
     # --- realtime ------------------------------------------------------
     #: Server-assigned heartbeat cadence handed to every connection.
     heartbeat_interval_seconds: int = field(
@@ -100,13 +108,39 @@ class Settings:
     #: this switch cannot quietly leave a reachable endpoint open.
     mcp_require_auth: bool = field(default_factory=lambda: _bool("MCP_REQUIRE_AUTH", False))
 
-    # --- dev conveniences ----------------------------------------------
-    #: Seeds a demo org/user/token at boot so the slice is runnable immediately.
-    #: Never enable in a deployed environment; real identity is M5.
-    dev_bootstrap: bool = field(default_factory=lambda: _bool("DEV_BOOTSTRAP", True))
-    dev_bootstrap_token: str = field(
-        default_factory=lambda: os.getenv("DEV_BOOTSTRAP_TOKEN", "dev-owner-token")
+    # --- the instance operator ------------------------------------------
+    #: Seed an org, a user, and a principal token for that user at boot.
+    #:
+    #: This is deliberately not "dev only". On a Hosted-lite instance (D-020) it *is* the
+    #: identity model: one operator creates rooms, and everyone else is invited — an
+    #: invitation token is the invitee's whole credential, so no account is needed to join.
+    #: Multi-operator login is M5, wanted only when a second person must create rooms here.
+    #:
+    #: What makes that safe is not this flag but `check_public_safety`: a publicly reachable
+    #: instance may not run on the *published* default token. So the rule is about secrecy,
+    #: which is checkable, rather than about environment, which is not.
+    bootstrap_operator: bool = field(default_factory=lambda: _bool("BOOTSTRAP_OPERATOR", True))
+    operator_token: str = field(
+        default_factory=lambda: os.getenv("OPERATOR_TOKEN", "dev-owner-token")
     )
+    #: Who that operator is. Worth configuring on a deployed instance: in a cross-company
+    #: room the org name is one of the few fields deliberately *not* minimised away, so it
+    #: is what the other side sees (`docs/SECURITY.md`).
+    operator_org_name: str = field(
+        default_factory=lambda: os.getenv("OPERATOR_ORG_NAME", "Dev Org")
+    )
+    operator_email: str = field(
+        default_factory=lambda: os.getenv("OPERATOR_EMAIL", "dev@example.com")
+    )
+    operator_display_name: str = field(
+        default_factory=lambda: os.getenv("OPERATOR_DISPLAY_NAME", "Dev Owner")
+    )
+
+    @property
+    def operator_org_slug(self) -> str:
+        """Derived, not configured: two sources for one identity is a way to disagree."""
+        slug = "".join(c if c.isalnum() else "-" for c in self.operator_org_name.lower())
+        return "-".join(part for part in slug.split("-") if part) or "org"
 
     @property
     def mcp_resource_url(self) -> str:
@@ -136,25 +170,26 @@ class Settings:
         return host not in LOCAL_HOSTS
 
     @property
-    def dev_bootstrap_token_is_default(self) -> bool:
-        return self.dev_bootstrap_token == DEFAULT_DEV_TOKEN
+    def operator_token_is_default(self) -> bool:
+        return self.operator_token == DEFAULT_OPERATOR_TOKEN
 
 
 #: The published default. Anyone reading the repo knows it, so it must never guard a
 #: publicly reachable instance.
-DEFAULT_DEV_TOKEN = "dev-owner-token"
+DEFAULT_OPERATOR_TOKEN = "dev-owner-token"
 
 #: Guardrails explained in one place so the startup checks and their tests agree.
-UNSAFE_PUBLIC_BOOTSTRAP = (
+UNSAFE_PUBLIC_OPERATOR = (
     "Refusing to start: PUBLIC_BASE_URL points at a public hostname while "
-    "DEV_BOOTSTRAP is enabled with the default token.\n"
+    "BOOTSTRAP_OPERATOR is enabled with the default token.\n"
     "\n"
     "That combination hands full control of every room in this instance to anyone who "
     "finds the URL — the default token is published in .env.example and in the repo.\n"
     "\n"
     "Pick one:\n"
-    "  * set DEV_BOOTSTRAP=false and provision a token yourself, or\n"
-    "  * set DEV_BOOTSTRAP_TOKEN to a long random secret, or\n"
+    "  * set OPERATOR_TOKEN to a long random secret (this is what a real deployment "
+    "does — see docs/DEPLOY.md), or\n"
+    "  * set BOOTSTRAP_OPERATOR=false and provision a token yourself, or\n"
     "  * leave PUBLIC_BASE_URL on localhost if you are only testing locally."
 )
 
@@ -177,8 +212,8 @@ def check_public_safety(config: Settings) -> None:
     """
     if not config.is_publicly_reachable:
         return
-    if config.dev_bootstrap and config.dev_bootstrap_token_is_default:
-        raise RuntimeError(UNSAFE_PUBLIC_BOOTSTRAP)
+    if config.bootstrap_operator and config.operator_token_is_default:
+        raise RuntimeError(UNSAFE_PUBLIC_OPERATOR)
     if not config.mcp_require_auth:
         raise RuntimeError(UNSAFE_PUBLIC_MCP)
 

@@ -49,9 +49,9 @@ start** with it once `PUBLIC_BASE_URL` is public. It also refuses to start publi
 `MCP_REQUIRE_AUTH` off. Two guards, so flipping one switch cannot open the endpoint.
 
 ```powershell
-$env:DEV_BOOTSTRAP_TOKEN = -join ((48..57)+(97..122) | Get-Random -Count 40 | % {[char]$_})
+$env:OPERATOR_TOKEN = -join ((48..57)+(97..122) | Get-Random -Count 40 | % {[char]$_})
 $env:MCP_REQUIRE_AUTH = "true"
-$env:DEV_BOOTSTRAP_TOKEN     # keep this: it is what you paste at the consent screen
+$env:OPERATOR_TOKEN     # keep this: it is what you paste at the consent screen
 ```
 
 ## 2. Open a tunnel
@@ -75,7 +75,7 @@ backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend
 Verify before touching ChatGPT — this catches every misconfiguration above:
 
 ```powershell
-python scripts\verify_oauth_flow.py $env:PUBLIC_BASE_URL $env:DEV_BOOTSTRAP_TOKEN
+python scripts\verify_oauth_flow.py $env:PUBLIC_BASE_URL $env:OPERATOR_TOKEN
 ```
 
 It walks the whole flow as ChatGPT will: 401 challenge → discovery → registration → consent
@@ -96,7 +96,7 @@ Tick the risk acknowledgement and create. ChatGPT will register itself, then sen
 consent screen.
 
 **On the consent screen:**
-1. Paste your `DEV_BOOTSTRAP_TOKEN` (this proves you are you — an agent token is refused).
+1. Paste your `OPERATOR_TOKEN` (this proves you are you — an agent token is refused).
 2. Name the identity ChatGPT will act as, e.g. `ChatGPT (Alan)`. **This is the binding that
    matters**: it becomes ChatGPT's identity in every room and it cannot rename itself.
 3. The screen states what the client will and will not be able to do. It cannot list your
@@ -105,7 +105,7 @@ consent screen.
 ## 5. Give it a room
 
 ```powershell
-$h = @{ Authorization = "Bearer $env:DEV_BOOTSTRAP_TOKEN" }
+$h = @{ Authorization = "Bearer $env:OPERATOR_TOKEN" }
 $room = Invoke-RestMethod -Uri "$env:PUBLIC_BASE_URL/api/rooms" -Method Post -Headers $h `
   -ContentType application/json `
   -Body '{"name":"Build Agent Rooms","purpose":"M2: shared state and artifacts"}'

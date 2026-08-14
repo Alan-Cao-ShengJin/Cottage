@@ -11,11 +11,13 @@ import asyncio
 import contextlib
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from .adapters.mcp.auth import McpAuthMiddleware, NormalizeMcpPath
 from .adapters.mcp.server import mcp
@@ -37,6 +39,13 @@ logging.basicConfig(
 log = logging.getLogger("agent_rooms")
 
 mcp_app = mcp.streamable_http_app()
+
+#: The exported console to serve, or None if this deployment has no console compiled in.
+#: Resolved once at import: `/` is either the console or the service descriptor, decided
+#: at composition time rather than re-checked on every request.
+_CONFIGURED_CONSOLE_DIR = (
+    settings.console_dir if (settings.console_dir / "index.html").is_file() else None
+)
 
 
 async def _reaper() -> None:
@@ -66,41 +75,50 @@ async def _reaper() -> None:
             log.exception("reaper iteration failed")
 
 
-async def _bootstrap_dev_identity() -> None:
-    """Seed a dev org/user and a fixed token so the slice is runnable immediately.
+async def _bootstrap_operator_identity() -> None:
+    """Seed the instance operator: an org, a user, and a principal token for that user.
 
-    Dev only (`DEV_BOOTSTRAP`). Real identity federation is M5; nothing in `core/`
-    assumes this shape.
+    On a laptop this is a dev convenience. On a Hosted-lite instance it is the identity
+    model (D-020): this one person creates rooms, and everyone else is *invited* — an
+    invitation token is the invitee's entire credential, so joining needs no account here.
+    Multi-operator login is M5, and nothing in `core/` assumes either shape.
+
+    Idempotent, because a container restarts and the volume persists.
     """
     org_id, user_id = await rooms.ensure_org_and_user(
-        org_name="Dev Org",
-        org_slug="dev-org",
-        email="dev@example.com",
-        display_name="Dev Owner",
+        org_name=settings.operator_org_name,
+        org_slug=settings.operator_org_slug,
+        email=settings.operator_email,
+        display_name=settings.operator_display_name,
     )
     await rooms.set_principal_token(
-        token=settings.dev_bootstrap_token,
+        token=settings.operator_token,
         subject_kind="user",
         subject_id=user_id,
         org_id=org_id,
-        label="dev bootstrap",
+        label="instance operator",
     )
-    log.warning(
-        "DEV_BOOTSTRAP is on: user %s authenticates with DEV_BOOTSTRAP_TOKEN. "
-        "Never enable this outside local development.",
-        user_id,
-    )
+    # Only alarming in the case that is actually alarming. `check_public_safety` has
+    # already refused to boot if this token is the published default while reachable.
+    if settings.operator_token_is_default:
+        log.warning(
+            "operator %s authenticates with the PUBLISHED DEFAULT OPERATOR_TOKEN. "
+            "Fine locally; set a real secret before exposing this instance.",
+            user_id,
+        )
+    else:
+        log.info("operator %s ready | org=%s", user_id, settings.operator_org_name)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Before anything else: refuse to run a publicly reachable instance guarded by a
-    # credential published in this repo. See config.UNSAFE_PUBLIC_BOOTSTRAP.
+    # credential published in this repo. See config.UNSAFE_PUBLIC_OPERATOR.
     check_public_safety(settings)
 
     await init_db()
-    if settings.dev_bootstrap:
-        await _bootstrap_dev_identity()
+    if settings.bootstrap_operator:
+        await _bootstrap_operator_identity()
 
     reaper = asyncio.create_task(_reaper())
     log.info(
@@ -119,59 +137,18 @@ async def lifespan(app: FastAPI):
             bus.clear()
 
 
-app = FastAPI(
-    title="Agent Rooms",
-    version="0.2.0",
-    description=(
-        "A provider-neutral live collaboration network for independently owned AI "
-        "agents. Coordination, not inference."
-    ),
-    lifespan=lifespan,
-)
+def service_descriptor(*, console: bool) -> dict[str, Any]:
+    """What this instance is and how to attach to it.
 
-# Must sit outside routing so `/mcp` reaches the mount instead of being redirected.
-app.add_middleware(NormalizeMcpPath, mount_path="/mcp")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=list(settings.cors_origins),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-)
-
-
-@app.exception_handler(RoomError)
-async def room_error_handler(_: Request, exc: RoomError) -> JSONResponse:
-    """Domain errors are structured data with a stable `error` code, so a
-    coordinating agent can branch on the reason rather than parse prose."""
-    return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
-
-
-app.include_router(router)
-app.include_router(oauth_router)
-
-# The MCP app is wrapped, not mounted bare: unauthenticated requests must not reach the
-# protocol machinery, and the 401 challenge that points clients at the authorization
-# server has to be an HTTP response, which a tool cannot produce.
-app.mount(
-    "/mcp",
-    McpAuthMiddleware(
-        mcp_app,
-        resource_metadata_url=(
-            f"{settings.public_base_url.rstrip('/')}/.well-known/oauth-protected-resource"
-        ),
-        audience=mcp_resource_url(),
-    ),
-)
-
-
-@app.get("/")
-async def index() -> dict[str, Any]:
+    Doubles as the health payload. Deliberately more than `{"ok": true}`: a deploy that
+    boots but advertises the wrong `PUBLIC_BASE_URL` hands every client a broken MCP URL
+    and OAuth audience, and that failure is otherwise silent until a join fails. Here it
+    is visible in one curl.
+    """
     base = settings.public_base_url.rstrip("/")
     return {
         "service": "agent-rooms",
+        "status": "ok",
         "protocol": "arp/1",
         "docs": "/docs",
         "api": "/api",
@@ -181,14 +158,96 @@ async def index() -> dict[str, Any]:
         "oauth_protected_resource": f"{base}/.well-known/oauth-protected-resource",
         "mcp_requires_auth": settings.mcp_require_auth,
         "publicly_reachable": settings.is_publicly_reachable,
+        "console": console,
     }
 
 
-@app.get("/openapi-gpt.json")
-async def openapi_for_chatgpt() -> dict[str, Any]:
-    """OpenAPI 3.0.3 document for a ChatGPT custom-GPT Action.
+def build_app(console_dir: Path | None = _CONFIGURED_CONSOLE_DIR) -> FastAPI:
+    """Compose the service.
 
-    Separate from `/openapi.json`, which stays a truthful 3.1 document for everything
-    else. See `api/gpt_schema.py` for why the translation is needed.
+    A factory rather than a module-level script for one reason: whether a console is
+    present changes the route table, and the ordering that keeps both working is fragile
+    enough to deserve a test that builds it both ways
+    (`tests/test_deployment_shape.py`). `console_dir` is None when this image has no
+    console — a plain `uvicorn` dev run, where `npm run dev` serves it on :3000 instead.
     """
-    return build_gpt_schema(app.openapi(), public_base_url=settings.public_base_url)
+    app = FastAPI(
+        title="Agent Rooms",
+        version="0.2.0",
+        description=(
+            "A provider-neutral live collaboration network for independently owned AI "
+            "agents. Coordination, not inference."
+        ),
+        lifespan=lifespan,
+    )
+
+    # Must sit outside routing so `/mcp` reaches the mount instead of being redirected.
+    app.add_middleware(NormalizeMcpPath, mount_path="/mcp")
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(settings.cors_origins),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+    )
+
+    @app.exception_handler(RoomError)
+    async def room_error_handler(_: Request, exc: RoomError) -> JSONResponse:
+        """Domain errors are structured data with a stable `error` code, so a
+        coordinating agent can branch on the reason rather than parse prose."""
+        return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
+
+    app.include_router(router)
+    app.include_router(oauth_router)
+
+    # The MCP app is wrapped, not mounted bare: unauthenticated requests must not reach
+    # the protocol machinery, and the 401 challenge that points clients at the
+    # authorization server has to be an HTTP response, which a tool cannot produce.
+    app.mount(
+        "/mcp",
+        McpAuthMiddleware(
+            mcp_app,
+            resource_metadata_url=(
+                f"{settings.public_base_url.rstrip('/')}/.well-known/oauth-protected-resource"
+            ),
+            audience=mcp_resource_url(),
+        ),
+    )
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, Any]:
+        """Liveness for the platform, and identity for us.
+
+        Separate from `/`, which belongs to the console when there is one. A health check
+        must not depend on whether the frontend was compiled into the image.
+        """
+        return service_descriptor(console=console_dir is not None)
+
+    @app.get("/openapi-gpt.json")
+    async def openapi_for_chatgpt() -> dict[str, Any]:
+        """OpenAPI 3.0.3 document for a ChatGPT custom-GPT Action.
+
+        Separate from `/openapi.json`, which stays a truthful 3.1 document for everything
+        else. See `api/gpt_schema.py` for why the translation is needed.
+        """
+        return build_gpt_schema(app.openapi(), public_base_url=settings.public_base_url)
+
+    # Registered last, and it must stay last: a mount at "/" matches everything Starlette
+    # has not already matched, so any route declared after it becomes unreachable. That
+    # failure is silent and total, which is why a test asserts the ordering.
+    if console_dir is not None:
+        app.mount("/", StaticFiles(directory=console_dir, html=True), name="console")
+        log.info("serving the room console from %s", console_dir)
+    else:
+
+        @app.get("/")
+        async def index() -> dict[str, Any]:
+            """No console here, so the root answers as the service itself."""
+            return service_descriptor(console=False)
+
+    return app
+
+
+app = build_app()

@@ -159,6 +159,7 @@ decided explicitly and recorded in `docs/DECISIONS.md`.
 |---|---|
 | `docs/INTEROP.md` | **Which hosts can share a room, and whether we have observed it.** The universality record |
 | `docs/DEPLOYMENT_MODES.md` | Cottage (a laptop, temporary) vs Hosted (the product). Read before any exposure work |
+| `docs/DEPLOY.md` | How to get a stable URL: the container, the two mandatory settings, the limits |
 | `docs/PRODUCT.md` | Canonical behavior/UX, what this is and is not, connection states, host capabilities |
 | `docs/ARCHITECTURE.md` | Domain model, realtime architecture, adapter boundaries, tenancy, ADRs |
 | `docs/PROTOCOL.md` | ARP events/commands, leases, presence, reconnect/replay, artifact conflicts |

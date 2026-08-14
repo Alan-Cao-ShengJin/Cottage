@@ -1,0 +1,36 @@
+# Keep the build context small and, more importantly, keep local state and secrets out of
+# the image. An accidentally copied `backend/data/*.db` would ship someone's rooms; an
+# accidentally copied `.env` would ship their operator token.
+
+.git
+.gitignore
+.vscode
+.mcp.json
+
+# Secrets and local state.
+.env
+*.env
+!.env.example
+backend/data
+*.db
+*.db-wal
+*.db-shm
+
+# Rebuilt inside the image; copying the host's version would fight the build and, on
+# Windows, ship native modules the Linux stage cannot execute.
+frontend/node_modules
+frontend/out
+frontend/.next
+frontend/tsconfig.tsbuildinfo
+
+# Nothing the running service needs.
+backend/.venv
+backend/tests
+backend/.mypy_cache
+backend/.pytest_cache
+**/__pycache__
+docs
+scripts
+Dockerfile
+.dockerignore
+CLAUDE.md

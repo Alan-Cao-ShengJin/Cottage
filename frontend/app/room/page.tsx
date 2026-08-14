@@ -1,22 +1,25 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
-import { Activity } from "../../../components/Activity";
-import { CurrentWork } from "../../../components/CurrentWork";
-import { PresenceRail } from "../../../components/Presence";
-import { TaskBoard } from "../../../components/TaskBoard";
-import { api, ArpError, clearSession, loadSession, type Session } from "../../../lib/api";
-import { openConflicts, openWork, useNow, useRoom } from "../../../lib/useRoom";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Activity } from "../../components/Activity";
+import { CurrentWork } from "../../components/CurrentWork";
+import { PresenceRail } from "../../components/Presence";
+import { TaskBoard } from "../../components/TaskBoard";
+import { api, ArpError, clearSession, loadSession, type Session } from "../../lib/api";
+import { openConflicts, openWork, useNow, useRoom } from "../../lib/useRoom";
 
 /**
  * The room screen: presence rail, current work, task board, activity feed.
  *
  * Not a chat window. The layout puts "who is here and what are they doing" first,
  * because that is the question the product exists to answer.
+ *
+ * The room id arrives as `?room=`, not as a path segment, because the console is a static
+ * export and a build cannot pre-render an id that does not exist yet (`next.config.js`).
  */
-export default function RoomPage() {
-  const params = useParams<{ roomId: string }>();
+function RoomView() {
+  const roomId = useSearchParams().get("room");
   const router = useRouter();
   const [session, setSession] = useState<Session | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -26,12 +29,14 @@ export default function RoomPage() {
 
   useEffect(() => {
     const existing = loadSession();
-    if (!existing || existing.roomId !== params.roomId) {
+    // A room screen with no matching session cannot show anything truthful, so it sends
+    // you back to the console rather than rendering an empty board.
+    if (!existing || existing.roomId !== roomId) {
       router.replace("/");
       return;
     }
     setSession(existing);
-  }, [params.roomId, router]);
+  }, [roomId, router]);
 
   const { snapshot, state, error: streamError, activity, refresh } = useRoom(session);
 
@@ -229,5 +234,17 @@ export default function RoomPage() {
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * `useSearchParams` reads something that only exists in the browser, so a prerendered page
+ * must declare a boundary for it. Without this the static export fails to build.
+ */
+export default function RoomPage() {
+  return (
+    <Suspense fallback={null}>
+      <RoomView />
+    </Suspense>
   );
 }
