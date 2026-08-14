@@ -45,7 +45,7 @@ REDIRECT = "https://chatgpt.com/aip/callback"
 
 
 def ok(label: str, detail: str = "") -> None:
-    print(f"  [ok] {label}{(' — ' + detail) if detail else ''}")
+    print(f"  [ok] {label}{(' - ' + detail) if detail else ''}")
 
 
 def unwrap(result):

@@ -20,6 +20,28 @@ Two obstacles, in order:
 
 ---
 
+## The short version
+
+From the repo root (`D:\Code\Collab` — the scripts use relative paths):
+
+```powershell
+cd D:\Code\Collab
+powershell -ExecutionPolicy Bypass -File scripts\serve-public.ps1
+```
+
+That generates a token, opens a tunnel, points the server at the tunnel URL, starts it,
+verifies the whole OAuth flow, and prints the two values you paste into ChatGPT. Ctrl+C stops
+both.
+
+It exists because doing this by hand has four steps that are each easy to get wrong — and one
+that is nearly invisible: the token must be set in the shell running the *server*, so setting
+it in the shell that runs the tunnel silently gives you a server with a different credential.
+
+The rest of this document is what that script does, for when you need to do it manually or
+something fails.
+
+---
+
 ## 1. Set a real token and require auth
 
 The default token (`dev-owner-token`) is published in this repo, so the server **refuses to
