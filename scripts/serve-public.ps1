@@ -56,6 +56,50 @@ if (-not $Token) {
 $env:DEV_BOOTSTRAP_TOKEN = $Token
 $env:MCP_REQUIRE_AUTH = 'true'
 
+# --- the port must be free BEFORE we burn a tunnel URL -----------------------
+# Learned the hard way: with the port already taken, the server died at startup, the
+# tunnel happily forwarded to whatever *else* was listening, and verification reported a
+# confusing `307` from a stale build instead of "the port was in use". Fail here, loudly,
+# before anything is exposed.
+function Get-PortHolder {
+    param([int]$PortNumber)
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $PortNumber -State Listen -ErrorAction Stop |
+            Select-Object -First 1
+        if ($conn) {
+            $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+            return [pscustomobject]@{
+                Pid  = $conn.OwningProcess
+                Name = if ($proc) { $proc.ProcessName } else { 'unknown' }
+            }
+        }
+    }
+    catch {
+        # Get-NetTCPConnection throws when nothing matches; fall through to the bind probe.
+    }
+    # Fallback for environments without the cmdlet: try to bind it ourselves.
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $PortNumber)
+        $listener.Start()
+        $listener.Stop()
+        return $null
+    }
+    catch {
+        return [pscustomobject]@{ Pid = 0; Name = 'unknown' }
+    }
+}
+
+$holder = Get-PortHolder -PortNumber $Port
+if ($holder) {
+    Write-Host ''
+    Write-Host "Port $Port is already in use by PID $($holder.Pid) ($($holder.Name))." -ForegroundColor Yellow
+    Write-Host 'That is usually a server left over from an earlier run. Either stop it:' -ForegroundColor Yellow
+    Write-Host "    Stop-Process -Id $($holder.Pid) -Force" -ForegroundColor DarkGray
+    Write-Host '  or use a different port:' -ForegroundColor Yellow
+    Write-Host "    powershell -ExecutionPolicy Bypass -File scripts\serve-public.ps1 -Port 8001" -ForegroundColor DarkGray
+    exit 1
+}
+
 $tunnelLog = Join-Path $env:TEMP "agent-rooms-tunnel-$PID.log"
 $tunnel = $null
 $server = $null
@@ -109,11 +153,39 @@ try {
         -ArgumentList '-m', 'uvicorn', 'app.main:app', '--port', $Port, '--app-dir', 'backend' `
         -PassThru -NoNewWindow
 
+    # Confirm *our* server is the one answering before trusting any verification result.
+    # Without this the script once verified against a stale process on the same port and
+    # reported its unrelated failure as ours.
+    $ready = $false
+    $deadline = (Get-Date).AddSeconds(30)
+    while (-not $ready -and (Get-Date) -lt $deadline) {
+        if ($server.HasExited) { break }
+        Start-Sleep -Milliseconds 700
+        try {
+            $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 3
+            if ($health.protocol -eq 'arp/1') { $ready = $true }
+        }
+        catch {
+            # not up yet
+        }
+    }
+
+    if ($server.HasExited) {
+        Write-Host ''
+        Write-Host 'The server exited during startup - see its output above.' -ForegroundColor Yellow
+        Write-Host 'A startup guard may have refused to run; the message says which.' -ForegroundColor Yellow
+        exit 1
+    }
+    if (-not $ready) {
+        Write-Host ''
+        Write-Host "The server did not answer on http://127.0.0.1:$Port within 30s." -ForegroundColor Yellow
+        exit 1
+    }
+
     if (-not $SkipVerify) {
-        # Wait for readiness, then walk the whole OAuth + MCP flow. This is what catches a
-        # mismatched PUBLIC_BASE_URL, a Host-allowlist rejection, or a failed discovery
-        # document -- all of which otherwise surface as an opaque failure inside ChatGPT.
-        Start-Sleep -Seconds 6
+        # Walk the whole OAuth + MCP flow. This catches a mismatched PUBLIC_BASE_URL, a
+        # Host-allowlist rejection, or a failed discovery document -- all of which
+        # otherwise surface as an opaque failure inside ChatGPT.
         Write-Host 'Verifying the flow end to end...' -ForegroundColor Cyan
         & $python (Join-Path $root 'scripts\verify_oauth_flow.py') $publicUrl $Token
         if ($LASTEXITCODE -ne 0) {
@@ -129,7 +201,11 @@ try {
 
     Write-Host ''
     Write-Host 'Running. Ctrl+C to stop both.' -ForegroundColor DarkGray
-    Wait-Process -Id $server.Id
+    # Guarded: a server that has already exited would make Wait-Process throw a red error
+    # on top of whatever actually went wrong.
+    if (-not $server.HasExited) {
+        Wait-Process -Id $server.Id -ErrorAction SilentlyContinue
+    }
 }
 finally {
     foreach ($proc in @($server, $tunnel)) {
