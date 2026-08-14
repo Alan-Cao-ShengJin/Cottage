@@ -289,6 +289,9 @@ participation route.
 4. `join_room` returns a plain-language `what_this_means`, so a client knows its lease ceiling and why
    â€” rather than inferring it from flags and guessing wrong.
 
+_Superseded in part by D-016: with OAuth in place, an authenticated client's identity comes
+from its token and the self-chosen `display_name` is ignored._
+
 **Not adopted: requiring MCP and refusing other transports.** What "everyone must have MCP" is really
 asking for â€” every participant is reachable and can do real work â€” is already enforced by capabilities:
 without `supports_tools` and either background execution or an opted-in room policy, a participant
@@ -325,3 +328,65 @@ under a different name.
 **Rejected: multiple concurrent tokens per participant.** It would avoid invalidating a live session,
 but needs a token table, a revocation surface, and an answer for which token a `presence.changed` event
 belongs to. Not worth it for a case that has a one-word workaround ("use a different display name").
+
+---
+
+## D-016 — OAuth 2.1 with human-bound identity is the connection path for hosted agents
+**Date:** 2026-08-15 · **Status:** accepted · **Pulls M5 identity work forward**
+
+ChatGPT's custom-plugin dialog takes a server URL and defaults to **OAuth**, discovering
+configuration from the MCP endpoint. So the MCP authorization spec is not a hardening option
+we chose — it is the only way a hosted client can attach. It also happened to be exactly the
+"real auth before exposure" the product owner asked for, so the two requirements collapsed
+into one piece of work.
+
+Implemented: RFC 9728 protected-resource metadata, RFC 8414 authorization-server metadata,
+RFC 7591 dynamic registration (public clients, no secret), authorization code + PKCE `S256`
+only, refresh rotation, RFC 8707 audience binding, RFC 7009 revocation.
+
+**The decision that matters most is where identity comes from.** The authorization code
+carries an `agent_identity_id` a *human* selected at the consent screen, and the access
+token's subject is that identity. Before this, a client redeeming a join token chose its own
+`display_name`, so identity was a claim; in a cross-org room a display name is what other
+participants trust, which made that a real integrity hole. Consent refuses an identity the
+consenting human does not own, and refuses an agent token outright — an agent must not
+authorize another agent.
+
+**Rejected: `plain` PKCE** (advertising it invites use, and public clients get no secret, so
+the code alone must never suffice). **Rejected: treating a code replay as a stale request** —
+`consumed_at` is a guard column rather than a delete so a replay is *detectable*, and when it
+happens the tokens the first exchange produced are revoked, because the code evidently
+leaked. **Rejected: accepting any non-http redirect scheme** for native clients; that admitted
+`ftp://`, so a reverse-DNS private-use scheme is required (RFC 8252 §7.1).
+
+**Two independent startup guards** refuse public exposure with the repo's published default
+token, or with `MCP_REQUIRE_AUTH` off. Two rather than one, so flipping a single switch cannot
+open the endpoint. The permissive mode stays for local development because the alternative is a
+browser round-trip per restart, and a guard is a better control than a warning.
+
+---
+
+## D-017 — Verify the auth path over the wire; unit tests cannot see these failures
+**Date:** 2026-08-15 · **Status:** accepted
+
+Three bugs shipped green through 172 unit tests and were caught only by driving a real client
+against a real server. Recording them because they share a shape: each was a false pass created
+by the test harness being *more convenient* than reality.
+
+1. **The authenticated principal was invisible inside a tool.** The ASGI middleware set a
+   `ContextVar`; streamable HTTP runs tool calls in the session's task, created on an earlier
+   request, so the value did not propagate. The unit test set the var in the same task and
+   passed. Fixed by reading the bearer token from the per-message request context
+   (`ctx.request_context.request`), with the SDK's auth context and the ContextVar as fallbacks.
+2. **Identity resolved correctly and the room still showed a spoofed name.** `join_room` accepts
+   a per-room display name (D-015), and the client's value was winning over the bound identity —
+   the bug lived *between* two individually-correct steps. `_resolve_identity` now returns the
+   effective name alongside the identity, so the decision is made where authentication is known.
+3. **`421 Misdirected Request` on any non-loopback host.** The MCP SDK enables DNS-rebinding
+   protection with a loopback-only allowlist, so a tunnelled server would have refused ChatGPT
+   every request, before auth and before routing, with only a log line. The allowlist is now
+   derived from `PUBLIC_BASE_URL`: whatever address we publish is an address we must accept.
+
+`scripts/verify_oauth_flow.py` is kept in the repo for this reason, and both (1) and (2) now
+have regression tests that use a fake per-message request context rather than the ContextVar —
+asserting through the ContextVar would recreate the original false pass.

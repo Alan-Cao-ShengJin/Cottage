@@ -117,8 +117,12 @@ interactive lease policy tuning.
   depends on SQLite locking today, but that is currently argued rather than demonstrated. Needs: a
   migration mechanism, a `TEXT` vs `timestamptz` review, and the concurrency invariants (I1, I3) run
   against Postgres.
-- **Auth is dev-only in M1.** `DEV_BOOTSTRAP_TOKEN` stands in for OIDC. Real identity federation is
-  M5; nothing in `core/` may assume the dev shape.
+- **Partially resolved (D-016): OAuth 2.1 for MCP clients has landed**, pulled forward from M5
+  because ChatGPT's connector dialog requires it. Discovery, dynamic registration, PKCE `S256`,
+  audience binding, refresh rotation, revocation, and a consent screen that binds the agent
+  identity are all implemented and verified over the wire. Still outstanding for M5: a real login
+  on the consent screen (it currently takes a pasted principal token), org admin surfaces, and
+  cross-org invitation flows. `DEV_BOOTSTRAP_TOKEN` remains the human's credential until then.
 - ~~**The room creator is not automatically a participant.**~~ **Resolved (D-013).** `room.create`
   now joins the creator as owner and mints the default join token in the same transaction. The
   hand-seeded owner row is gone from both test files and the MCP adapter gained `create_room`, so an

@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from ...config import settings
 from ...core import (
@@ -52,6 +54,7 @@ from ...domain.commands import (
 from ...domain.disclosure import Audience, Disclosure
 from ...domain.room import Participant, PrivacyClass, RoomVisibility
 from ...domain.work import WorkStatus
+from .auth import principal_for_tool
 
 log = logging.getLogger(__name__)
 
@@ -64,11 +67,43 @@ INSTRUCTIONS = (
     "will lose them."
 )
 
+
+def transport_security() -> TransportSecuritySettings:
+    """Host/Origin allowlist for the MCP transport.
+
+    The SDK enables DNS-rebinding protection by default, which validates the `Host`
+    header against an allowlist. Its built-in list covers loopback only, so a server
+    behind a tunnel answers `421 Misdirected Request` to every request — before auth,
+    before routing, with only a log line to explain it. Found by pointing a client at a
+    non-loopback host.
+
+    So the allowlist is derived from `PUBLIC_BASE_URL`: whatever address we tell clients
+    to use is, by definition, an address we must accept. Loopback stays for local
+    development, and the console's origins come from the CORS allowlist.
+    """
+    hosts = ["localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "[::1]", "[::1]:*"]
+    origins = list(settings.cors_origins)
+
+    parsed = urlparse(settings.public_base_url)
+    if parsed.hostname:
+        # Both bare and wildcard-port forms: a tunnel URL has no explicit port, but a
+        # self-hosted deployment usually does.
+        hosts += [parsed.netloc, parsed.hostname, f"{parsed.hostname}:*"]
+        origins.append(f"{parsed.scheme}://{parsed.netloc}")
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=sorted(set(hosts)),
+        allowed_origins=sorted(set(origins)),
+    )
+
+
 mcp = FastMCP(
     name="agent-rooms",
     # Mounted at /mcp by main.py, so the inner route is the mount root.
     streamable_http_path="/",
     instructions=INSTRUCTIONS,
+    transport_security=transport_security(),
 )
 
 #: MCP session → participant token. A session holds one participant, so this
@@ -380,14 +415,16 @@ async def join_room(
         declared = list(EXECUTION_MODES[execution_mode])
 
         host_class = MODE_HOST_LABELS[execution_mode]
-        identity = await _provision_identity(
-            invitation_token, display_name, description, declared, host_class
+        identity, effective_name = await _resolve_identity(
+            invitation_token, display_name, description, declared, host_class, ctx
         )
         result = await rooms.join_room(
             identity=identity,
             command=JoinRoomCommand(
                 invitation_token=invitation_token,
-                display_name=display_name,
+                # `effective_name`, not `display_name`: when a credential bound the
+                # identity, the caller's requested name is ignored.
+                display_name=effective_name,
                 host_class=host_class,
                 capabilities=declared,
                 description=description,
@@ -418,6 +455,8 @@ async def join_room(
             "cursor": snapshot["snapshot_seq"],
             "snapshot": snapshot,
             "execution_mode": execution_mode,
+            "display_name": effective_name,
+            "display_name_was_overridden": effective_name != display_name,
             # State plainly what this mode bought, so the client is not guessing and the
             # other participants' view of it matches its own.
             "what_this_means": _explain(execution_mode, negotiated.runtime),
@@ -456,29 +495,39 @@ def _explain(execution_mode: str, runtime) -> str:
     )
 
 
-async def _provision_identity(
+async def _resolve_identity(
     invitation_token: str,
     display_name: str,
     description: str,
     declared: list[Capability],
     host_class: HostClass = HostClass.PERSISTENT_LOCAL,
-):
+    ctx: Context | None = None,
+) -> tuple[Any, str]:
     """Resolve the agent identity this MCP client acts as.
 
-    A local agent arrives holding an invitation and nothing else — M1 has no
-    agent-identity credential. The invitation is therefore the authorization, and the
-    identity is provisioned in the inviting room's org.
+    **Authenticated path (preferred).** When an OAuth access token is present, the
+    identity comes from the token — a human bound it at the consent screen. `display_name`
+    is ignored, which is the point: an agent must not be able to name itself, because in a
+    cross-company room a name is what other participants trust.
 
-    An earlier version created the identity in a fixed "dev org", which made every
-    internal room correctly refuse the connection as a foreign-org identity. That was
-    the tenancy check working; the adapter was wrong. M5 replaces this with real
-    provisioning and `core` is unaffected, because it only ever sees an `AgentIdentity`.
+    **Unauthenticated path (local development only).** With `MCP_REQUIRE_AUTH=false` there
+    is no credential, so the invitation is the only authorization available and the client
+    names itself. Get-or-create keyed on that name, so a restarting agent resolves to the
+    same identity instead of littering the room with ghosts of itself. The startup guard
+    refuses to expose this path publicly.
     """
+    principal = await principal_for_tool(ctx, settings.mcp_resource_url)
+    if principal is not None and principal.identity is not None:
+        # Return the bound name alongside the identity. Returning only the identity was
+        # not enough: `join_room` accepts a per-room `display_name` (D-015), so a caller
+        # could keep its bound identity and still *present* under any name it liked. A
+        # wire test caught exactly that — the token resolved correctly and the room still
+        # showed "Totally Someone Else". The effective name has to be decided here, where
+        # we know whether the caller was authenticated.
+        return principal.identity, principal.identity.display_name
+
     org_id, user_id = await rooms.provisioning_context_for_invitation(invitation_token)
-    # Get-or-create, keyed on display name: an agent that reconnects must resolve to the
-    # *same* identity, or every restart would mint a new identity and a new participant,
-    # littering the room with ghosts of itself.
-    return await rooms.ensure_identity(
+    identity = await rooms.ensure_identity(
         org_id=org_id,
         owner_user_id=user_id,
         display_name=display_name,
@@ -486,6 +535,7 @@ async def _provision_identity(
         description=description,
         capabilities=declared,
     )
+    return identity, display_name
 
 
 @mcp.tool()

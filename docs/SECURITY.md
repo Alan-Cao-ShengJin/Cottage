@@ -166,7 +166,69 @@ stay authoritative and gaps in a recipient's view are expected and must not be t
 - Admin actions (invite, scope change, removal, policy change, close, purge) are events like any
   other and are visible to the room.
 
-## 8. Operational security
+## 8. OAuth 2.1 for hosted agent clients
+
+A hosted agent host (ChatGPT and similar) is configured with nothing but a server URL and
+discovers the rest. So this flow is the connection path, not a hardening extra — without it
+such a client cannot attach at all.
+
+**Endpoints** (`api/oauth.py`, `core/oauth.py`):
+
+| Path | Purpose |
+|---|---|
+| `/.well-known/oauth-protected-resource` | RFC 9728 — names the authorization server guarding `/mcp` |
+| `/.well-known/oauth-authorization-server` | RFC 8414 — endpoint metadata |
+| `/oauth/register` | RFC 7591 dynamic client registration, public clients only |
+| `/oauth/authorize` | consent screen (GET) and submission (POST) |
+| `/oauth/token` | authorization-code exchange and refresh rotation |
+| `/oauth/revoke` | RFC 7009 |
+
+**The properties that matter, and why:**
+
+- **The human binds the identity.** The authorization code carries an `agent_identity_id`
+  chosen by a human at the consent screen, and the access token's subject is that identity.
+  An agent therefore cannot name itself — which matters because in a cross-org room a
+  display name is what other participants trust. The consent screen refuses an identity the
+  consenting human does not own, and refuses an agent token outright (an agent must not
+  authorize another agent).
+- **Public clients, so PKCE is mandatory.** No client secret is issued because there is
+  nowhere safe to keep one. `S256` only; `plain` is refused rather than tolerated, and the
+  metadata advertises only `S256` so a client is not invited to try.
+- **Codes are single-use, and a replay is treated as theft.** `consumed_at` is a guard
+  column rather than a delete, so a second exchange is *detectable*; when it happens, the
+  tokens the first exchange produced are revoked, because the code evidently leaked.
+- **Refresh tokens rotate**, recording what replaced them. Reusing a rotated token revokes
+  the chain and logs it.
+- **Tokens are bound to a resource** (RFC 8707). A token issued for another deployment is
+  refused with 403 rather than 401 — re-authenticating would not help, and a 401 would send
+  the client into a pointless discovery loop.
+- **Never redirect an unvalidated request.** An unregistered `redirect_uri` is answered
+  directly, because redirecting is exactly how a code reaches an attacker. Registration
+  accepts https, loopback http, or a reverse-DNS private-use scheme (RFC 8252 §7.1) — not
+  any non-http scheme, which would have admitted `ftp://`.
+
+**Transport enforcement** (`adapters/mcp/auth.py`) sits in front of the MCP app, not inside
+the tools: an unauthenticated request must not reach the protocol machinery, and the
+`WWW-Authenticate: Bearer resource_metadata="…"` challenge that starts discovery has to be
+an HTTP response, which a tool cannot produce.
+
+**Two independent startup guards** (`config.check_public_safety`) refuse to boot a publicly
+reachable instance that is either using the repo's published default token or has
+`MCP_REQUIRE_AUTH` off. Two checks rather than one, so turning off a single switch cannot
+open the endpoint.
+
+### Known limits of this flow
+
+- **Identity is only as good as the consenting human's judgement.** Consent binds *an*
+  identity; it does not verify that the client is what it claims to be.
+- **`MCP_REQUIRE_AUTH=false` remains for local development.** It is a real hole if exposed,
+  which is why the startup guard, not documentation, is what prevents that.
+- **Access tokens are opaque and checked against the database on every request.** Simple and
+  revocable, but it means no stateless verification and one read per call.
+- **The consent screen authenticates with a principal token pasted into a form.** Adequate
+  for development; a real login belongs to M5.
+
+## 9. Operational security
 
 - Tokens: invitation tokens and participant tokens are random ≥256-bit values, stored hashed, shown
   once. Participant tokens are scoped to one room and revocable.

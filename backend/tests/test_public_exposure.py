@@ -70,10 +70,13 @@ def test_public_url_with_the_published_default_token_refuses_to_start(base_url):
 
 
 def test_public_url_with_a_real_secret_is_allowed():
+    """`mcp_require_auth` is set too: exposure needs *both* guards satisfied, and this
+    test is about the bootstrap one specifically."""
     config = _settings(
         public_base_url="https://romantic-hippo.trycloudflare.com",
         dev_bootstrap=True,
         dev_bootstrap_token="s6xk2p9qw4m7v1t8z3r5n0h6j2c4b8d1f7g9k3l5",
+        mcp_require_auth=True,
     )
     check_public_safety(config)
 
@@ -83,8 +86,41 @@ def test_public_url_with_bootstrap_disabled_is_allowed():
         public_base_url="https://agent-rooms.example.com",
         dev_bootstrap=False,
         dev_bootstrap_token=DEFAULT_DEV_TOKEN,
+        mcp_require_auth=True,
     )
     check_public_safety(config)
+
+
+def test_the_two_guards_are_independent():
+    """Satisfying one must not excuse the other — otherwise flipping a single switch
+    reopens the endpoint."""
+    from app.config import UNSAFE_PUBLIC_BOOTSTRAP, UNSAFE_PUBLIC_MCP
+
+    public = "https://romantic-hippo.trycloudflare.com"
+
+    # Real secret, but MCP auth off.
+    with pytest.raises(RuntimeError) as exc:
+        check_public_safety(
+            _settings(
+                public_base_url=public,
+                dev_bootstrap=True,
+                dev_bootstrap_token="s6xk2p9qw4m7v1t8z3r5n0h6j2c4b8d1f7g9k3l5",
+                mcp_require_auth=False,
+            )
+        )
+    assert str(exc.value) == UNSAFE_PUBLIC_MCP
+
+    # MCP auth on, but the published default token still in play.
+    with pytest.raises(RuntimeError) as exc:
+        check_public_safety(
+            _settings(
+                public_base_url=public,
+                dev_bootstrap=True,
+                dev_bootstrap_token=DEFAULT_DEV_TOKEN,
+                mcp_require_auth=True,
+            )
+        )
+    assert str(exc.value) == UNSAFE_PUBLIC_BOOTSTRAP
 
 
 # ---------------------------------------------------------------------------

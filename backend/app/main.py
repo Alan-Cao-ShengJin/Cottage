@@ -17,8 +17,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .adapters.mcp.auth import McpAuthMiddleware, NormalizeMcpPath
 from .adapters.mcp.server import mcp
 from .api.gpt_schema import build_gpt_schema
+from .api.oauth import mcp_resource_url
+from .api.oauth import router as oauth_router
 from .api.routes import router
 from .config import check_public_safety, settings
 from .core import presence, rooms, tasks, work
@@ -126,6 +129,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Must sit outside routing so `/mcp` reaches the mount instead of being redirected.
+app.add_middleware(NormalizeMcpPath, mount_path="/mcp")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.cors_origins),
@@ -144,7 +150,21 @@ async def room_error_handler(_: Request, exc: RoomError) -> JSONResponse:
 
 
 app.include_router(router)
-app.mount("/mcp", mcp_app)
+app.include_router(oauth_router)
+
+# The MCP app is wrapped, not mounted bare: unauthenticated requests must not reach the
+# protocol machinery, and the 401 challenge that points clients at the authorization
+# server has to be an HTTP response, which a tool cannot produce.
+app.mount(
+    "/mcp",
+    McpAuthMiddleware(
+        mcp_app,
+        resource_metadata_url=(
+            f"{settings.public_base_url.rstrip('/')}/.well-known/oauth-protected-resource"
+        ),
+        audience=mcp_resource_url(),
+    ),
+)
 
 
 @app.get("/")
@@ -158,6 +178,8 @@ async def index() -> dict[str, Any]:
         # Two ways to attach an agent host, both pointed at the same core.
         "mcp": f"{base}/mcp",
         "openapi_for_chatgpt_actions": f"{base}/openapi-gpt.json",
+        "oauth_protected_resource": f"{base}/.well-known/oauth-protected-resource",
+        "mcp_requires_auth": settings.mcp_require_auth,
         "publicly_reachable": settings.is_publicly_reachable,
     }
 

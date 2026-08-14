@@ -65,8 +65,12 @@ CREATE TABLE IF NOT EXISTS agent_identities (
 CREATE INDEX IF NOT EXISTS idx_identities_org ON agent_identities(org_id);
 CREATE INDEX IF NOT EXISTS idx_identities_owner ON agent_identities(owner_user_id);
 
--- Bearer credentials, stored hashed and shown once. M1 uses these directly;
--- M5 federates identity (OIDC) and keeps this table for agent tokens only.
+-- Bearer credentials, stored hashed and shown once.
+--
+-- Also the access-token table for the OAuth flow that hosted agents (ChatGPT) use to
+-- attach: an OAuth access token *is* a principal token whose subject is the agent
+-- identity a human consented to. `client_id` and `audience` are NULL for tokens minted
+-- directly (dev bootstrap, CLI provisioning) and set for OAuth-issued ones.
 CREATE TABLE IF NOT EXISTS principal_tokens (
     token_hash    TEXT PRIMARY KEY,
     subject_kind  TEXT NOT NULL,   -- user | agent_identity
@@ -75,10 +79,74 @@ CREATE TABLE IF NOT EXISTS principal_tokens (
     label         TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL,
     expires_at    TEXT,
-    revoked_at    TEXT
+    revoked_at    TEXT,
+    -- OAuth provenance. `audience` is the resource this token was issued for; a token
+    -- presented to a different resource must be rejected (RFC 8707), which is what stops
+    -- a token leaked from one deployment being replayed against another.
+    client_id     TEXT,
+    scope         TEXT NOT NULL DEFAULT '',
+    audience      TEXT,
+    last_used_at  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tokens_subject ON principal_tokens(subject_kind, subject_id);
+
+-- ---------------------------------------------------------------------------
+-- OAuth 2.1 for MCP clients (docs/SECURITY.md §9)
+-- ---------------------------------------------------------------------------
+
+-- Dynamically registered clients (RFC 7591). ChatGPT registers itself on first use, so
+-- there is no manual client setup. Public clients only: no secret is issued, which is
+-- why PKCE is mandatory rather than optional.
+CREATE TABLE IF NOT EXISTS oauth_clients (
+    client_id                   TEXT PRIMARY KEY,
+    client_name                 TEXT NOT NULL DEFAULT '',
+    redirect_uris               TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    grant_types                 TEXT NOT NULL DEFAULT '[]',
+    token_endpoint_auth_method  TEXT NOT NULL DEFAULT 'none',
+    created_at                  TEXT NOT NULL,
+    revoked_at                  TEXT
+);
+
+-- Single-use authorization codes. `agent_identity_id` is the identity the *human*
+-- selected at the consent screen — this is what makes identity a binding rather than a
+-- name the agent chose for itself.
+CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+    code_hash              TEXT PRIMARY KEY,
+    client_id              TEXT NOT NULL,
+    redirect_uri           TEXT NOT NULL,
+    code_challenge         TEXT NOT NULL,
+    code_challenge_method  TEXT NOT NULL DEFAULT 'S256',
+    scope                  TEXT NOT NULL DEFAULT '',
+    resource               TEXT,
+    agent_identity_id      TEXT NOT NULL,
+    org_id                 TEXT NOT NULL,
+    created_at             TEXT NOT NULL,
+    expires_at             TEXT NOT NULL,
+    -- Set on first exchange. A second attempt is a replay and must fail, so this is a
+    -- guard column rather than a delete.
+    consumed_at            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_codes_client ON oauth_authorization_codes(client_id);
+
+CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+    token_hash         TEXT PRIMARY KEY,
+    client_id          TEXT NOT NULL,
+    agent_identity_id  TEXT NOT NULL,
+    org_id             TEXT NOT NULL,
+    scope              TEXT NOT NULL DEFAULT '',
+    audience           TEXT,
+    created_at         TEXT NOT NULL,
+    expires_at         TEXT,
+    revoked_at         TEXT,
+    -- Rotation: the token that replaced this one, so a replayed old refresh token is
+    -- detectable rather than merely invalid.
+    rotated_to_hash    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_refresh_identity
+    ON oauth_refresh_tokens(agent_identity_id);
 
 -- ---------------------------------------------------------------------------
 -- Rooms

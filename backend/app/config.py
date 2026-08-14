@@ -94,6 +94,12 @@ class Settings:
     default_lease_seconds: int = field(default_factory=lambda: _int("DEFAULT_LEASE_SECONDS", 900))
     max_lease_seconds: int = field(default_factory=lambda: _int("MAX_LEASE_SECONDS", 3600))
 
+    # --- MCP transport auth --------------------------------------------
+    #: Require an OAuth access token on /mcp. Off by default so a local agent can attach
+    #: with no ceremony; the startup guard refuses public exposure while it is off, so
+    #: this switch cannot quietly leave a reachable endpoint open.
+    mcp_require_auth: bool = field(default_factory=lambda: _bool("MCP_REQUIRE_AUTH", False))
+
     # --- dev conveniences ----------------------------------------------
     #: Seeds a demo org/user/token at boot so the slice is runnable immediately.
     #: Never enable in a deployed environment; real identity is M5.
@@ -101,6 +107,16 @@ class Settings:
     dev_bootstrap_token: str = field(
         default_factory=lambda: os.getenv("DEV_BOOTSTRAP_TOKEN", "dev-owner-token")
     )
+
+    @property
+    def mcp_resource_url(self) -> str:
+        """Canonical identifier of the protected resource: the MCP endpoint.
+
+        Lives in config rather than in `api/` because both the API layer (issuing tokens)
+        and the MCP adapter (validating them) need it, and an adapter importing `api`
+        would break the layering rule.
+        """
+        return f"{self.public_base_url.rstrip('/')}/mcp"
 
     @property
     def is_publicly_reachable(self) -> bool:
@@ -128,7 +144,7 @@ class Settings:
 #: publicly reachable instance.
 DEFAULT_DEV_TOKEN = "dev-owner-token"
 
-#: Guardrail explained in one place so the startup check and its test agree.
+#: Guardrails explained in one place so the startup checks and their tests agree.
 UNSAFE_PUBLIC_BOOTSTRAP = (
     "Refusing to start: PUBLIC_BASE_URL points at a public hostname while "
     "DEV_BOOTSTRAP is enabled with the default token.\n"
@@ -142,19 +158,29 @@ UNSAFE_PUBLIC_BOOTSTRAP = (
     "  * leave PUBLIC_BASE_URL on localhost if you are only testing locally."
 )
 
+UNSAFE_PUBLIC_MCP = (
+    "Refusing to start: PUBLIC_BASE_URL points at a public hostname while "
+    "MCP_REQUIRE_AUTH is off.\n"
+    "\n"
+    "The MCP endpoint would accept tool calls from anyone who found the URL. Set "
+    "MCP_REQUIRE_AUTH=true so clients must complete the OAuth flow, or keep "
+    "PUBLIC_BASE_URL on localhost."
+)
+
 
 def check_public_safety(config: Settings) -> None:
-    """Raise if this instance would be exposed with published credentials.
+    """Raise if this instance would be exposed without real protection.
 
-    Called at startup. A warning would not be enough here: the failure is silent,
-    total, and only discovered after the damage.
+    Called at startup. A warning would not be enough for either case: the failure is
+    silent, total, and only discovered after the damage. Two independent checks rather
+    than one, so turning off a single switch cannot open the endpoint.
     """
-    if (
-        config.is_publicly_reachable
-        and config.dev_bootstrap
-        and config.dev_bootstrap_token_is_default
-    ):
+    if not config.is_publicly_reachable:
+        return
+    if config.dev_bootstrap and config.dev_bootstrap_token_is_default:
         raise RuntimeError(UNSAFE_PUBLIC_BOOTSTRAP)
+    if not config.mcp_require_auth:
+        raise RuntimeError(UNSAFE_PUBLIC_MCP)
 
 
 settings = Settings()

@@ -37,7 +37,7 @@ from ..util import utcnow_iso
 log = logging.getLogger(__name__)
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _db_path: Path = settings.database_path
 
@@ -156,12 +156,46 @@ async def execute(sql: str, params: Iterable[Any] = ()) -> int:
 # ---------------------------------------------------------------------------
 
 
+#: Columns added after a table first shipped. `CREATE TABLE IF NOT EXISTS` is a no-op on
+#: an existing table, so a new column would silently never appear on any database created
+#: by an earlier version — and the failure surfaces later as a confusing OperationalError.
+#: Additive columns are the only migration this project needs so far; anything that
+#: requires rewriting data will need a real numbered-migration mechanism (see
+#: docs/ROADMAP.md, Postgres blocker).
+ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("principal_tokens", "client_id", "TEXT"),
+    ("principal_tokens", "scope", "TEXT NOT NULL DEFAULT ''"),
+    ("principal_tokens", "audience", "TEXT"),
+    ("principal_tokens", "last_used_at", "TEXT"),
+)
+
+
+async def _existing_columns(conn: aiosqlite.Connection, table: str) -> set[str]:
+    async with conn.execute(f"PRAGMA table_info({table})") as cur:
+        return {row[1] for row in await cur.fetchall()}
+
+
+async def _apply_additive_columns(conn: aiosqlite.Connection) -> None:
+    tables: dict[str, set[str]] = {}
+    for table, column, ddl in ADDITIVE_COLUMNS:
+        if table not in tables:
+            tables[table] = await _existing_columns(conn, table)
+        if not tables[table]:
+            continue  # table does not exist yet; the schema script just created it
+        if column in tables[table]:
+            continue
+        await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        tables[table].add(column)
+        log.info("migrated: added %s.%s", table, column)
+
+
 async def init_db() -> None:
-    """Apply the schema. Safe on every boot."""
+    """Apply the schema, then any additive column migrations. Safe on every boot."""
     _db_path.parent.mkdir(parents=True, exist_ok=True)
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
     async with _connection() as conn:
         await conn.executescript(sql)
+        await _apply_additive_columns(conn)
         await conn.execute(
             "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
             (SCHEMA_VERSION, utcnow_iso()),
