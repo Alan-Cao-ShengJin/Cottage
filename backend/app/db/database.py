@@ -94,12 +94,22 @@ class Tx:
 @asynccontextmanager
 async def _connection() -> AsyncIterator[aiosqlite.Connection]:
     _db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = await aiosqlite.connect(_db_path, timeout=BUSY_TIMEOUT_SECONDS)
-    conn.row_factory = aiosqlite.Row
-    try:
+    conn = await aiosqlite.connect(
+        _db_path,
+        timeout=BUSY_TIMEOUT_SECONDS,
         # Manage transactions explicitly; the driver's implicit BEGIN would open a
         # deferred transaction and defeat the point of `transaction(write=True)`.
-        conn.isolation_level = None
+        #
+        # Passed to `connect` rather than assigned afterwards, and that is not a style
+        # choice. aiosqlite drives the sqlite3 connection from its own worker thread, but
+        # the `isolation_level` *property setter* runs on the calling thread — and from
+        # Python 3.12 that setter enforces sqlite3's same-thread check, so assigning it
+        # here raises ProgrammingError. Passing it as a connect kwarg means sqlite3 applies
+        # it while constructing the connection, inside the worker thread, on every version.
+        isolation_level=None,
+    )
+    conn.row_factory = aiosqlite.Row
+    try:
         await conn.execute("PRAGMA foreign_keys = ON")
         await conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_SECONDS * 1000)}")
         yield conn

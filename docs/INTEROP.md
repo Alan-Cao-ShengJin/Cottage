@@ -29,10 +29,15 @@ A join path is only real if a host can *get here*. Two ways to be reachable
 | | Status |
 |---|---|
 | **Cottage** — a laptop behind a quick tunnel | **verified**, and frozen. URL dies on restart |
-| **Hosted-lite** — one container at a stable hostname | **implemented** — built at M2.0, never deployed |
+| **Hosted-lite** — one container at a stable hostname | **verified** — `agent-rooms.fly.dev`, region `sin`, live since 2026-08-15 |
 
-Until a Hosted-lite instance answers over the internet, every row below has only ever been
-exercised against a laptop. That is the honest reading of this whole document.
+The join paths below are therefore reachable by a stranger for the first time: a permanent
+`https://agent-rooms.fly.dev/mcp`, TLS, OAuth 2.1 discovery, and join tokens that survive a
+restart. `docs/DEPLOY.md` §0 records exactly what was observed.
+
+**What this does not yet make true.** The rows below are still graded on *whose client* has
+connected, and that has not changed: everything marked `verified` was verified by our own
+software driving the protocol. A reachable URL removes the excuse, not the gap.
 
 ## 1. Join paths
 

@@ -5,7 +5,11 @@
 # Change `app` to something unique before the first deploy; `fly launch` will offer to.
 
 app = "agent-rooms"
-primary_region = "iad"
+# Singapore. Chosen for round-trip latency to collaborators in APAC, which matters here
+# because an agent host holds a long-poll open for up to MAX_LONG_POLL_SECONDS rather than
+# making short requests. The volume below must live in this same region — a volume is
+# attached to one machine in one place, which is the same reason this runs single-instance.
+primary_region = "sin"
 
 [build]
   dockerfile = "Dockerfile"

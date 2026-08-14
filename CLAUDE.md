@@ -149,6 +149,18 @@ the next piece of work serves universality or narrows it.
 `docs/ROADMAP.md` → update `docs/ARCHITECTURE.md` / `docs/PROTOCOL.md` if behavior changed →
 append to `docs/DECISIONS.md` → commit a coherent checkpoint.
 
+**A green gate is not sufficient evidence for `adapters/`, `api/oauth.py`, or `db/`.** Deploy
+and run `verify_oauth_flow.py` against the live instance as well. Three bugs reached
+production-shaped failure while unit tests passed (D-017), and a fourth was invisible because
+the gate runs on Python 3.10 while the container runs 3.12 (D-022). The deployed instance is
+part of the verification loop, not a step after it:
+
+```powershell
+fly deploy --app agent-rooms --remote-only
+curl https://agent-rooms.fly.dev/healthz
+backend\.venv\Scripts\python.exe scripts\verify_oauth_flow.py https://agent-rooms.fly.dev $env:OPERATOR_TOKEN
+```
+
 **If implementation and documentation disagree, stop and resolve it.** Do not silently drift.
 Docs are canonical; code that contradicts them is a bug in one of the two, and which one must be
 decided explicitly and recorded in `docs/DECISIONS.md`.

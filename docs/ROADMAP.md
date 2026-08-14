@@ -81,13 +81,17 @@ discovered: one instance only (SQLite on a volume does not survive horizontal sc
 one operator (rooms are created by whoever holds the instance's owner credential; anyone can
 be *invited*).
 
-**Where it stands.** Built and gated: the console exports statically, the server serves it and
-the API on one origin, and `tests/test_deployment_shape.py` pins the composition — including
-that the mount at `/` cannot swallow `/api` or `/mcp`, which is how this fails silently.
-**Not deployed**, so Hosted-lite is `implemented`, not `verified`. The remaining step is
-`fly deploy --remote-only` plus `scripts/verify_oauth_flow.py` against the live URL; nothing
-blocks it but a hosting account. `docs/DEPLOY.md` §0 carries the same caveat where someone
-following the instructions will see it.
+**Where it stands: done and live.** `agent-rooms.fly.dev`, region `sin`, deployed 2026-08-15.
+Verified over the public internet — `/healthz` honest about its own configuration, the console
+and the API on one origin, the full OAuth 2.1 + MCP flow green including PKCE rejection and
+code-replay revocation, a room created by the operator, and an idempotent `command_id` replay
+returning the same room. `docs/DEPLOY.md` §0 lists the observations; `docs/INTEROP.md` §0 marks
+Hosted-lite `verified`.
+
+The first deploy **failed**, which is the useful part: Python 3.12 in the container enforces
+sqlite3's same-thread check on the `isolation_level` setter and Python 3.10 in the dev venv does
+not, so `aiosqlite`'s worker thread made 179 green local tests meaningless for that line
+(D-022). Deploying is now part of how this project verifies things, not the last step after it.
 
 Also resolved here, because a deploy guide would otherwise have contradicted the code:
 `DEV_BOOTSTRAP*` became `BOOTSTRAP_OPERATOR` / `OPERATOR_TOKEN`. The old name asserted "never
@@ -244,6 +248,15 @@ Deepen M2.4: richer digests, pasteable turn output, lease tuning for `attended` 
   Blocking only when a second person needs to create rooms on the same instance (M5).
 - **Hosted-lite is single-instance.** SQLite on a volume plus an in-process bus means one
   machine. Vertical scaling only until M5.
+- **The dev venv is Python 3.10; production is 3.12.** This skew already produced one bug that
+  a full green gate could not see (D-022), and it will produce more — every `sqlite3`,
+  `asyncio`, and typing behaviour change between those versions is untested here. The fix is to
+  align the venv to 3.12 and re-run the gate. Cheap, and it converts "tests pass" back into
+  evidence about production.
+- **`scripts/verify_oauth_flow.py` asserts on payload key names and nothing keeps it honest.**
+  It silently rotted when the MCP adapter moved to compact payloads at `4784da5`, and only
+  failed once pointed at a real deployment. Standing protection that no gate exercises is
+  protection with a half-life.
 - **Attended hosts are inherently weak on liveness.** No fix we are willing to build (no
   browser automation — ADR-007). M2.4/M7 mitigate with digests, not synthetic wake-ups.
 - **Duplicate detection is lexical only.** Embeddings would require inference we do not pay

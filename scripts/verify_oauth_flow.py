@@ -21,9 +21,20 @@ bugs the suite could not:
 Both only appear when a real client drives a real server. Run it after any change to the
 auth path, the MCP adapter, or the join flow.
 
+**And keep it in step with the payloads.** This script rotted once: it asserted on `p["id"]`
+after the MCP adapter renamed that key to `participant_id` for compact payloads, and nothing
+caught it for four commits because no gate stage runs this file. It failed on first contact
+with the live deployment instead (D-022). If you rename a field an adapter returns, change it
+here in the same commit.
+
 Usage (server must already be running with MCP_REQUIRE_AUTH=true):
 
-    python scripts/verify_oauth_flow.py http://127.0.0.1:8000 <principal-token>
+    backend\\.venv\\Scripts\\python.exe scripts\\verify_oauth_flow.py <base-url> <principal-token>
+
+Against the live instance, which is where it is most meaningful — the container runs a
+different Python than the gate does:
+
+    backend\\.venv\\Scripts\\python.exe scripts\\verify_oauth_flow.py https://agent-rooms.fly.dev $env:OPERATOR_TOKEN
 """
 
 from __future__ import annotations
@@ -276,14 +287,20 @@ async def main() -> int:
                     "get_room_state", {"participant_token": joined["participant_token"]}
                 )
             )
+            # Compact MCP shape (D-022): `participant_id` / `name` / flattened `liveness`.
+            # These key names are part of what this script verifies — a rename that the
+            # adapter makes and this script does not follow is exactly the kind of drift
+            # that leaves the standing protection green against a payload no client sees.
             me = next(
-                p for p in state["participants"] if p["id"] == joined["participant_id"]
+                p
+                for p in state["participants"]
+                if p["participant_id"] == joined["participant_id"]
             )
-            name = me["identity"]["display_name"]
+            name = me["name"]
             assert name == "ChatGPT (Alan)", f"identity was spoofable: {name!r}"
             ok("identity came from the token, not the argument", name)
-            assert me["presence"]["liveness"] == "attended", me["presence"]
-            ok("graded honestly", me["presence"]["liveness"])
+            assert me["liveness"] == "attended", me
+            ok("graded honestly", me["liveness"])
 
     print("\nOAUTH + MCP WIRE FLOW: OK")
     return 0

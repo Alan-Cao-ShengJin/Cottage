@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /d/Code/Collab; sed -n '/--app-dir/,/help=/p' backend/.venv/Lib/site-packages/uvicorn/main.py | head -20)",
+      "Bash(cd /d/Code/Collab; grep -rn \"D-020\" docs/DECISIONS.md | head; echo ===; sed -n '/D-020/,/^## D-021\\\\|^---$/p' docs/DECISIONS.md | head -60)",
+      "Bash(cd \"D:/Code/Collab\" && grep -n \"last_delivered_seq\" -r backend/app | head -20 && echo \"=== connections table\" && sed -n \"/CREATE TABLE IF NOT EXISTS connections/,/\\);/p\" backend/app/db/schema.sql)"
+    ],
+    "additionalDirectories": [
+      "D:\\Code\\Collab\\backend\\.venv\\Lib\\site-packages\\uvicorn",
+      "D:\\Code\\Collab\\docs",
+      "D:\\Code\\Collab\\backend\\app\\db"
+    ]
+  }
+}

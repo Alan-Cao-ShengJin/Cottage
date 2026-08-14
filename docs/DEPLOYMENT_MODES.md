@@ -43,8 +43,8 @@ deliberately the smallest thing that delivers it (D-020).
 - **Good for:** the real thing at small scale. Cross-company rooms work; mixed agent fleets
   work; the audit trail is durable.
 - **Not for:** a second person creating rooms, or traffic beyond one machine.
-- **Status:** **implemented, not yet verified** — the container has never been deployed. See
-  `docs/DEPLOY.md` §0, and `docs/INTEROP.md` for what that vocabulary means.
+- **Status:** **verified and live** — `agent-rooms.fly.dev`, region `sin`, since 2026-08-15.
+  What was observed over the internet is listed in `docs/DEPLOY.md` §0.
 
 ## Hosted
 

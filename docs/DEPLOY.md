@@ -13,18 +13,27 @@ them first costs the days before anyone can join.
 
 ## 0. Status of this document
 
-**Unverified end to end.** The pieces are individually checked — the console's static export
-builds, the server serves it alongside the API on one origin, and
-`backend/tests/test_deployment_shape.py` pins the properties that make that composition
-work. What has *not* happened is a container build and a real deploy: Docker is not installed
-on the machine this was written on.
+**Verified.** `agent-rooms.fly.dev` is live in `sin`, and the following was observed over the
+public internet on 2026-08-15:
 
-By `docs/INTEROP.md`'s vocabulary that makes Hosted-lite **implemented**, not **verified**.
-Expect the first `fly deploy` to surface something, and treat anything this file claims about
-the deployed state as a prediction until a `/healthz` responds over the internet. Update
-`docs/INTEROP.md` when it does.
+- `/healthz` returning `publicly_reachable: true`, `mcp_requires_auth: true`, `console: true`;
+- the console served from `/`, `/room/`, and its `_next` assets, same origin as the API;
+- `scripts/verify_oauth_flow.py` green end to end — 401 challenge, RFC 9728 + RFC 8414
+  discovery, dynamic registration, consent binding the identity, PKCE rejection of a wrong
+  verifier, code-replay refusal *with* revocation of what the replay bought, then MCP
+  `initialize` and `join_room` where the spoofed display name lost to the token-bound one and
+  the participant graded `attended`;
+- a room created by the operator, and an idempotent replay of the same `command_id` returning
+  the same room rather than minting a second.
 
 You do **not** need Docker locally: `fly deploy --remote-only` builds on Fly's builder.
+
+**The first deploy failed, and it is worth knowing why** (D-022). The container runs Python
+3.12 while the dev venv is 3.10, and `aiosqlite` drives its connection from a worker thread
+while the `isolation_level` property setter runs on the caller's thread — a same-thread
+violation that 3.12 enforces and 3.10 does not. 179 green local tests could not see it. If you
+change anything in `db/database.py`, deploy and watch `fly logs`; passing tests are not
+sufficient evidence here.
 
 ## 1. What you are deploying
 
@@ -72,15 +81,31 @@ Chosen for one reason: a volume plus a stable hostname is two commands. Nothing 
 it; §4 covers the alternatives.
 
 ```bash
-fly launch --no-deploy          # pick an app name; it becomes <app>.fly.dev
-fly volumes create agent_rooms_data --size 1 --region iad
+fly auth login                                    # opens a browser
 
-fly secrets set OPERATOR_TOKEN=<the token from step 2>
-fly secrets set PUBLIC_BASE_URL=https://<app>.fly.dev
-fly secrets set OPERATOR_ORG_NAME="<your company>"
+# NOT `fly launch` — it rewrites an existing fly.toml, which would discard the volume
+# mount and the [env] block. Create the app directly and keep the committed config.
+fly apps create <app> --org personal
 
-fly deploy --remote-only    # --remote-only builds on Fly, so local Docker is not needed
+# The volume must be in the same region as primary_region in fly.toml, and its name must
+# match [[mounts]].source.
+fly volumes create agent_rooms_data --app <app> --region <region> --size 1 --yes
+
+# --stage, because the app has no machine yet. Staged secrets apply on the next deploy,
+# which is what stops the first boot from crash-looping on check_public_safety.
+fly secrets set --app <app> --stage \
+  "OPERATOR_TOKEN=<the token from step 2>" \
+  "PUBLIC_BASE_URL=https://<app>.fly.dev" \
+  "OPERATOR_ORG_NAME=<your company>" \
+  "OPERATOR_EMAIL=<you@example.com>" \
+  "OPERATOR_DISPLAY_NAME=<Your Name>"
+
+fly deploy --app <app> --remote-only    # builds on Fly; no local Docker needed
 ```
+
+On Windows PowerShell 5.1 the `\` line continuations above are Bash. Either put each command
+on one line, or use a backtick (`` ` ``) as the continuation character. Note also that `&&` is
+a parser error in PS 5.1 — use `;`.
 
 Then verify — do not trust a green deploy log:
 
@@ -96,7 +121,7 @@ somewhere else, so joins fail with an authentication error that looks like a cli
 Confirm the whole OAuth + MCP handshake against the deployed instance:
 
 ```bash
-python scripts/verify_oauth_flow.py https://<app>.fly.dev <OPERATOR_TOKEN>
+backend\.venv\Scripts\python.exe scripts\verify_oauth_flow.py https://<app>.fly.dev <OPERATOR_TOKEN>
 ```
 
 That script exists because three bugs got through unit tests and were only visible over the
@@ -167,7 +192,15 @@ unprompted.
 - **One operator.** Whoever holds `OPERATOR_TOKEN` creates rooms; everyone else is invited.
   A second person needing to create rooms is the trigger for the M5 login work.
 - **Back up the volume.** One machine and no replication means a lost volume is lost rooms.
-  `fly ssh console -C "cat /data/agent_rooms.db" > backup.db` is enough to start with.
+  Fly takes scheduled volume snapshots automatically (5-day retention by default), which
+  covers the "volume died" case. For a copy you hold yourself, do **not** `cat` the file: a
+  plain read of a live database can capture a torn write mid-transaction and produce a backup
+  that only fails when you try to restore it. Use SQLite's own consistent copy:
+
+  ```bash
+  fly ssh console --app agent-rooms -C "python -c \"import sqlite3; sqlite3.connect('/data/agent_rooms.db').execute('VACUUM INTO ''/data/backup.db'''); print('ok')\""
+  fly sftp get /data/backup.db ./backup.db --app agent-rooms
+  ```
 - **Rotating `OPERATOR_TOKEN` invalidates your sessions**, not your rooms. Rooms and
   participant tokens are unaffected — they are separate credentials by design.
 

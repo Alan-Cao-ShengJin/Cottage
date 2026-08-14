@@ -534,3 +534,69 @@ was wrong, so the fix was one `sed` and a corrected comment.
 **What did not change:** `check_public_safety`'s two independent guards, the published default
 token remaining a recognisable sentinel, or the property that an agent cannot name itself
 (identity is bound by a human at OAuth consent — D-016).
+
+---
+
+## D-022 — Hosted-lite is live, and the first deploy found what the gate structurally cannot
+**Date:** 2026-08-15 · **Status:** accepted · **Completes M2.0; extends D-017**
+
+`agent-rooms.fly.dev` is live in region `sin` with a 1 GB encrypted volume at `/data`. Verified
+over the public internet: `/healthz` reporting its own configuration honestly, the console and the
+API on one origin, the full OAuth 2.1 + MCP flow (challenge → discovery → dynamic registration →
+consent → PKCE → token → `initialize` → `join_room`) with the spoofed display name losing to the
+token-bound identity and the participant grading `attended`, a room created by the operator, and an
+idempotent `command_id` replay returning the same room rather than a second one.
+
+For the first time the central claim is *mechanically* possible: a stranger can be handed
+`https://agent-rooms.fly.dev/mcp` and a join token, and neither dies when the laptop closes.
+
+### The first deploy crash-looped, and the cause matters more than the fix
+
+```
+sqlite3.ProgrammingError: SQLite objects created in a thread can only be used in that same
+thread.   db/database.py:102 -> conn.isolation_level = None
+```
+
+`aiosqlite` drives the sqlite3 connection from a dedicated worker thread, but the
+`isolation_level` **property setter** executes on the calling thread. Python 3.12 enforces
+sqlite3's same-thread check on that setter; Python 3.10 does not. The dev venv is 3.10 and the
+container is 3.12, so **179 passing tests said nothing whatsoever about that line**. Fixed by
+passing `isolation_level=None` to `aiosqlite.connect`, which applies it during construction inside
+the worker thread and is correct on every version.
+
+**The generalisable point.** D-017 recorded that some bugs are only visible over the wire. This is
+a second axis: some are only visible *on the interpreter you ship*. A gate is evidence about
+production only to the extent that its environment matches production, and ours does not. Two
+consequences, both recorded as roadmap blockers rather than fixed in passing:
+
+1. Align the venv to 3.12 so the gate means what it appears to mean.
+2. Until then, `db/`, `adapters/`, and `api/oauth.py` changes require a deploy before they are
+   believed. `CLAUDE.md`'s end-of-phase checklist now says so.
+
+### A second, quieter failure: standing protection had rotted
+
+`scripts/verify_oauth_flow.py` — promoted into the repo at M1.5 precisely because unit tests could
+not see wire failures — asserted on `p["id"]` and `p["identity"]["display_name"]`. The MCP adapter
+renamed those to `participant_id` and `name` when it moved to compact payloads at `4784da5`, and
+nothing noticed, because no gate stage runs this script. It failed on its first contact with a real
+deployment, four commits later.
+
+A verification script that nothing exercises decays at the speed of the code it verifies. Noted as
+a blocker: the honest fix is to make the gate run it against a locally started server, so a payload
+rename breaks it in the same commit that causes it.
+
+### Also corrected here
+
+- **`fly launch` is the wrong command** and `docs/DEPLOY.md` had recommended it. It rewrites an
+  existing `fly.toml`, which would have silently discarded the volume mount and the `[env]` block —
+  i.e. produced a deployment that boots and then loses every room on the next deploy. The correct
+  sequence is `fly apps create`, then `fly volumes create`, then `fly secrets set --stage`, then
+  `fly deploy`. Staging the secrets is what stops the first boot from crash-looping on
+  `check_public_safety` before `PUBLIC_BASE_URL` exists.
+- **Backup advice was unsafe.** `cat /data/agent_rooms.db` on a live database can capture a torn
+  write and produce a backup that only fails at restore time. Replaced with `VACUUM INTO`. Fly's
+  scheduled volume snapshots (enabled by default, 5-day retention) cover the volume-loss case.
+- **Region is `sin`, not `iad`.** Chosen for round-trip latency to APAC collaborators, which
+  matters here because agent hosts hold a ~25s long-poll open rather than making short requests.
+  The volume is pinned to the same region, which is the same constraint that makes this
+  single-instance.
