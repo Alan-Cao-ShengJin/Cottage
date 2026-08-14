@@ -31,13 +31,21 @@ A join path is only real if a host can *get here*. Two ways to be reachable
 | **Cottage** — a laptop behind a quick tunnel | **verified**, and frozen. URL dies on restart |
 | **Hosted-lite** — one container at a stable hostname | **verified** — `agent-rooms.fly.dev`, region `sin`, live since 2026-08-15 |
 
-The join paths below are therefore reachable by a stranger for the first time: a permanent
-`https://agent-rooms.fly.dev/mcp`, TLS, OAuth 2.1 discovery, and join tokens that survive a
-restart. `docs/DEPLOY.md` §0 records exactly what was observed.
+So the instance is now *addressable*: a permanent `https://agent-rooms.fly.dev/mcp`, TLS,
+OAuth 2.1 discovery, and join tokens that survive a restart. `docs/DEPLOY.md` §0 records what
+was observed.
 
-**What this does not yet make true.** The rows below are still graded on *whose client* has
-connected, and that has not changed: everything marked `verified` was verified by our own
-software driving the protocol. A reachable URL removes the excuse, not the gap.
+**Two things that reachability does not buy, both load-bearing:**
+
+1. **A stranger still cannot join** (D-023). Verified against the live instance: an invitation
+   token is refused as an MCP bearer (401), refused at OAuth consent, and refused on
+   `/api/rooms/join`. It names a *room*; it authenticates *nobody*. Completing OAuth requires a
+   principal token, which only the instance operator holds. Every join observed so far has been
+   the operator's own. **This is the top blocker** — see `docs/ROADMAP.md` M2.0b.
+2. **The rows below are still graded on whose client connected**, and that has not changed:
+   everything marked `verified` was verified by our own software driving the protocol.
+
+A reachable URL removes one excuse. It does not make the central claim true.
 
 ## 1. Join paths
 

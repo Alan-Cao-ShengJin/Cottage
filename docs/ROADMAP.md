@@ -99,6 +99,33 @@ enable in a deployed environment" while the deploy path requires exactly that. T
 was never about environment but about secrecy — a published default token must not guard a
 reachable instance — and `check_public_safety` already enforced it.
 
+### M2.0b — An invitation must be a credential ← **next, and the top blocker**
+Deploying M2.0 disproved a claim this roadmap had been making (D-023). An invitation token names
+a *room*; it authenticates *nobody*. A public instance must run `MCP_REQUIRE_AUTH=true`, so the
+only way through `/mcp` is an OAuth token, and consent requires a principal token that only the
+operator holds. Verified against the live instance: the join token is refused as an MCP bearer
+(401), at OAuth consent, and on `/api/rooms/join`.
+
+So **no stranger has ever been able to join, on any deployment, by any path** — and every join
+we have observed was our own operator's. Until this is fixed, "invite someone over the internet"
+is false, and M2.1–M2.6 would all be testing a room only one person can enter.
+
+The shape of the fix, to be decided and recorded before implementing:
+
+- Presenting a valid invitation authorizes **exactly one** operation — `join_room` for the room
+  that invitation names — and nothing else. Not room creation, not org reads, not acting as
+  another participant.
+- The identity it provisions is a **guest**: nobody the room trusts bound its display name, so
+  it must be reported as unvouched rather than silently trusted. `docs/INTEROP.md` §5 already
+  states the principle ("display name is only trustworthy where a credential bound it"); this is
+  where the room has to *show* it.
+- Two client paths, because not every host does OAuth well: the invitation accepted at the
+  consent screen in place of a principal token (standards-clean, keeps PKCE and audience
+  binding), and/or the invitation accepted directly as a bearer on `/mcp` (what "paste a URL and
+  a token into your agent" needs).
+- The existing revocation, expiry, and single-room scoping of invitations must all still hold,
+  and a revoked invitation must not leave a usable credential behind.
+
 ### M2.1 — Interop conformance harness
 Put N host families in one room simultaneously and assert the six properties in
 `docs/INTEROP.md` §3 — including the one that only appears in a mixed room: an
@@ -139,8 +166,10 @@ Two orgs, two hosts, one room, exercised for real: identity minimisation across 
    `docs/INTEROP.md` — and every row's status reflects observed reality.
 4. `python scripts/check.py` passes.
 
-Criterion 2 is the one M2.0 exists to make possible, and it is the first place the whole
-product either works or does not.
+Criterion 2 is the one M2.0 was meant to make possible. M2.0 delivered the *reachable instance*
+half of it; the *joined by a stranger's agent* half turned out to be blocked by something else
+entirely (D-023), which is M2.0b. Deploying is what revealed that, and it would not have been
+visible from a laptop where the permissive local path masks it.
 
 ---
 
@@ -235,9 +264,13 @@ Deepen M2.4: richer digests, pasteable turn output, lease tuning for `attended` 
 
 ## Known blockers / open questions
 
+- **An invitation token is not a credential, so nobody can be invited** (D-023). A stranger
+  holding a valid join token is refused on every path. **This is now the most important open
+  item**, ahead of the one below it, because it blocks the only test that would settle that one.
+  M2.0b.
 - **No second-vendor client has ever joined a room.** Every "verified" row in
   `docs/INTEROP.md` was verified by our own software. Until that changes, cross-platform is a
-  design property, not an observed one. **This is the most important open item.**
+  design property, not an observed one.
 - **PostgreSQL compatibility is argued, not demonstrated** (D-011). No invariant depends on
   SQLite locking, but that needs proving: a migration mechanism, a `TEXT` vs `timestamptz`
   review, and the concurrency invariants (I1, I3) run against Postgres. Deferred to M5 by

@@ -67,16 +67,23 @@ Hosted-lite plus the things scale demands, each waiting for the demand (M5):
 | Token audience | rebound each run | stable | stable |
 | Human auth | pasted operator token | pasted operator token | OIDC login |
 | Who can create rooms | you | you | anyone with an account |
-| Who can be invited | anyone with the URL | **anyone, no account** | anyone, no account |
+| Who can be invited | anyone with the URL | **nobody yet — D-023** | anyone, no account |
 | Agent identity binding | OAuth consent, or self-named locally | OAuth consent | OAuth consent |
 | Cross-org rooms | technically allowed, practically pointless | works | the primary use |
 | Storage | SQLite, local file | SQLite on a volume | PostgreSQL |
 | Instances | 1 | 1 | many |
 | Who operates it | you | you | an operator |
 
-The middle column is the one worth internalising: **Hosted-lite is limited in who can
-*create*, not in who can *join*.** That is why it is enough to test the product's central
-claim, and why the login work is not on the critical path.
+**Correction, and it is the important line in this document.** The middle column was written
+claiming Hosted-lite was limited in who can *create* but not in who can *join*. That was wrong,
+and testing the live instance disproved it (D-023): an invitation token authenticates nobody, so
+a public instance — which must require auth on `/mcp` — can only be joined by the operator whose
+principal token clears the consent screen.
+
+Hosted-lite is therefore **not yet sufficient to test the product's central claim.** Making the
+invitation token a real, room-scoped credential is M2.0b, and it is the top blocker. The login
+work (M5) is still not on the critical path — an invitee needs a *capability*, not an account —
+but "no account needed" only becomes true once that capability exists.
 
 ## What does *not* change
 

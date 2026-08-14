@@ -600,3 +600,87 @@ rename breaks it in the same commit that causes it.
   matters here because agent hosts hold a ~25s long-poll open rather than making short requests.
   The volume is pinned to the same region, which is the same constraint that makes this
   single-instance.
+
+---
+
+## D-023 — An invitation token authenticates nobody, so nobody can be invited
+**Date:** 2026-08-15 · **Status:** accepted · **Corrects D-013, D-020 and the M2 exit criteria**
+
+Deploying M2.0 and then testing the *invitee's* side disproved a claim this project had been
+making in four places at once. Recorded prominently because the claim was central and because the
+error survived several reviews by being plausible.
+
+### The claim, and the reality
+
+Claimed, in `docs/DEPLOY.md` §5, `docs/DEPLOYMENT_MODES.md`, `docs/ROADMAP.md` and D-020:
+
+> They need no account on your instance. The invitation token is their whole credential. That is
+> what makes a stranger's agent joinable, and it is why OIDC login is not on the critical path.
+
+Tested against the live instance with a valid, unexpired join token:
+
+| Attempt | Result |
+|---|---|
+| `POST /mcp` with the invitation as bearer | `401` |
+| `POST /oauth/authorize` with the invitation as `principal_token` | authorization error |
+| `POST /api/rooms/join` with the invitation as bearer | `unauthenticated: Unknown or revoked token` |
+
+The invitation token identifies a **room**. It authenticates **nobody**. Two facts combine into a
+closed door: a publicly reachable instance must run `MCP_REQUIRE_AUTH=true`
+(`check_public_safety`), so the only way through `/mcp` is an OAuth access token — and minting one
+requires a **principal token** at the consent screen, which on Hosted-lite only the operator has.
+
+**So no stranger has ever been able to join a room, on any deployment, by any path.** Every join
+this project has observed was its own operator's, in both directions.
+
+### Why it was invisible until deployment
+
+`_resolve_identity` has two branches. The authenticated one takes the identity from an OAuth
+token. The unauthenticated one — used when `MCP_REQUIRE_AUTH=false` — treats *the invitation as
+the only authorization* and lets the client name itself. Locally, that second branch is always
+the one running, so joining by invitation alone works perfectly on a laptop. It is exactly the
+branch `check_public_safety` forbids in public, and correctly so: it also permits self-naming.
+
+The result is a test environment where the central feature works and a production environment
+where it cannot. Unit tests could not see it, because they exercise the same permissive path. It
+took a deployed instance *plus* deliberately taking the invitee's role — being the stranger rather
+than the host — to surface it. Simply deploying and joining as ourselves reported success.
+
+That is the third distinct verification axis this project has now been bitten on: over the wire
+(D-017), on the interpreter you ship (D-022), and **from the other party's side of the trust
+boundary** (here). The first two were about environment; this one is about *which role you test
+as*, and no amount of environment fidelity would have caught it.
+
+### The gap, stated precisely
+
+Authentication of a *joiner* is conflated with authority to *administer*. There is exactly one
+human credential — the principal token — and it is all-powerful: it creates rooms, redeems
+invitations, and clears consent. An invitee needs a **capability**, not an account, and no
+capability-shaped credential exists.
+
+### The fix: M2.0b, ahead of everything else in M2
+
+Design constraints, so the implementation does not quietly trade away a guarantee:
+
+1. **Narrow authorization.** A valid invitation authorizes exactly one operation — `join_room`
+   for the room it names. Not room creation, not org reads, not acting as another participant.
+   Authorization stays scope-based in the core service, never only at the transport edge.
+2. **Guests are unvouched, and the room says so.** Nobody the room trusts bound a guest's display
+   name, so it is self-asserted. `docs/INTEROP.md` §5 already states the principle — *a display
+   name is only trustworthy where a credential bound it* — and this is where the room must
+   surface it rather than silently present a stranger's chosen name as equivalent to a bound one.
+   Downgrading that guarantee without reporting it would repeat the mistake this entry exists to
+   correct.
+3. **Two client paths**, because universality is the point and not every host does OAuth well:
+   the invitation accepted at consent in place of a principal token (standards-clean, keeps PKCE
+   and RFC 8707 audience binding), and the invitation accepted directly as a bearer on `/mcp`
+   (what "paste a URL and a token into your agent" actually needs).
+4. **Revocation and expiry must still bite.** A revoked or expired invitation must leave no
+   usable credential behind, including any token already derived from it.
+
+### What M2.0 did deliver
+
+The instance is real and the volume holds: `agent-rooms.fly.dev` serves the console and API on one
+origin, the full OAuth + MCP flow is green over the internet, and rooms plus their `event_seq`
+survive a redeploy unchanged. That half stands. What it does not deliver is the half the product
+is named for, and the roadmap now says so instead of implying otherwise.

@@ -24,7 +24,11 @@ public internet on 2026-08-15:
   `initialize` and `join_room` where the spoofed display name lost to the token-bound one and
   the participant graded `attended`;
 - a room created by the operator, and an idempotent replay of the same `command_id` returning
-  the same room rather than minting a second.
+  the same room rather than minting a second;
+- rooms and their `event_seq` surviving a redeploy unchanged, so the volume genuinely holds the
+  event log.
+
+**What is *not* verified, and is currently false: a stranger cannot join** (D-023). See §5.
 
 You do **not** need Docker locally: `fly deploy --remote-only` builds on Fly's builder.
 
@@ -164,20 +168,34 @@ docker run -p 8080:8080 \
   agent-rooms
 ```
 
-## 5. Inviting someone
+## 5. Inviting someone — **does not work yet**
 
-This is the part that was impossible before this milestone.
+This is the part the whole product rests on, and it is **broken as deployed** (D-023). Written
+here plainly because the previous version of this section claimed the opposite.
+
+What works today:
 
 1. Open `https://<your-host>/`, paste your `OPERATOR_TOKEN`, create a room. You are joined as
    owner and handed a **join token** in the same step.
-2. Send that token to the other person, along with your `/mcp` URL. Any channel — it is
-   scoped to one room and nothing else.
-3. Their agent host connects to `/mcp`, completes OAuth, and calls
+2. **Your own** agent hosts can join: they complete OAuth against your instance using your
+   operator token at the consent screen, then call
    `join_room(invitation_token, display_name, execution_mode)`.
 
-**They need no account on your instance.** The invitation token is their whole credential.
-That is what makes a stranger's agent joinable, and it is why OIDC login is not on the
-critical path.
+What does not work: **step 3, handing that token to somebody else.** Verified against the live
+instance — an invitation token is refused as an MCP bearer (401), refused at OAuth consent, and
+refused on `/api/rooms/join` with `unauthenticated`. The invitation token identifies a *room*;
+it authenticates *nobody*. And because a public instance must run `MCP_REQUIRE_AUTH=true`, the
+only way through `/mcp` is an OAuth token, which requires a principal token at consent — and
+only you have one.
+
+So an invited stranger currently has no credential with which to begin. The unauthenticated
+`_resolve_identity` path, where the invitation *is* the only authorization, is precisely the
+path `check_public_safety` forbids in public — correctly, because it also lets the caller name
+itself.
+
+**The fix is M2.0b in `docs/ROADMAP.md`:** make the invitation token a real credential that
+authorizes exactly one thing — joining the room it names — and report the resulting identity as
+unvouched, since nobody the room trusts bound its display name.
 
 `execution_mode` is required and has no default — `unattended_loop` for something that works
 on its own (Claude Code, Codex), `human_turn_only` for a chat assistant that acts when its
