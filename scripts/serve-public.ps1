@@ -27,7 +27,13 @@
 param(
     [int]$Port = 8000,
     [string]$Token = "",
-    [switch]$SkipVerify
+    [switch]$SkipVerify,
+    # cloudflare quick tunnels need no account but do go dead under you: the process stays
+    # alive while the edge stops forwarding, so the URL times out with no local symptom.
+    # ngrok needs a free authtoken once (`npx ngrok config add-authtoken <token>`) and is
+    # markedly steadier.
+    [ValidateSet('cloudflare', 'ngrok')]
+    [string]$Provider = 'cloudflare'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -105,13 +111,22 @@ $tunnel = $null
 $server = $null
 
 try {
-    Write-Host "Opening a tunnel to http://localhost:$Port ..." -ForegroundColor Cyan
-    $tunnel = Start-Process -FilePath 'npx.cmd' `
-        -ArgumentList '--yes', 'cloudflared', 'tunnel', '--url', "http://localhost:$Port" `
+    Write-Host "Opening a $Provider tunnel to http://localhost:$Port ..." -ForegroundColor Cyan
+
+    if ($Provider -eq 'ngrok') {
+        $tunnelArgs = @('--yes', 'ngrok', 'http', "$Port", '--log', 'stdout')
+        $urlPattern = 'https://[a-z0-9-]+\.ngrok(?:-free)?\.(?:app|io|dev)'
+    }
+    else {
+        $tunnelArgs = @('--yes', 'cloudflared', 'tunnel', '--url', "http://localhost:$Port")
+        $urlPattern = 'https://[a-z0-9-]+\.trycloudflare\.com'
+    }
+
+    $tunnel = Start-Process -FilePath 'npx.cmd' -ArgumentList $tunnelArgs `
         -PassThru -NoNewWindow -RedirectStandardOutput $tunnelLog -RedirectStandardError "$tunnelLog.err"
 
-    # cloudflared prints the URL once the tunnel is up; the first run also downloads the
-    # binary, so allow generous time before giving up.
+    # The URL is printed once the tunnel is up; a first run also downloads the binary, so
+    # allow generous time before giving up.
     $publicUrl = $null
     $deadline = (Get-Date).AddSeconds(120)
     while (-not $publicUrl -and (Get-Date) -lt $deadline) {
@@ -119,11 +134,25 @@ try {
         if ($tunnel.HasExited) { break }
         foreach ($file in @($tunnelLog, "$tunnelLog.err")) {
             if (-not (Test-Path $file)) { continue }
-            $match = Select-String -Path $file -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' `
+            $match = Select-String -Path $file -Pattern $urlPattern `
                 -AllMatches -ErrorAction SilentlyContinue |
                 Select-Object -First 1
             if ($match) { $publicUrl = $match.Matches[0].Value; break }
         }
+    }
+
+    if ($tunnel.HasExited -and -not $publicUrl) {
+        Write-Host ''
+        Write-Host "The $Provider tunnel exited before producing a URL:" -ForegroundColor Yellow
+        foreach ($file in @($tunnelLog, "$tunnelLog.err")) {
+            if (Test-Path $file) { Get-Content $file -Tail 15 }
+        }
+        if ($Provider -eq 'ngrok') {
+            Write-Host ''
+            Write-Host 'ngrok needs a free authtoken once:' -ForegroundColor Yellow
+            Write-Host '  npx ngrok config add-authtoken <token from dashboard.ngrok.com>' -ForegroundColor DarkGray
+        }
+        exit 1
     }
 
     if (-not $publicUrl) {
@@ -185,6 +214,39 @@ try {
         Write-Host "The server did not answer on http://127.0.0.1:$Port within 30s." -ForegroundColor Yellow
         exit 1
     }
+
+    # Confirm the tunnel actually forwards traffic before handing the URL over. A
+    # cloudflare quick tunnel can go dead while its process stays alive: the URL then times
+    # out with no local symptom at all, and ChatGPT reports only "Error fetching OAuth
+    # configuration / Request timeout". Checking here names the real cause.
+    Write-Host 'Checking the tunnel forwards traffic...' -ForegroundColor Cyan
+    $reachable = $false
+    $deadline = (Get-Date).AddSeconds(45)
+    while (-not $reachable -and (Get-Date) -lt $deadline) {
+        try {
+            $probe = Invoke-RestMethod -Uri "$publicUrl/api/health" -TimeoutSec 10
+            if ($probe.protocol -eq 'arp/1') { $reachable = $true; break }
+        }
+        catch {
+            Start-Sleep -Seconds 3
+        }
+    }
+
+    if (-not $reachable) {
+        Write-Host ''
+        Write-Host "The tunnel is not forwarding traffic: $publicUrl is unreachable" -ForegroundColor Yellow
+        Write-Host 'even though the local server is healthy. ChatGPT would report only' -ForegroundColor Yellow
+        Write-Host '"Error fetching OAuth configuration / Request timeout".' -ForegroundColor Yellow
+        Write-Host ''
+        if ($Provider -eq 'cloudflare') {
+            Write-Host 'Cloudflare quick tunnels do this. Either re-run to get a fresh URL,' -ForegroundColor Yellow
+            Write-Host 'or switch provider (steadier, needs a free authtoken once):' -ForegroundColor Yellow
+            Write-Host '  npx ngrok config add-authtoken <token from dashboard.ngrok.com>' -ForegroundColor DarkGray
+            Write-Host '  powershell -ExecutionPolicy Bypass -File scripts\serve-public.ps1 -Provider ngrok' -ForegroundColor DarkGray
+        }
+        exit 1
+    }
+    Write-Host '  Tunnel forwards traffic.' -ForegroundColor Green
 
     if (-not $SkipVerify) {
         # Walk the whole OAuth + MCP flow. This catches a mismatched PUBLIC_BASE_URL, a

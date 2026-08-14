@@ -155,8 +155,34 @@ never do unprompted, and its leases expire mid-task.
 
 | Symptom | Cause |
 |---|---|
+| **ChatGPT: "Error fetching OAuth configuration / Request timeout"** | The tunnel is not forwarding traffic. See below — this is the most common failure and it is not about our documents |
 | `421 Misdirected Request` | `PUBLIC_BASE_URL` does not match the host ChatGPT is calling; the SDK's Host allowlist rejected it |
 | Server refuses to start | A startup guard fired: default token, or `MCP_REQUIRE_AUTH` off, with a public URL. The message says which |
 | `403 ... different resource` | Token minted for a previous tunnel URL. Re-add the plugin |
 | `401` on every call | `MCP_REQUIRE_AUTH=true` and the client has not completed OAuth. Check the discovery documents are reachable |
 | Consent rejects your token | You pasted an agent token, not a user principal token |
+| `Errno 10048` on startup | Port already held by a leftover server. `serve-public.ps1` now names the PID before opening a tunnel |
+
+### Cloudflare quick tunnels go dead while looking alive
+
+Observed: the local server healthy, `cloudflared.exe` still running, the URL verified working
+minutes earlier — and every request to it timing out from two independent networks. The
+process staying up is not evidence the edge is still forwarding.
+
+ChatGPT surfaces this as *"Error fetching OAuth configuration / Request timeout"*, which reads
+like a protocol problem and is not one. `serve-public.ps1` now probes the public URL before
+handing it to you, so the message names the tunnel instead.
+
+In order of preference when it happens:
+
+1. **Try ChatGPT's own "Tunnel" option** — the toggle beside *Server URL* in the New Plugin
+   dialog. If OpenAI provides the tunnel, Cloudflare is out of the path entirely.
+2. **Re-run to get a fresh URL.** Quick tunnels are often merely flaky rather than blocked.
+3. **Switch provider.** Steadier, and needs a free authtoken once:
+   ```powershell
+   npx ngrok config add-authtoken <token from dashboard.ngrok.com>
+   powershell -ExecutionPolicy Bypass -File scripts\serve-public.ps1 -Provider ngrok
+   ```
+
+Whichever you use, the tunnel URL changes — so re-add the plugin, because tokens are
+audience-bound to the old URL and will correctly `403`.
