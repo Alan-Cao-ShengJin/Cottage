@@ -77,23 +77,45 @@ Details: `docs/SECURITY.md`.
 
 ## Build / test commands
 
-```bash
-# backend (from repo root; Windows PowerShell shown, POSIX equivalent works)
-python -m venv .venv
-.venv\Scripts\pip install -r backend/requirements.txt
-.venv\Scripts\python -m pytest backend -q          # tests
-.venv\Scripts\python -m mypy backend/app           # typecheck
-.venv\Scripts\python -m ruff check backend         # lint
-.venv\Scripts\python -m uvicorn app.main:app --reload --app-dir backend   # run
+The venv lives at **`backend\.venv`**. Two Windows PowerShell 5.1 traps, both of which have
+already cost time — do not write commands that hit them:
 
-# frontend
-cd frontend && npm install
-npm run typecheck
-npm run lint
+- **`&&` is a parser error**, not a chaining operator. Use `;` or separate lines.
+- **Bare `uvicorn` / `pytest` / `ruff` resolve to the *global* Python**, which lacks this
+  project's dependencies, so they fail with `ModuleNotFoundError` rather than doing nothing
+  obvious. Always invoke through the venv interpreter: `backend\.venv\Scripts\python.exe -m …`.
+
+```powershell
+# one-time setup (from repo root)
+python -m venv backend\.venv
+backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+cd frontend
+npm install
+cd ..
+
+# run both (handles the traps above; Ctrl+C stops both)
+powershell -ExecutionPolicy Bypass -File scripts\dev.ps1
+
+# or run them separately
+backend\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --app-dir backend
+cd frontend
 npm run dev
+
+# individual checks
+backend\.venv\Scripts\python.exe -m pytest backend -q
+backend\.venv\Scripts\python.exe -m mypy backend\app
+backend\.venv\Scripts\python.exe -m ruff check backend
+backend\.venv\Scripts\python.exe -m ruff format backend
 ```
 
-One-shot gate before any commit: `python scripts/check.py` (runs pytest + mypy + ruff + frontend typecheck).
+POSIX equivalent: swap `backend\.venv\Scripts\python.exe` for `backend/.venv/bin/python`.
+
+One-shot gate before any commit — runs pytest + mypy + ruff + ruff format + frontend typecheck,
+reporting every failure rather than stopping at the first:
+
+```powershell
+backend\.venv\Scripts\python.exe scripts\check.py
+```
 
 ## Working agreement
 
