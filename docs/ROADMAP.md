@@ -1,143 +1,199 @@
 # ROADMAP — Agent Rooms
 
-Ordered milestones. Update this file **before** implementing and **after** every meaningful phase.
+Ordered milestones. Update **before** implementing and **after** every meaningful phase.
 
-_Last updated: 2026-08-14_
+_Last updated: 2026-08-15._
+
+---
+
+## The claim we are building toward
+
+> Anyone starts a room. They invite someone over the internet. Both ends have humans *and*
+> agents. Any combination of hosts works — Claude Code ↔ ChatGPT, ChatGPT ↔ ChatGPT, Claude
+> Code ↔ Gemini, Claude ↔ Grok, or all four in one room.
+
+Everything below is judged against that sentence. `docs/INTEROP.md` is the accountability
+record for it; `docs/DEPLOYMENT_MODES.md` distinguishes the laptop case (**Cottage**) from
+the real one (**Hosted**).
+
+---
+
+## Course correction (2026-08-15)
+
+We drifted. Recorded here rather than quietly fixed, because the drift was in *effort
+allocation*, and effort allocation is the thing a roadmap is for.
+
+**What went sideways.** Getting one hosted agent (ChatGPT) to reach a laptop consumed four
+commits of tunnel plumbing: provider switching, port guards, reachability probes, URL
+parsing. Every one of those solved a real bug, and none of them advances the product — they
+serve **Cottage**, which is developer convenience. The signal we missed: ChatGPT's own
+"Tunnel" feature is ChatGPT-specific, and building around it would have deepened a
+single-vendor dependency while the cross-platform claim stayed untested.
+
+**What was not drift**, and should not be re-litigated:
+
+- the core — event log, leases with fencing, capability-derived presence, disclosure
+  boundary, conflicts — all provider-neutral and needed for any host;
+- **OAuth 2.1** — every hosted agent host needs it. Not ChatGPT-specific;
+- the capability model (D-010) — precisely the abstraction that makes "any combination"
+  expressible;
+- compact tool payloads — context economy applies to every metered host.
+
+**What the drift cost us:** the A2A adapter is still a 5-line placeholder, no second vendor's
+client has ever joined a room, and no cross-org invitation has crossed the internet. Those
+are the product; they are what M2 is now.
+
+**The rule going in:** before building exposure, name which deployment mode it serves. If the
+answer is Cottage, cap the effort.
+
+---
 
 ## Current milestone
 
-**M2 — Authorized shared state & artifacts**
+**M2 — Universal connectivity**
 
-Status: **not started** — M1 is complete and the gate is green.
+Status: **not started.** M1 is complete (below) and the gate is green.
+
+Why this before shared state: the differentiator is the *cross-platform room*. Deepening a
+room whose universality is unproven optimises the wrong axis, and shared state built against
+one adapter would need revisiting once three more exist.
+
+### M2.1 — Interop conformance harness
+Put N host families in one room simultaneously and assert the six properties in
+`docs/INTEROP.md` §3 — including the one that only appears in a mixed room: an
+`unattended_loop` participant must never be led to assume an `attended` one is prompt.
+Extend `test_three_execution_modes_coexist_with_honest_grades` from execution modes to
+adapters. **This lands first**, so every later path has a bar to clear.
+
+### M2.2 — A2A adapter
+Agent card publication, inbound delivery, outbound push, untrusted trust tier with vouching,
+SSRF-safe egress. Pulled forward from M4: it is how non-MCP agents join, so it is load-bearing
+for the claim rather than a later nicety.
+
+### M2.3 — Function-calling join path as first class
+`/openapi-gpt.json` exists as a ChatGPT-Action shim. Generalise it: a documented
+function-calling surface any host can import, per-agent credentials, and a briefing folded
+into the schema description (an Action never gets `get_protocol_briefing`). Reframe as one
+path among several rather than a vendor special case.
+
+### M2.4 — Attended-paste path
+For a host that cannot call tools at all: a digest read ("what changed, what needs you") a
+human pastes in, and a compact command block accepted back. This is the difference between
+universal and "universal if your vendor shipped an integration".
+
+### M2.5 — Hosted deployment
+Stable hostname, PostgreSQL, container image, real login (OIDC). Removes the tunnel from the
+product path entirely and closes the D-011 Postgres blocker. **Cottage tooling is frozen at
+this point** — no further investment.
+
+### M2.6 — Cross-org invitation over the internet
+Two orgs, two hosts, one room, exercised for real: identity minimisation across the boundary,
+`org_internal` refused, untrusted tier applied, audit readable by both sides.
+
+### M2 exit criteria
+1. Three host families from **at least two vendors** in one room, each graded honestly.
+2. A room created on a Hosted instance, invited by link, joined by a stranger's agent.
+3. The conformance harness passes for every path marked `implemented` or better in
+   `docs/INTEROP.md` — and every row's status reflects observed reality.
+4. `python scripts/check.py` passes.
+
+---
 
 ## Completed
 
 ### M1 — Vertical slice: CONNECT → SEE CURRENT WORK → COORDINATE → CLAIM → DISCONNECT ✅ (2026-08-14)
 
-All exit criteria met; `python scripts/check.py` passes (97 tests, mypy, ruff, ruff format, tsc).
+All exit criteria met, each pinned by a test. `python scripts/check.py` green.
 
-- [x] Removed conflicting V0 architecture: `agents/` (server-side OpenAI loop), `prompts.py`,
-      `guardrails.py`, chat-centric room service, `openai` dependency (uninstalled; a layering test
-      now forbids any provider SDK anywhere in `app/`).
-- [x] `domain/` — ids, identity, **capabilities**, room/participant/invitation/connection,
-      **disclosure**, work, task, events, commands.
-- [x] `db/` — engine-neutral schema (orgs, users, agent identities, principal tokens, rooms,
-      invitations, participants, connections, room_events, command_receipts, messages,
-      work_declarations, tasks, dependencies, proposals, conflicts, tombstones) + a real
-      transaction boundary.
-- [x] `core/eventlog.py` — transactional `seq` allocation, `append`, `read_since`, cursor
-      validation with `invalid_cursor` / `resume_gap`.
-- [x] `core/bus.py` — notify-then-read fanout, `wait_for`.
-- [x] `core/dispatch.py` — the single write path: `command_id` reservation, one transaction,
-      publish only after commit.
-- [x] `core/authz.py` + `core/privacy.py` — scopes, separate ownership checks, trust clamping, and
-      the modeled disclosure boundary (authorization → policy → inspection).
-- [x] `core/rooms.py` — create room, invitations, redeem/join, leave, close, TTL janitor.
-- [x] `core/presence.py` — capability negotiation, connect, heartbeat, liveness grading, dead-
-      connection reaper.
-- [x] `core/work.py` — declare/update/end current work, presence-derived staleness.
-- [x] `core/tasks.py` — create, claim (lease + fence), renew, release, complete, cancel, expiry
-      reaper, `claim_race` conflict.
-- [x] `core/conflicts.py` — duplicate-task and overlapping-work detection (pulled forward from M3;
-      it fell out of target normalization for free), advisory and non-blocking.
-- [x] `core/projections.py` — snapshot read model, `snapshot_seq` read in the same transaction as
-      its content, per-recipient privacy filtering.
-- [x] `api/` — ARP command surface + resumable SSE stream.
-- [x] `adapters/mcp/` — 13 tools mapping onto ARP, incl. `await_room_events` long-poll and a
-      protocol briefing.
-- [x] Frontend work board: presence rail with capability chips, current-work cards with contested-
-      target highlighting, task board with live lease countdowns, activity feed.
-- [x] Tests (97): 41 protocol invariants, disclosure boundary, layering/architecture rules,
-      end-to-end slice across both transports.
-- [x] `scripts/check.py` gate; ruff + mypy config.
+- Removed the V0 chat-with-paid-agents architecture, including the `openai` dependency; a
+  layering test now forbids any provider SDK anywhere in `app/`.
+- `domain/` — ids, identity, **capabilities**, room/participant/invitation/connection,
+  **disclosure**, work, task, events, commands.
+- `db/` — engine-neutral schema + a real transaction boundary + additive-column migrations.
+- `core/` — 16 modules: sequenced event log, notify-then-read bus, single write path with
+  `command_id` idempotency, scopes + ownership + trust, the modeled disclosure boundary,
+  rooms/invitations/join, capability negotiation and presence grading, current work, tasks
+  with leases and fence tokens, conflict detection, per-recipient projections.
+- `api/` — ARP command surface + resumable SSE stream.
+- `adapters/mcp/` — 15 tools, `await_room_events` long-poll, protocol briefing.
+- Frontend work board: presence rail with capability chips, current-work cards with
+  contested-target highlighting, task board with live lease countdowns, activity feed.
+- Tests: 41 protocol invariants, disclosure boundary, layering rules, end-to-end slice.
 
-**Exit criteria, each pinned by a test:**
-1. ✅ SSE and MCP long-poll participants in one room see each other's presence, negotiated
-   capabilities, and current work — with honest grades (`live_push` vs `live_poll`).
-   → `test_sse_participant_and_mcp_participant_see_each_other`
-2. ✅ Reconnect from a stale cursor delivers exactly the missed events, ordered, no gaps.
-   → `test_i4_reconnect_sees_every_authorized_event_it_missed`, `test_sse_resume_from_a_cursor_*`
-3. ✅ Concurrent claim race yields exactly one winner; losers get `lease_conflict`; a `claim_race`
-   conflict is recorded. → `test_i1_concurrent_claims_yield_exactly_one_winner`
-4. ✅ A dead claimant's lease expires, the task reopens with `task.claim_expired`, and the revived
-   claimant is refused with `stale_fence`. → `test_i7_*`, `test_i2_stale_fence_cannot_mutate_after_takeover`
-5. ✅ Graceful disconnect releases claims and ends work declarations, and revokes the token.
-   → `test_i7_graceful_leave_releases_immediately`
-6. ✅ `python scripts/check.py` passes.
+**Exit criteria:** ✅ two transports in one room seeing each other honestly · ✅ gapless
+resume from a stale cursor · ✅ concurrent claim race yields exactly one winner + recorded
+conflict · ✅ dead claimant's lease expires and its revival is refused with `stale_fence` ·
+✅ graceful disconnect releases claims · ✅ gate green.
 
-### M0 — Pivot checkpoint & project harness ✅ (2026-08-14)
-- V0 (chat-centric, OpenAI-driven) committed as `ba2e94c` so reusable pieces stay in history.
-- Repo audited; reuse/replace decisions recorded in `docs/DECISIONS.md` (D-002).
-- `CLAUDE.md` + `docs/{PRODUCT,ARCHITECTURE,PROTOCOL,SECURITY,ROADMAP,DECISIONS}.md` written.
-- Four corrections applied before the domain hardened, recorded as D-008…D-011: coordination-
-  orchestrator framing, disclosure boundary over domain shape, capabilities over provider labels,
-  persistence portability.
+### M1.5 — Joining simplified, and real auth for hosted agents ✅ (2026-08-15)
+
+Not a planned milestone; it emerged from trying to connect a hosted agent and is worth
+keeping as a unit.
+
+- **One-call room creation.** `room.create` joins the creator as owner and mints a reusable
+  join token in the same transaction, ending a bootstrap paradox that both test files had
+  been working around by hand (D-013).
+- **A seat is `(owner, display_name)`.** One human brings Claude Code *and* Codex *and*
+  ChatGPT as three independently graded participants (D-015).
+- **`execution_mode` required at join**, no default — `unattended_loop` |
+  `human_turn_only` | `observer`. Replaced four capability booleans, because defaults have to
+  lean somewhere and over-claiming is the expensive direction (D-014).
+- **OAuth 2.1** — RFC 9728 + RFC 8414 discovery, RFC 7591 dynamic registration, mandatory
+  PKCE `S256`, single-use codes where a replay revokes what it bought, rotating refresh
+  tokens, RFC 8707 audience binding, RFC 7009 revocation, and a consent screen where **a
+  human binds the agent identity** so an agent cannot name itself (D-016).
+- **Three bugs unit tests could not see**, each found by driving a real client against a real
+  server: a cross-task ContextVar that made the principal invisible inside a tool; a spoofed
+  display name surviving a correct identity resolution; and `421 Misdirected Request` from the
+  MCP SDK's loopback-only Host allowlist (D-017).
+- **Compact tool payloads** — `join_room` 3,743 → 359 tokens, `get_room_state` 3,426 → 834,
+  a poll 5,067 → 1,465.
+
+**Kept, but reclassified as Cottage tooling and now frozen:** `serve-public.ps1`,
+`tunnel.ps1`, `dev.ps1`, and the port/reachability guards.
+
+---
 
 ## Next
 
-### M2 — Authorized shared state & artifacts (next up)
-Shared state with provenance + CAS (`docs/PROTOCOL.md §6`); artifacts with version trees,
-divergence detection, explicit resolution (§7); UI state/artifact panels.
+### M3 — Authorized shared state & artifacts
+Shared state with provenance + CAS (`docs/PROTOCOL.md` §6); artifacts with version trees,
+divergence detection, explicit resolution (§7); UI panels. Replace the I8 *contract* test with
+a behavioral one — it fails deliberately the moment `core/artifacts.py` exists, so it cannot
+be forgotten.
 
-First tasks, in order:
-1. `core/state.py` — `state.set` with required provenance and CAS on `expected_revision`; no
-   last-writer-wins path. `state_cas_failure` conflict on collision. The command contract
-   (`SetStateCommand`) already exists.
-2. `core/artifacts.py` — version tree, fast-forward vs divergence, `artifact.resolve_divergence`.
-3. Replace the I8 *contract* test
-   (`test_i8_artifact_divergence_contract_is_specified_and_not_yet_implemented`) with a behavioral
-   one: a divergent publish is accepted, does **not** move head, and raises
-   `artifact.divergence_detected`. That test fails deliberately the moment `core/artifacts.py`
-   exists, so it cannot be forgotten.
-4. Frontend: shared-state panel showing provenance and `unverified` labelling; artifact version graph.
-
-### M3 — Task graph depth
-Proposals with accept/reject/delegate chains — the schema, event types, and `_propose_tx` already
-exist; resolution does not. Dependencies and blocking propagation; priority and capability-aware
-routing. Duplicate and overlapping-work detection (§8) already landed in M1.
-
-### M4 — A2A adapter
-Agent card publication, inbound delivery, outbound push, untrusted-agent trust tiers and vouching,
-SSRF-safe egress.
+### M4 — Task graph depth
+Proposals with accept/reject/delegate chains (schema, event types and `_propose_tx` exist;
+resolution does not); dependencies and blocking propagation; capability-aware routing.
 
 ### M5 — Multi-tenancy & policy hardening
-Real auth (OIDC), org admin surfaces, cross-org invitation flows, room policies, rate limiting,
-per-recipient privacy filtering test matrix.
+Org admin surfaces, room policies, rate limiting, per-recipient privacy filtering matrix.
+Partly absorbed into M2.5, since Hosted requires real accounts.
 
 ### M6 — Retention, audit, deletion
 TTL expiry and purge with tombstones, event-log truncation with `resume_gap`, audit export.
 
-### M7 — Interactive-client experience
-The digest read for ChatGPT-class hosts ("what changed and what needs you"), pasteable turn output,
-interactive lease policy tuning.
+### M7 — Attended-host experience
+Deepen M2.4: richer digests, pasteable turn output, lease tuning for `attended` seats.
+
+---
 
 ## Known blockers / open questions
 
-- **PostgreSQL compatibility must be established before external beta** (D-011). No invariant
-  depends on SQLite locking today, but that is currently argued rather than demonstrated. Needs: a
-  migration mechanism, a `TEXT` vs `timestamptz` review, and the concurrency invariants (I1, I3) run
-  against Postgres.
-- **Partially resolved (D-016): OAuth 2.1 for MCP clients has landed**, pulled forward from M5
-  because ChatGPT's connector dialog requires it. Discovery, dynamic registration, PKCE `S256`,
-  audience binding, refresh rotation, revocation, and a consent screen that binds the agent
-  identity are all implemented and verified over the wire. Still outstanding for M5: a real login
-  on the consent screen (it currently takes a pasted principal token), org admin surfaces, and
-  cross-org invitation flows. `DEV_BOOTSTRAP_TOKEN` remains the human's credential until then.
-- ~~**The room creator is not automatically a participant.**~~ **Resolved (D-013).** `room.create`
-  now joins the creator as owner and mints the default join token in the same transaction. The
-  hand-seeded owner row is gone from both test files and the MCP adapter gained `create_room`, so an
-  agent host never needs the browser.
-- **SSE carries the participant token as a query parameter**, because `EventSource` cannot set
-  headers. Room-scoped and revoked on leave, but it reaches access logs. A cookie-based stream
-  session is an M5 item. Lower priority than it looks: SSE is the console's transport, and every
-  agent uses MCP with header auth.
-- **Single-process bus.** Horizontal scale needs the `core/bus.py` broker seam (ADR-008). Not a
-  blocker for M1–M4.
-- **Interactive-host liveness is inherently weak** for any host that declares
-  `requires_human_presence`. No fix exists that we are willing to build (no browser automation —
-  ADR-007). M7 mitigates via digests, not synthetic wake-ups.
-- **Duplicate detection is lexical only** — normalized title match, plus containment when a target is
-  shared. Embedding similarity would require inference we do not pay for (ADR-006), so the ceiling on
-  quality here is deliberate. Revisit only if false negatives prove costly in practice.
-- **Content inspection cannot catch deliberate paraphrase** (D-009). Accepted limitation; the
-  controls that work against it are authorization, privacy classes, provenance, and the audit log.
+- **No second-vendor client has ever joined a room.** Every "verified" row in
+  `docs/INTEROP.md` was verified by our own software. Until that changes, cross-platform is a
+  design property, not an observed one. **This is the most important open item.**
+- **PostgreSQL compatibility is argued, not demonstrated** (D-011). No invariant depends on
+  SQLite locking, but that needs proving: a migration mechanism, a `TEXT` vs `timestamptz`
+  review, and the concurrency invariants (I1, I3) run against Postgres. Folded into M2.5.
+- **Hosted mode does not exist.** Everything runs on a laptop behind a rotating tunnel, so
+  "invite someone over the internet" is currently false in practice.
+- **A2A is a 5-line placeholder.**
+- **Consent takes a pasted principal token, not a login.** Adequate for Cottage; blocking for
+  Hosted.
+- **Attended hosts are inherently weak on liveness.** No fix we are willing to build (no
+  browser automation — ADR-007). M2.4/M7 mitigate with digests, not synthetic wake-ups.
+- **Duplicate detection is lexical only.** Embeddings would require inference we do not pay
+  for (ADR-006), so the quality ceiling here is deliberate.
+- **Content inspection cannot catch deliberate paraphrase** (D-009). Accepted; the controls
+  that work are authorization, privacy classes, provenance, and the audit log.

@@ -1,8 +1,26 @@
 # Agent Rooms — Authoritative Project Rules
 
 Agent Rooms is a **provider-neutral live collaboration network for independently owned AI agents**.
-Users bring their own agents and subscriptions (ChatGPT, Claude Code, Codex, Cursor, corporate
-agents, A2A agents). We do not pay for model inference.
+Users bring their own agents and subscriptions (ChatGPT, Claude Code, Codex, Cursor, Gemini, Grok,
+corporate agents, A2A agents). We do not pay for model inference.
+
+## The claim everything is judged against
+
+> Anyone starts a room. They invite someone over the internet. Both ends have humans *and*
+> agents. **Any combination of hosts works** — Claude Code ↔ ChatGPT, ChatGPT ↔ ChatGPT,
+> Claude Code ↔ Gemini, Claude ↔ Grok, or all four in one room.
+
+Universal cross-platform connectivity is the product, not a feature of it. Before starting work,
+ask what it does for that sentence. Two failure modes to watch for, both of which have already
+happened once:
+
+1. **Vendor gravity.** Deep work to make *one* host connect, while the cross-platform claim stays
+   untested. Effort on a single vendor's integration path is only justified if it generalises.
+2. **Cottage drift.** Exposing a laptop is developer convenience, not progress toward a hosted
+   service anyone can invite a stranger into. See `docs/DEPLOYMENT_MODES.md` and cap the effort.
+
+`docs/INTEROP.md` is the accountability record: every host family, its join path, and whether we
+have *actually observed* it work. A row marked unverified is a claim we may not make.
 
 Core loop — this is the product:
 
@@ -120,9 +138,12 @@ backend\.venv\Scripts\python.exe scripts\check.py
 ## Working agreement
 
 **Before any architectural change or new implementation phase**, re-read in this order:
-`CLAUDE.md` → `docs/PRODUCT.md` → `docs/ARCHITECTURE.md` → `docs/PROTOCOL.md` →
-`docs/SECURITY.md` → `docs/ROADMAP.md`. Then inspect current code and tests, update
-`docs/ROADMAP.md`, and only then implement.
+`CLAUDE.md` → `docs/INTEROP.md` → `docs/PRODUCT.md` → `docs/ARCHITECTURE.md` →
+`docs/PROTOCOL.md` → `docs/SECURITY.md` → `docs/ROADMAP.md`. Then inspect current code and
+tests, update `docs/ROADMAP.md`, and only then implement.
+
+`docs/INTEROP.md` is second on that list deliberately: it is the fastest way to see whether
+the next piece of work serves universality or narrows it.
 
 **At the end of every meaningful phase:** run the test/typecheck/lint gate → update
 `docs/ROADMAP.md` → update `docs/ARCHITECTURE.md` / `docs/PROTOCOL.md` if behavior changed →
@@ -136,9 +157,12 @@ decided explicitly and recorded in `docs/DECISIONS.md`.
 
 | File | Contains |
 |---|---|
+| `docs/INTEROP.md` | **Which hosts can share a room, and whether we have observed it.** The universality record |
+| `docs/DEPLOYMENT_MODES.md` | Cottage (a laptop, temporary) vs Hosted (the product). Read before any exposure work |
 | `docs/PRODUCT.md` | Canonical behavior/UX, what this is and is not, connection states, host capabilities |
 | `docs/ARCHITECTURE.md` | Domain model, realtime architecture, adapter boundaries, tenancy, ADRs |
 | `docs/PROTOCOL.md` | ARP events/commands, leases, presence, reconnect/replay, artifact conflicts |
 | `docs/SECURITY.md` | Trust model, authorization, tenant boundaries, untrusted agents, privacy classes |
-| `docs/ROADMAP.md` | Ordered milestones, current/completed/next work, blockers |
+| `docs/ROADMAP.md` | Ordered milestones, the 2026-08-15 course correction, blockers |
 | `docs/DECISIONS.md` | Append-only decision log |
+| `docs/CONNECT_CHATGPT.md` | One host's join recipe. Cottage-mode instructions; not the product path |

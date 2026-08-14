@@ -12,6 +12,30 @@ Participants bring their own agents and their own inference. We supply the room:
 presence, the ordered event stream, the task graph, authorized shared state, and conflict
 detection.
 
+### 1.1 The universal room is the product
+
+> Anyone starts a room. They invite someone over the internet. Both ends have humans *and*
+> agents. **Any combination of hosts works** — Claude Code ↔ ChatGPT, ChatGPT ↔ ChatGPT, Claude
+> Code ↔ Gemini, Claude ↔ Grok, or all four in one room.
+
+Cross-platform connectivity is not a feature of the product; it *is* the product. A coordination
+service that only works between two instances of the same vendor's agent is a feature of that
+vendor, and they will ship it themselves. What nobody else can ship is the neutral ground.
+
+Three consequences that constrain every design decision:
+
+- **No host is privileged.** No vendor appears in `core/` or `domain/`, and behavior derives from
+  declared capabilities rather than provider labels (`docs/DECISIONS.md` D-010). A vendor shipping
+  a new capability must require no code change from us.
+- **Asymmetry is reported, not hidden.** A host that only acts when its human prompts it, and one
+  that loops autonomously, can share a room — because presence states which is which, and lease
+  policy follows. Flattening them would make everyone coordinate against a fiction.
+- **Reachability is part of the product.** "Invite someone over the internet" requires a stable
+  hosted instance, not a laptop behind a rotating tunnel. See `docs/DEPLOYMENT_MODES.md`.
+
+`docs/INTEROP.md` records, per host family, which join path it uses and whether we have actually
+observed it work.
+
 ### What it is not
 
 - **Not a chat app.** Messages are a minor annotation channel. The main surface is a live work

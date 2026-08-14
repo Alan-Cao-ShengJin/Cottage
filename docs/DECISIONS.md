@@ -331,12 +331,12 @@ belongs to. Not worth it for a case that has a one-word workaround ("use a diffe
 
 ---
 
-## D-016 — OAuth 2.1 with human-bound identity is the connection path for hosted agents
-**Date:** 2026-08-15 · **Status:** accepted · **Pulls M5 identity work forward**
+## D-016 â€” OAuth 2.1 with human-bound identity is the connection path for hosted agents
+**Date:** 2026-08-15 â€” **Status:** accepted â€” **Pulls M5 identity work forward**
 
 ChatGPT's custom-plugin dialog takes a server URL and defaults to **OAuth**, discovering
 configuration from the MCP endpoint. So the MCP authorization spec is not a hardening option
-we chose — it is the only way a hosted client can attach. It also happened to be exactly the
+we chose â€” it is the only way a hosted client can attach. It also happened to be exactly the
 "real auth before exposure" the product owner asked for, so the two requirements collapsed
 into one piece of work.
 
@@ -349,15 +349,15 @@ carries an `agent_identity_id` a *human* selected at the consent screen, and the
 token's subject is that identity. Before this, a client redeeming a join token chose its own
 `display_name`, so identity was a claim; in a cross-org room a display name is what other
 participants trust, which made that a real integrity hole. Consent refuses an identity the
-consenting human does not own, and refuses an agent token outright — an agent must not
+consenting human does not own, and refuses an agent token outright â€” an agent must not
 authorize another agent.
 
 **Rejected: `plain` PKCE** (advertising it invites use, and public clients get no secret, so
-the code alone must never suffice). **Rejected: treating a code replay as a stale request** —
+the code alone must never suffice). **Rejected: treating a code replay as a stale request** â€”
 `consumed_at` is a guard column rather than a delete so a replay is *detectable*, and when it
 happens the tokens the first exchange produced are revoked, because the code evidently
 leaked. **Rejected: accepting any non-http redirect scheme** for native clients; that admitted
-`ftp://`, so a reverse-DNS private-use scheme is required (RFC 8252 §7.1).
+`ftp://`, so a reverse-DNS private-use scheme is required (RFC 8252 â€”7.1).
 
 **Two independent startup guards** refuse public exposure with the repo's published default
 token, or with `MCP_REQUIRE_AUTH` off. Two rather than one, so flipping a single switch cannot
@@ -366,8 +366,8 @@ browser round-trip per restart, and a guard is a better control than a warning.
 
 ---
 
-## D-017 — Verify the auth path over the wire; unit tests cannot see these failures
-**Date:** 2026-08-15 · **Status:** accepted
+## D-017 â€” Verify the auth path over the wire; unit tests cannot see these failures
+**Date:** 2026-08-15 â€” **Status:** accepted
 
 Three bugs shipped green through 172 unit tests and were caught only by driving a real client
 against a real server. Recording them because they share a shape: each was a false pass created
@@ -379,7 +379,7 @@ by the test harness being *more convenient* than reality.
    passed. Fixed by reading the bearer token from the per-message request context
    (`ctx.request_context.request`), with the SDK's auth context and the ContextVar as fallbacks.
 2. **Identity resolved correctly and the room still showed a spoofed name.** `join_room` accepts
-   a per-room display name (D-015), and the client's value was winning over the bound identity —
+   a per-room display name (D-015), and the client's value was winning over the bound identity â€”
    the bug lived *between* two individually-correct steps. `_resolve_identity` now returns the
    effective name alongside the identity, so the decision is made where authentication is known.
 3. **`421 Misdirected Request` on any non-loopback host.** The MCP SDK enables DNS-rebinding
@@ -388,5 +388,69 @@ by the test harness being *more convenient* than reality.
    derived from `PUBLIC_BASE_URL`: whatever address we publish is an address we must accept.
 
 `scripts/verify_oauth_flow.py` is kept in the repo for this reason, and both (1) and (2) now
-have regression tests that use a fake per-message request context rather than the ContextVar —
-asserting through the ContextVar would recreate the original false pass.
+have regression tests that use a fake per-message request context rather than the ContextVar â€”
+asserting through the ContextVar would recreate the original false pass.
+
+---
+
+## D-018 â€” Two deployment modes, named: Cottage and Hosted
+**Date:** 2026-08-15 Â· **Status:** accepted
+
+Running the server on a laptop behind a tunnel, and running it as an always-on service at a stable
+hostname, are different products from the *user's* side even though the core is identical. Leaving
+them unnamed let effort flow into the first while the second â€” the one the product claim requires â€”
+stayed unbuilt.
+
+**Cottage:** one person's machine, exposed temporarily. Rotating URL, `DEV_BOOTSTRAP_TOKEN` as the
+human credential, SQLite. Legitimate for development, demos, and a single trusting team. Useless for
+inviting another company: the URL dies on restart and takes every token minted against it, and there
+is no operator to vouch for anyone.
+
+**Hosted:** stable hostname, real accounts, PostgreSQL, invitation links that survive restarts. This
+is what "anyone starts a room and invites anyone over the internet" actually needs.
+
+**Consequence, and the reason for writing it down:** exposure plumbing for Cottage is not progress
+toward Hosted. A tunnel script does not become a deployment. `docs/DEPLOYMENT_MODES.md` carries the
+rule â€” *before investing in exposure, name which mode it serves; if Cottage, cap the effort.*
+
+The name Cottage is the product owner's.
+
+---
+
+## D-019 â€” M2 is universal connectivity, not shared state
+**Date:** 2026-08-15 Â· **Status:** accepted Â· **Reorders D-007's plan**
+
+D-007 deferred shared state and artifacts to M2 and A2A to M4. That ordering assumed the room's
+*universality* was settled and only its depth remained. It was not settled, and the intervening work
+made that visible.
+
+**What happened.** Connecting one hosted agent (ChatGPT) to a laptop consumed four commits of tunnel
+plumbing â€” provider switching, port guards, reachability probes, URL parsing. Each fixed a real bug.
+None advanced the product: they serve Cottage. Meanwhile the A2A adapter remained a five-line
+placeholder, no second vendor's client had ever joined a room, and no invitation had crossed the
+internet between two orgs. The cross-platform claim was entirely untested while effort went into one
+vendor's reachability.
+
+**Why the ordering flips.** The differentiator is the cross-platform room. Deepening a room whose
+universality is unproven optimises the wrong axis, and shared state built against a single adapter
+would need revisiting once three more exist. So M2 becomes: an interop conformance harness first (so
+every later path has a bar to clear), then A2A, a generalised function-calling path, an
+attended-paste path for hosts that cannot call tools at all, Hosted deployment, and a real cross-org
+invitation. Shared state moves to M3.
+
+**Not re-litigated.** The core (event log, leases with fencing, capability-derived presence,
+disclosure boundary, conflicts) is provider-neutral and was never the problem. OAuth 2.1 is needed by
+*every* hosted agent host and is not ChatGPT-specific. The capability model (D-010) is exactly the
+abstraction that makes "any combination" expressible. Compact payloads matter for every metered host.
+That work stands.
+
+**The generalisable lesson**, recorded because it will recur: a vendor-specific integration path is
+worth building only insofar as it generalises. ChatGPT's own "Tunnel" feature is the clearest case â€”
+adopting it would have made the product's reachability depend on one vendor's private mechanism. The
+guard is now in `CLAUDE.md` under "vendor gravity", and `docs/INTEROP.md` exists so the universality
+claim has to be evidenced per host family rather than asserted once.
+
+**Honest status this produces:** every "verified" row in `docs/INTEROP.md` was verified by our own
+client software. Until a second vendor's client actually joins a room, cross-platform is a design
+property, not an observed one. That is now the top item in the roadmap's blocker list.
+
