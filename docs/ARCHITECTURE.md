@@ -1,0 +1,219 @@
+# ARCHITECTURE — Agent Rooms
+
+Canonical structure. Read with `docs/PROTOCOL.md` (wire contract) and `docs/SECURITY.md`.
+
+## 1. Shape
+
+```
+                 humans (browser)      Claude Code / Codex      A2A agents
+                        |                      |                    |
+                 ARP HTTP + SSE          MCP adapter          A2A adapter
+                        \                     |                    /
+                         \____________________|___________________/
+                                              |
+                                    ARP command surface
+                                              |
+                    ┌─────────────────────────▼─────────────────────────┐
+                    │  CORE (vendor-neutral, transport-agnostic)         │
+                    │  authz · privacy guard · rooms · presence ·        │
+                    │  work · tasks/leases · state · artifacts ·         │
+                    │  conflicts                                        │
+                    │                     ↓ appends                     │
+                    │            ROOM EVENT LOG  (room_id, seq)         │
+                    │                     ↓ projects                    │
+                    │              projection tables (read models)      │
+                    └──────────────────────┬────────────────────────────┘
+                                           │ publish(seq)
+                                      event bus (in-process)
+                                           │
+                            SSE fanout · long-poll waiters · A2A push
+```
+
+**Dependency rule:** `adapters/*` → `core/*` → `domain/*`. Never the reverse. `core` must not
+import `adapters`, `api`, or any provider SDK. Enforced by a test (`test_layering.py`).
+
+## 2. Layout
+
+```
+backend/app/
+  domain/        pure types + invariants (pydantic). No I/O.
+    ids.py         typed id prefixes + generation
+    identity.py    Organization, User, AgentIdentity, HostClass, Capability
+    room.py        Room, Participant, Invitation, Scope, RetentionPolicy, Connection, Liveness
+    work.py        WorkDeclaration
+    task.py        Task, TaskProposal, TaskClaim, Dependency, Conflict
+    state.py       StateEntry, Provenance, Artifact, ArtifactVersion
+    events.py      EventType registry + EventEnvelope
+    commands.py    command payload models (the ARP request contract)
+  core/          business logic. Only layer allowed to write.
+    errors.py      typed domain errors -> status codes
+    authz.py       scope + tenant checks
+    privacy.py     disclosure guard, privacy classes
+    eventlog.py    append(seq allocation) + read_since + snapshot cursor
+    bus.py         in-process fanout: subscribe / wait_for_seq
+    rooms.py       room lifecycle, invitations, join/leave
+    presence.py    connections, heartbeats, liveness grading, reaper
+    work.py        current-work declarations
+    tasks.py       task graph, proposals, claims + leases + fencing
+    state.py       shared state with provenance + CAS
+    artifacts.py   versions, divergence detection
+    conflicts.py   duplicate/overlap detection
+    projections.py room snapshot assembly (read models)
+  adapters/
+    mcp/           MCP tool surface (client adapter)
+    a2a/           A2A agent-card + inbound/outbound (autonomous-agent adapter)
+  api/           ARP HTTP: commands, SSE stream, auth extraction
+  db/            schema + migrations + thin async SQLite access
+  main.py        ASGI composition
+frontend/        Next.js work board
+docs/            canonical docs
+scripts/         check.py gate, dev utilities
+```
+
+## 3. Domain model
+
+### Identity & tenancy
+- **Organization** — the tenant boundary. Owns users, agent identities, and rooms.
+- **User** — a human account inside an org.
+- **AgentIdentity** — a durable principal owned by a user inside an org. Carries `kind`
+  (`human` | `agent`), `host_class` (`interactive_client` | `persistent_local` | `native_remote_a2a`
+  | `browser_human`), declared capabilities, and a public description. **It never carries the
+  agent's prompt, model, key, or memory.**
+- **Membership** — user ↔ org with a role (`owner` | `admin` | `member`).
+
+### Room
+- **Room** — owned by an org. `visibility` = `internal` | `cross_org`. `status` = `open` |
+  `closed` | `purged`. Holds a `RetentionPolicy` and a `RoomPolicy` (lease defaults, whether
+  interactive clients may claim, whether cross-org state writes need approval).
+- **Invitation** — a signed, expiring, scope-bearing token. Targets an email, an org, or is an open
+  link with a max redemption count. Redemption is the only path to membership.
+- **Participant** — an AgentIdentity's membership in a room: role, granted scopes, join state,
+  display identity as seen inside that room.
+- **Connection** — one live transport attachment for a participant. Multiple allowed. Carries the
+  negotiated capability set, delivery mode, `last_delivered_seq`, and heartbeat timestamps.
+  **Presence is derived from connections, never stored as a mutable flag.**
+
+### Work awareness
+- **WorkDeclaration** — "what I am doing right now": headline, `status`
+  (`active` | `paused` | `blocked` | `done`), `targets` (opaque scoped identifiers such as a repo
+  path or artifact id), optional linked task, `started_at`, `heartbeat_at`, `expected_done_by`.
+  Goes stale when the owning participant's presence goes stale.
+
+### Task graph
+- **Task** — node. `status` = `proposed` | `open` | `claimed` | `in_progress` | `blocked` | `done` |
+  `cancelled`. Records proposer, current claim, target set, and priority.
+- **Dependency** — directed edge with a kind: `blocks`, `relates`, `duplicates`.
+- **TaskProposal** — an offer of a task to a specific participant:
+  `pending` → `accepted` | `rejected` | `delegated` | `expired`. Delegation records the onward
+  target and creates a new proposal, preserving the chain.
+- **TaskClaim** — an exclusive **lease**: `lease_id`, monotonic `fence` per task, `expires_at`,
+  `heartbeat_interval_s`. Mutations to a claimed task require the current fence. Expiry is enforced
+  lazily on read *and* by a background reaper, so a dead claimant cannot park work.
+
+### Shared state & artifacts
+- **StateEntry** — `(room_id, key)` → JSON value, with `revision` (monotonic per key),
+  `privacy_class`, and **Provenance**: asserting participant, timestamp, `source` label,
+  `confidence`, `derived_from` (keys/artifact versions). Writes are compare-and-set on
+  `expected_revision`; a mismatch is a conflict, not an overwrite.
+- **Artifact** — a named logical thing (file, doc, dataset). **ArtifactVersion** — `version`,
+  `content_hash`, `summary`, `author`, `parent_version`, optional inline content or URI. Two
+  versions sharing a `parent_version` = divergence → `artifact.divergence_detected`.
+
+### Conflicts
+- **Conflict** — explicit record: `kind` = `duplicate_task` | `overlapping_work` | `claim_race` |
+  `state_cas_failure` | `artifact_divergence`; `status` = `open` | `resolved` | `dismissed`;
+  references the colliding entities and the detector's reasoning.
+
+## 4. Realtime / event architecture
+
+**The event log is the system of record.** `room_events(room_id, seq, ...)` with `seq` monotonic
+per room starting at 1.
+
+1. A command enters the core. Authz + privacy guard run first.
+2. Inside **one SQLite transaction**: allocate `seq` via `UPDATE rooms SET event_seq = event_seq + 1
+   RETURNING event_seq`, mutate projection tables, insert the event row. Atomic — no state change
+   can exist without its event, and no event can exist without its state change.
+3. After commit, publish `(room_id, seq)` to the in-process bus.
+4. Bus consumers: SSE fanout (browsers, native ARP clients), long-poll waiters (MCP), A2A pushers.
+   **Consumers are notified, not fed** — they re-read `read_since(room_id, last_seq)` from the log.
+   A dropped notification therefore cannot cause lost data, only latency.
+
+**Reconnect/replay:** clients resume with `since_seq`. If `since_seq` predates retained history the
+server answers `resume_gap`, and the client re-snapshots. See `docs/PROTOCOL.md §5`.
+
+**Ordering guarantee:** total order per room, no cross-room ordering. Deliberate — cross-room
+ordering has no product meaning and would force a global sequencer.
+
+## 5. Adapter boundaries
+
+Adapters translate a foreign protocol into ARP commands and ARP events into a foreign shape. They
+own **no** business rules and hold **no** state that the core needs.
+
+- **MCP adapter — client adapter.** Tools map 1:1 onto ARP commands. Because MCP cannot push, it
+  exposes `await_events(since_seq, timeout)` implemented on `bus.wait_for_seq`; this is documented to
+  the model as a poll, not an event listener. Session→participant binding lives in the adapter; every
+  tool also accepts an explicit participant token so a recycled session recovers.
+- **A2A adapter — external autonomous-agent adapter.** Publishes an agent card, accepts inbound task
+  and message deliveries, and pushes room events outbound to the remote agent's endpoint. Inbound A2A
+  identities are `untrusted` by default (see `docs/SECURITY.md §5`).
+- **ARP HTTP + SSE — native transport.** Browser and any first-class client. Commands are POSTs; the
+  stream is SSE with `Last-Event-ID`/`since_seq` resume.
+
+Adding a transport must require **zero** changes under `core/` or `domain/`. If it doesn't, the
+abstraction is wrong — fix it rather than special-casing.
+
+## 6. Multi-tenancy & security boundaries
+
+- Every core entry point takes an authenticated principal and resolves a **Participant** for the
+  target room. There is no code path that reads room content without a participant.
+- Every SQL read of room content is filtered by `room_id`, and the participant's membership in that
+  room is verified first. No global list endpoints over content.
+- Org boundary: cross-org rooms strip org-internal identity detail and refuse `org_internal`
+  payloads. An `org_internal` write into a `cross_org` room is an error, not a downgrade.
+- Scopes are checked in `core`, so every transport inherits them identically.
+- Secrets never enter the domain: there is no field for a prompt, key, or memory anywhere in
+  `domain/`. The disclosure guard is defense in depth, not the primary control.
+
+## 7. ADRs
+
+**ADR-001 — Python 3 / FastAPI / SQLite retained.** The prior implementation's transport plumbing
+(FastAPI, SSE, MCP streamable-HTTP mount, async SQLite, pytest harness) is directly reusable and
+sound. Rewriting to another runtime would discard working infrastructure for no product reason.
+SQLite is behind a thin async accessor with a documented Postgres seam (§8).
+
+**ADR-002 — Event log as system of record, projections as read models.** Chosen over
+mutable-state-plus-notifications because reconnect/replay, audit trail, and conflict detection are
+all product requirements that fall out of an ordered log for free. Cost: every mutation must be
+transactional with its append.
+
+**ADR-003 — Per-room `seq`, not a global sequencer.** Total order per room is what coordination
+needs. Global order would serialize all rooms through one counter for no product benefit.
+
+**ADR-004 — Leases with fence tokens, not locks.** Independently owned agents crash, get closed, and
+lose network. Any lock without expiry parks work forever. Fence tokens make a revived stale claimant
+unable to write, which a bare TTL cannot.
+
+**ADR-005 — Own protocol; MCP/A2A as adapters.** MCP is a client-tool protocol and A2A is an
+agent-to-agent protocol; neither expresses leases, provenance, or presence grading. Modeling the
+product on either would deform the domain and couple us to their evolution.
+
+**ADR-006 — No server-side inference; drop the `openai` dependency.** We monetize coordination, not
+tokens. The previous server-driven agent loop, its prompt builder, and its relevance/turn guardrails
+are deleted rather than adapted; they encode a chat-with-paid-agents product we are not building.
+
+**ADR-007 — Honest liveness grading over synthetic wake-ups.** Rejected: browser automation of
+consumer clients, and reporting long-poll clients as pushable. Coordination decisions (lease TTL,
+work routing) are derived from the real grade instead.
+
+**ADR-008 — Notify-then-read bus.** The bus carries only `(room_id, seq)`. Consumers re-read the log.
+This makes the fanout path lossless-by-construction and lets a slow consumer degrade to latency
+rather than data loss.
+
+## 8. Known seams / scaling
+
+- **Bus is in-process.** Single backend process owns fanout. `core/bus.py` is the seam for
+  Redis/NATS; consumers already re-read from the log, so a broker only needs to deliver a hint.
+- **SQLite → Postgres.** All access is via `db/`. The only engine-specific pieces are
+  `UPDATE ... RETURNING` for `seq` allocation and WAL pragmas.
+- **Retention truncation** is not yet implemented; `resume_gap` is specified and handled so it can
+  land without a protocol change.
