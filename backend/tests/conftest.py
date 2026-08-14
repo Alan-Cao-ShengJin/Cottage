@@ -86,6 +86,11 @@ class RoomFixture:
     room: Room
     owner_user_id: str
     org_id: str
+    #: The creator, joined as owner by `room.create` itself.
+    owner: Participant
+    owner_token: str
+    #: The shareable join token minted with the room.
+    join_token: str
 
     async def refresh(self) -> Room:
         from app.core import store
@@ -115,11 +120,19 @@ async def make_room(fresh_db, org):
         from app.core import store
 
         user_row = await db.fetch_one("SELECT * FROM users WHERE id = ?", (user_id,))
-        room = await rooms.create_room(
+        created = await rooms.create_room(
             user=store.to_user(user_row),
             command=CreateRoomCommand(name=name, visibility=visibility, policy=policy),
+            creator_display_name="Room Owner",
         )
-        return RoomFixture(room=room, owner_user_id=user_id, org_id=org_id)
+        return RoomFixture(
+            room=created.room,
+            owner_user_id=user_id,
+            org_id=org_id,
+            owner=created.participant,
+            owner_token=created.participant_token,
+            join_token=created.join_token,
+        )
 
     return _make
 
@@ -149,12 +162,12 @@ async def join(fresh_db):
     ) -> Member:
         from app.core import store
 
-        # An admin participant is needed to mint invitations; the room owner is
-        # bootstrapped once and reused.
-        admin = await _ensure_admin(room_fixture)
-
+        # The room's owner exists because `room.create` made them one, so nothing here
+        # has to seed a participant row by hand. Every join below goes through real
+        # invitation redemption, which means scope resolution and trust clamping are
+        # exercised on every test rather than bypassed.
         issued = await rooms.create_invitation(
-            participant=admin,
+            participant=room_fixture.owner,
             command=CreateInvitationCommand(role=role, scopes=scopes),
         )
 
@@ -196,62 +209,7 @@ async def join(fresh_db):
     return _join
 
 
-_ADMINS: dict[str, Participant] = {}
-
-
-async def _ensure_admin(room_fixture: RoomFixture) -> Participant:
-    """The room's first participant, created directly as owner.
-
-    This is the one place a test bypasses invitation redemption, because minting the
-    first invitation requires an admin to already exist. Everything else goes through
-    the real path.
-    """
-    from app.core import store
-
-    cached = _ADMINS.get(room_fixture.room.id)
-    if cached is not None:
-        return cached
-
-    identity = await rooms.create_identity(
-        org_id=room_fixture.org_id,
-        owner_user_id=room_fixture.owner_user_id,
-        display_name="Room Owner",
-        kind=PrincipalKind.HUMAN,
-        host_class=HostClass.BROWSER_HUMAN,
-        capabilities=FULL_CAPABILITIES,
-    )
-    from app.core.authz import effective_scopes
-    from app.domain import ids
-    from app.util import hash_token, new_token, utcnow_iso
-
-    participant_id = ids.new_id(ids.PARTICIPANT)
-    token = new_token()
-    await db.execute(
-        """
-        INSERT INTO participants (
-            id, room_id, agent_identity_id, org_id, role, scopes, trust, state,
-            display_name, token_hash, joined_at
-        ) VALUES (?,?,?,?,'owner',?,'member','joined',?,?,?)
-        """,
-        (
-            participant_id,
-            room_fixture.room.id,
-            identity.id,
-            room_fixture.org_id,
-            db.dumps(
-                [s.value for s in effective_scopes(ParticipantRole.OWNER, None, TrustTier.MEMBER)]
-            ),
-            "Room Owner",
-            hash_token(token),
-            utcnow_iso(),
-        ),
-    )
-    participant = await store.load_participant(participant_id)
-    _ADMINS[room_fixture.room.id] = participant
-    return participant
-
-
-@pytest.fixture(autouse=True)
-def _clear_admin_cache():
-    yield
-    _ADMINS.clear()
+# There is deliberately no `_ensure_admin` helper here any more. It used to seed an
+# owner participant row directly, because minting the first invitation required an admin
+# that could not yet exist. `room.create` now joins its creator, so the bootstrap paradox
+# is gone and no test bypasses invitation redemption.

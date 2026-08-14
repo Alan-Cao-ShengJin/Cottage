@@ -306,11 +306,18 @@ async def _on_disconnected_tx(
 
 
 def grade_connection(connection: Connection, *, now=None) -> Liveness:
-    """Grade one connection from its delivery mode and heartbeat age.
+    """Grade one connection from its delivery mechanism, attendedness, and heartbeat age.
 
-    Heartbeat age dominates: a pushable connection that stopped heartbeating is
-    stale, because "we could push to it" says nothing about whether anyone is
-    listening.
+    Three separate facts, deliberately not collapsed:
+
+    * **Mechanism** (`delivery_mode`) — how we get bytes to it. A connector that can
+      poll is genuinely poll-capable, and we do not downgrade the mechanism.
+    * **Attendedness** (`requires_human_presence`) — whether it acts on *our* clock. A
+      client that can poll but only when its human prompts it is **not** `live_poll`;
+      grading it so would tell everyone else to expect prompt responses it cannot give.
+      So this caps the grade at `attended`, regardless of mechanism.
+    * **Heartbeat age** — dominates both. "We could push to it" says nothing about
+      whether anyone is listening, so a silent pushable connection is `stale`.
     """
     if connection.closed_at:
         return Liveness.DISCONNECTED
@@ -323,7 +330,13 @@ def grade_connection(connection: Connection, *, now=None) -> Liveness:
         return Liveness.STALE
     if age > interval * IDLE_AFTER_INTERVALS:
         return Liveness.IDLE
-    return DELIVERY_MODE_LIVENESS.get(connection.delivery_mode, Liveness.IDLE)
+
+    grade = DELIVERY_MODE_LIVENESS.get(connection.delivery_mode, Liveness.IDLE)
+    if connection.profile.requires_human_presence and (
+        LIVENESS_RANK[grade] > LIVENESS_RANK[Liveness.ATTENDED]
+    ):
+        return Liveness.ATTENDED
+    return grade
 
 
 def grade(connections: list[Connection], *, now=None) -> Liveness:

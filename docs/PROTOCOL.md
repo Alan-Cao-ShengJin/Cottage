@@ -128,6 +128,23 @@ Presence is derived, never asserted.
 - Transitions to `stale` mark that participant's work declarations stale. Transition to
   `disconnected` ends its open work declarations and expires its claims.
 
+### Identity, seats, and rejoining
+
+* An **identity** is keyed on `(owner_user, display_name)`. One user owns many identities on
+  purpose: a person brings Claude Code *and* Codex *and* ChatGPT, and each is a separate
+  participant with its own presence, capabilities, and leases. Joining under a new display
+  name creates a new seat; joining under an existing one is a **rejoin**.
+* A rejoin reuses the same `participant_id` — ids appear in claims, provenance, and every
+  event, so a new id per reconnect would make the audit trail unreadable.
+* A rejoin **never reduces standing**: the higher of the existing and invited role wins, with
+  the scopes that were resolved for it. A genuine promotion (higher-role invitation) still
+  applies. Without this, an owner redeeming their own room's collaborator link would demote
+  themselves out of their own room.
+* A rejoin **issues a fresh participant token and invalidates the previous one** for that
+  identity in that room. This is intended — the usual reason to rejoin is having lost the
+  token — but it means a rejoin ends any other live session for that same seat. To add a
+  participant rather than replace one, join under a different display name.
+
 ### Capability negotiation
 
 Client sends on connect:

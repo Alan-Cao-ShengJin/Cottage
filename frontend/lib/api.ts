@@ -73,11 +73,21 @@ export const api = {
   listRooms: (token: string) =>
     request<{ rooms: Room[] }>("/api/rooms", { token }),
 
+  /**
+   * Creates the room, joins you as owner, and mints a shareable join token — one call.
+   * `join_token` is the only thing you hand to anyone else.
+   */
   createRoom: (
     token: string,
     input: { name: string; purpose?: string; visibility?: "internal" | "cross_org" },
   ) =>
-    request<{ room: Room }>("/api/rooms", {
+    request<{
+      room: Room;
+      participant: { id: string; room_id: string };
+      participant_token: string;
+      join_token: string;
+      mcp_url: string;
+    }>("/api/rooms", {
       method: "POST",
       token,
       body: JSON.stringify(input),

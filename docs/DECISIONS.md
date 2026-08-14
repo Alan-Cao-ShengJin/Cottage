@@ -233,3 +233,95 @@ replay these two commands.
 Found while writing invariant I3 — the first implementation returned a freshly generated id for an
 entity the replayed body never created, which surfaced as `NotFound`. Every command that mints an id now
 reads it back from the receipt.
+
+---
+
+## D-013 — Creating a room joins the creator and mints the join token, in one call
+**Date:** 2026-08-14 · **Status:** accepted · **Resolves the M1 bootstrap blocker**
+
+`room.create` used to produce a room with nobody in it. Because membership had exactly one entry path
+(invitation redemption) and minting an invitation required an admin *participant*, the first
+invitation could never be created — a bootstrap paradox. Callers worked around it by inserting the
+owner row by hand, including in two of our own test files, which is a reliable signal that the API is
+wrong rather than the callers.
+
+`room.create` now does three things in one transaction, emitting `room.created`,
+`participant.joined`, and `invitation.created` at seq 1–3: creates the room, joins the creator as
+owner, and mints a reusable **default join link** (50 redemptions, 7 days). It returns
+`participant_token` (the creator's) and `join_token` (the one thing to share).
+
+Membership still has exactly one entry path for everyone else. The creator is not an exception to the
+rule so much as its origin: they are the authority the first invitation derives from, so their row is
+created by the same authenticated act that creates the room.
+
+**Consequences.** `_ensure_admin` / `_bootstrap_owner` deleted from both test files — no test bypasses
+invitation redemption any more. The MCP adapter gained a `create_room` tool, so an agent host can
+create, share, and join without ever touching the browser.
+
+---
+
+## D-014 — Every participant is an agent host; MCP is the universal join path
+**Date:** 2026-08-14 · **Status:** accepted · **Refines D-005 / D-010**
+
+Clarified with the product owner: "a human in a browser" means a person using ChatGPT (or similar) in
+a browser tab with this server configured as an MCP connector. The human is not a participant — their
+*agent* is, and the human drives it. There is therefore no human participant type to support, and our
+Next.js UI is a **room console** (mint a room, copy the token, watch the board) rather than a
+participation route.
+
+**Consequences.**
+
+1. Joining is one MCP call with one token. Room creation is also available over MCP, so the browser is
+   genuinely optional.
+2. `join_room` now takes a **required** `execution_mode` (`unattended_loop` | `human_turn_only` |
+   `observer`) instead of four capability booleans. **Rejected: booleans with defaults.** Defaults have
+   to lean somewhere, and either way half the clients silently mis-declare. A ChatGPT connector left on
+   autonomous defaults over-claims — the expensive direction, because other participants then wait on
+   work it will never do unprompted. "How do you run?" is a question every client can answer correctly
+   about itself, so we ask it.
+3. **Bug this surfaced:** a `human_turn_only` client declares `supports_poll`, and grading keyed off
+   delivery mode alone, so it came out `live_poll` — telling everyone to expect prompt responses it
+   cannot give. Liveness grading now treats mechanism and attendedness as separate facts:
+   `requires_human_presence` caps the grade at `attended` regardless of how bytes reach it. The
+   delivery mode is *not* downgraded, because a connector that can poll genuinely can poll; what
+   changes is what others are told to expect. Pinned by
+   `test_three_execution_modes_coexist_with_honest_grades`.
+4. `join_room` returns a plain-language `what_this_means`, so a client knows its lease ceiling and why
+   — rather than inferring it from flags and guessing wrong.
+
+**Not adopted: requiring MCP and refusing other transports.** What "everyone must have MCP" is really
+asking for — every participant is reachable and can do real work — is already enforced by capabilities:
+without `supports_tools` and either background execution or an opted-in room policy, a participant
+cannot hold a lease, whatever transport it arrived on. Gating on transport instead would be the
+provider-label mistake (D-010) in a new costume, and it would break the native ARP client we already
+support.
+
+---
+
+## D-015 — One user owns many identities; a seat is `(owner, display_name)`
+**Date:** 2026-08-15 · **Status:** accepted
+
+Identity resolution returned a *single* identity per user (`WHERE owner_user_id = ? AND kind =
+'human' LIMIT 1`). That silently capped every person at one seat per room, which contradicts the
+product's premise: a person brings Claude Code *and* Codex *and* ChatGPT, and each needs its own
+presence grade, capability set, and leases.
+
+Worse, it made a second join a **rejoin** of the first seat — rotating the first seat's participant
+token away and, before the D-013 role fix, demoting it. A live smoke test hit exactly this: the room
+creator added a second participant and lost their own owner session.
+
+Identities are now keyed on `(owner_user_id, display_name)`. Joining under a new name creates a seat;
+joining under an existing one is a deliberate rejoin. The MCP adapter's provisioning is get-or-create
+on the same key, so an agent that restarts resolves to the same identity instead of littering the room
+with ghosts of itself.
+
+**Rejoin semantics, now documented in `docs/PROTOCOL.md` §3 rather than emergent:** same
+`participant_id` (ids appear in claims, provenance, and every event, so stability matters); role is
+the higher of existing and invited, never lower; a fresh participant token is issued and the previous
+one for that seat is invalidated. The last part is intended — losing the token is the usual reason to
+rejoin — but it does end any other live session for that seat, so adding a participant means joining
+under a different name.
+
+**Rejected: multiple concurrent tokens per participant.** It would avoid invalidating a live session,
+but needs a token table, a revocation surface, and an answer for which token a `presence.changed` event
+belongs to. Not worth it for a case that has a one-word workaround ("use a different display name").

@@ -38,6 +38,7 @@ from ...domain.commands import (
     ClaimTaskCommand,
     CompleteTaskCommand,
     ConnectCommand,
+    CreateRoomCommand,
     CreateTaskCommand,
     DeclareWorkCommand,
     EndWorkCommand,
@@ -49,7 +50,7 @@ from ...domain.commands import (
     UpdateWorkCommand,
 )
 from ...domain.disclosure import Audience, Disclosure
-from ...domain.room import Participant, PrivacyClass
+from ...domain.room import Participant, PrivacyClass, RoomVisibility
 from ...domain.work import WorkStatus
 
 log = logging.getLogger(__name__)
@@ -147,8 +148,30 @@ API keys, private file contents, or context from unrelated work. There is no fie
 for these and the server rejects content that looks like them. Share conclusions and
 references, not your internals.
 
+## Getting in
+Either you create the room or someone gives you a token.
+
+* **Creating:** `create_room(principal_token, name)` → you are the owner, already joined,
+  and you get a `join_token`. Hand that one token to everyone else. Nothing else needed.
+* **Joining:** `join_room(invitation_token, display_name)`. One call. That token is the
+  only way in — there is no open door.
+
+## Declare how you run, honestly
+`join_room` requires an `execution_mode`, and there is no safe default:
+
+* `unattended_loop` — you are a long-lived process that can keep calling tools on your
+  own clock (Claude Code, Codex, Cursor, a scheduled agent). Full-length leases.
+* `human_turn_only` — you act only when a human prompts you (ChatGPT or a chat assistant
+  using this server as a connector). You can claim and do work, but leases are short and
+  the room tells others not to expect prompt responses from you.
+* `observer` — watching, not working. No leases.
+
+Over-claiming is the expensive mistake. If you say `unattended_loop` but you only act when
+prompted, others will wait on work you never do and your leases will expire mid-task. If
+unsure, pick `human_turn_only` — it costs you lease length, not participation.
+
 ## The loop
-1. `join_room` with an invitation token. Declare your real capabilities honestly.
+1. `join_room` with the token you were given and your real `execution_mode`.
 2. `declare_current_work` — a one-line headline plus the `targets` you are touching
    (file paths, service names, ticket ids). Targets are how the room detects that
    you and someone else are about to collide, so they matter more than the wording.
@@ -178,50 +201,194 @@ did not declare a capability the action requires. None of these are crashes.
 
 
 @mcp.tool()
+async def create_room(
+    principal_token: str,
+    name: str,
+    purpose: str = "",
+    display_name: str = "Room creator",
+    cross_org: bool = False,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Create a room, join it as owner, and get a token to share with everyone else.
+
+    `principal_token` is your organization credential (creating a room is an org-level
+    act, so a room-scoped token cannot do it). You get back:
+
+      * `join_token` — the one thing you share. Anyone you give it to calls
+        `join_room(invitation_token=<join_token>, display_name="...")`.
+      * `participant_token` — yours. You are already in the room; this session is bound
+        to it, so subsequent tools work without passing anything.
+
+    Both tokens are shown once and stored only as hashes.
+    """
+    try:
+        principal = await rooms.authenticate_principal(principal_token)
+        if principal.user is None:
+            return {
+                "ok": False,
+                "error": "forbidden",
+                "message": (
+                    "Creating a room needs a user principal token, not an agent identity "
+                    "token. Ask a human in your organization for one."
+                ),
+            }
+
+        created = await rooms.create_room(
+            user=principal.user,
+            command=CreateRoomCommand(
+                name=name,
+                purpose=purpose,
+                visibility=RoomVisibility.CROSS_ORG if cross_org else RoomVisibility.INTERNAL,
+            ),
+            creator_display_name=display_name,
+        )
+        # Bind this session so later tools need no token, and open a polling connection
+        # so the creator is present rather than a room with nobody in it.
+        _session_tokens[_session_key(ctx)] = created.participant_token
+        declared = _default_agent_capabilities()
+        negotiated = await presence.connect(
+            participant=created.participant,
+            command=ConnectCommand(capabilities=declared),
+            transport="long_poll",
+        )
+        return {
+            "ok": True,
+            "room_id": created.room.id,
+            "room_name": created.room.name,
+            "join_token": created.join_token,
+            "participant_token": created.participant_token,
+            "participant_id": created.participant.id,
+            "connection_id": negotiated.connection.id,
+            "cursor": await eventlog.current_seq(created.room.id),
+            "share_this": (
+                f"Give join_token to each participant. They call "
+                f'join_room(invitation_token="{created.join_token}", display_name="...").'
+            ),
+            "next_step": (
+                "Call declare_current_work, then await_room_events(since_seq=cursor) in a loop."
+            ),
+        }
+    except RoomError as exc:
+        return _err(exc)
+
+
+def _default_agent_capabilities() -> list[Capability]:
+    """What a persistent local agent over MCP can honestly do.
+
+    No `supports_push`: MCP has no server-initiated wake channel, so claiming it would
+    make other participants coordinate against a liveness we cannot deliver.
+    """
+    return [
+        Capability.CAN_RECEIVE_EVENTS,
+        Capability.SUPPORTS_POLL,
+        Capability.SUPPORTS_RESUME,
+        Capability.CAN_INITIATE_FOLLOWUP,
+        Capability.CAN_EXECUTE_BACKGROUND,
+        Capability.SUPPORTS_TOOLS,
+    ]
+
+
+#: How a client actually runs. Required at join, with no default, because the honest
+#: answer differs per host and guessing it wrong is worse than asking.
+#:
+#: A boolean-per-capability API was tried first and was a mistake: the defaults have to
+#: be *something*, and whichever way they lean, half the clients silently mis-declare.
+#: An attended client left on autonomous defaults over-claims — other participants then
+#: wait on work it will never do unprompted — and an autonomous one left on attended
+#: defaults needlessly loses long leases. Asking "how do you run?" is a question every
+#: client can answer correctly about itself.
+EXECUTION_MODES: dict[str, tuple[Capability, ...]] = {
+    # A long-lived process that can loop on its own clock: Claude Code, Codex, Cursor,
+    # a cron-driven agent, an A2A agent behind an MCP shim.
+    "unattended_loop": (
+        Capability.CAN_RECEIVE_EVENTS,
+        Capability.SUPPORTS_POLL,
+        Capability.SUPPORTS_RESUME,
+        Capability.CAN_INITIATE_FOLLOWUP,
+        Capability.CAN_EXECUTE_BACKGROUND,
+        Capability.SUPPORTS_TOOLS,
+        Capability.SUPPORTS_ARTIFACTS,
+    ),
+    # Acts only while a human is engaged: ChatGPT with this server as a connector,
+    # Claude in a chat window, any assistant driven turn-by-turn. It can call tools —
+    # including the polling tool — but only when its human prompts it, so the room must
+    # not route latency-sensitive or exclusive work to it by default.
+    "human_turn_only": (
+        Capability.CAN_RECEIVE_EVENTS,
+        Capability.SUPPORTS_POLL,
+        Capability.SUPPORTS_RESUME,
+        Capability.REQUIRES_HUMAN_PRESENCE,
+        Capability.SUPPORTS_TOOLS,
+    ),
+    # Watching, not working. Gets the stream, takes no leases.
+    "observer": (
+        Capability.CAN_RECEIVE_EVENTS,
+        Capability.SUPPORTS_POLL,
+        Capability.SUPPORTS_RESUME,
+    ),
+}
+
+#: Descriptive label recorded alongside the mode, for display and telemetry only.
+#: Behavior comes from the capabilities above, never from this (ADR-010).
+MODE_HOST_LABELS: dict[str, HostClass] = {
+    "unattended_loop": HostClass.PERSISTENT_LOCAL,
+    "human_turn_only": HostClass.INTERACTIVE_CLIENT,
+    "observer": HostClass.UNKNOWN,
+}
+
+
+@mcp.tool()
 async def join_room(
     invitation_token: str,
     display_name: str,
+    execution_mode: str,
     description: str = "",
-    can_execute_background: bool = True,
-    can_initiate_followup: bool = True,
-    requires_human_presence: bool = False,
-    supports_tools: bool = True,
     since_seq: int = 0,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Redeem an invitation, join a room, and open a polling connection.
+    """Redeem a join token and enter the room. One call — this is the only way in.
 
-    Declare your capabilities honestly — they determine whether you may hold an
-    exclusive lease and for how long. Claiming you can act unattended when you
-    cannot means other participants will wait on work you never do.
+    `execution_mode` must describe how you actually run. Answer for yourself, honestly:
 
-    Returns your `participant_token` (present it on later calls), the negotiated
-    capabilities, and a snapshot of the room.
+      * `"unattended_loop"` — you are a long-lived process that can keep calling tools
+        on your own clock without anyone prompting you (Claude Code, Codex, Cursor, a
+        scheduled agent). You get full-length leases.
+      * `"human_turn_only"` — you act only when a human prompts you (ChatGPT or a chat
+        assistant using this server as a connector). You can still claim and do work,
+        but you get short leases and the room will not rely on you responding promptly,
+        because nothing can wake you between turns.
+      * `"observer"` — you are watching, not working. No leases.
+
+    Over-claiming is the costly error: if you say `unattended_loop` and you actually only
+    act when prompted, other participants will wait on work you never do, and your leases
+    will expire mid-task. If unsure, choose `human_turn_only`.
+
+    Returns your `participant_token` (later calls in this session need nothing), the
+    negotiated capabilities, and a snapshot of the room.
     """
     try:
-        declared = [
-            Capability.CAN_RECEIVE_EVENTS,
-            Capability.SUPPORTS_POLL,
-            Capability.SUPPORTS_RESUME,
-        ]
-        if can_execute_background:
-            declared.append(Capability.CAN_EXECUTE_BACKGROUND)
-        if can_initiate_followup:
-            declared.append(Capability.CAN_INITIATE_FOLLOWUP)
-        if requires_human_presence:
-            declared.append(Capability.REQUIRES_HUMAN_PRESENCE)
-        if supports_tools:
-            declared.append(Capability.SUPPORTS_TOOLS)
+        if execution_mode not in EXECUTION_MODES:
+            return {
+                "ok": False,
+                "error": "invalid_command",
+                "message": (
+                    f"execution_mode must be one of {sorted(EXECUTION_MODES)}. "
+                    "Pick the one that describes how you actually run; if unsure, "
+                    "'human_turn_only'."
+                ),
+            }
+        declared = list(EXECUTION_MODES[execution_mode])
 
-        principal_identity = await _provision_identity(
-            invitation_token, display_name, description, declared
+        host_class = MODE_HOST_LABELS[execution_mode]
+        identity = await _provision_identity(
+            invitation_token, display_name, description, declared, host_class
         )
         result = await rooms.join_room(
-            identity=principal_identity,
+            identity=identity,
             command=JoinRoomCommand(
                 invitation_token=invitation_token,
                 display_name=display_name,
-                host_class=HostClass.PERSISTENT_LOCAL,
+                host_class=host_class,
                 capabilities=declared,
                 description=description,
             ),
@@ -250,6 +417,10 @@ async def join_room(
             "heartbeat_interval_s": negotiated.runtime.heartbeat_interval_s,
             "cursor": snapshot["snapshot_seq"],
             "snapshot": snapshot,
+            "execution_mode": execution_mode,
+            # State plainly what this mode bought, so the client is not guessing and the
+            # other participants' view of it matches its own.
+            "what_this_means": _explain(execution_mode, negotiated.runtime),
             "next_step": (
                 "Call declare_current_work with your headline and targets, then "
                 "await_room_events(since_seq=cursor) in a loop."
@@ -259,8 +430,38 @@ async def join_room(
         return _err(exc)
 
 
+def _explain(execution_mode: str, runtime) -> str:
+    lease_minutes = max(1, round(runtime.max_lease_seconds / 60))
+    if execution_mode == "observer":
+        return (
+            "You are an observer: you receive the room's event stream and can post "
+            "messages, but you cannot claim tasks."
+        )
+    if not runtime.may_claim:
+        return (
+            f"You cannot claim tasks in this room: {runtime.claim_denied_reason} "
+            "You can still declare current work and coordinate."
+        )
+    if runtime.lease_renewable_unattended:
+        return (
+            f"You can claim tasks with leases up to {lease_minutes} minutes and renew "
+            "them yourself. Other participants will rely on you making progress "
+            "unprompted, so poll in a loop."
+        )
+    return (
+        f"You can claim tasks, but leases are capped at {lease_minutes} minutes because "
+        "you only act when your human prompts you. Renew or complete within that window "
+        "or the task returns to the pool. Other participants are told not to expect "
+        "prompt responses from you."
+    )
+
+
 async def _provision_identity(
-    invitation_token: str, display_name: str, description: str, declared: list[Capability]
+    invitation_token: str,
+    display_name: str,
+    description: str,
+    declared: list[Capability],
+    host_class: HostClass = HostClass.PERSISTENT_LOCAL,
 ):
     """Resolve the agent identity this MCP client acts as.
 
@@ -274,11 +475,14 @@ async def _provision_identity(
     provisioning and `core` is unaffected, because it only ever sees an `AgentIdentity`.
     """
     org_id, user_id = await rooms.provisioning_context_for_invitation(invitation_token)
-    return await rooms.create_identity(
+    # Get-or-create, keyed on display name: an agent that reconnects must resolve to the
+    # *same* identity, or every restart would mint a new identity and a new participant,
+    # littering the room with ghosts of itself.
+    return await rooms.ensure_identity(
         org_id=org_id,
         owner_user_id=user_id,
         display_name=display_name,
-        host_class=HostClass.PERSISTENT_LOCAL,
+        host_class=host_class,
         description=description,
         capabilities=declared,
     )

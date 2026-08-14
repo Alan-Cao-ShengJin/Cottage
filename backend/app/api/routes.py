@@ -29,7 +29,7 @@ from ..core import (
 )
 from ..core.bus import bus
 from ..core.errors import Forbidden, ResumeGap
-from ..domain.capabilities import SUGGESTED_CAPABILITIES, Capability, HostClass
+from ..domain.capabilities import SUGGESTED_CAPABILITIES, Capability
 from ..domain.commands import (
     CancelTaskCommand,
     ClaimTaskCommand,
@@ -106,9 +106,25 @@ async def describe_capabilities() -> dict[str, Any]:
 
 @router.post("/rooms", status_code=201)
 async def create_room(principal: PrincipalDep, command: CreateRoomCommand) -> dict[str, Any]:
+    """Create a room, join as owner, and get a shareable join token — one call.
+
+    `participant_token` is the creator's; `join_token` is the single thing to hand to
+    everyone else. Both are returned exactly once and stored only as hashes.
+    """
     user = require_user(principal)
-    room = await rooms.create_room(user=user, command=command)
-    return {"ok": True, "room": room.model_dump(mode="json")}
+    created = await rooms.create_room(user=user, command=command)
+    return {
+        "ok": True,
+        "room": created.room.model_dump(mode="json"),
+        "participant": created.participant.model_dump(mode="json"),
+        "participant_token": created.participant_token,
+        "join_token": created.join_token,
+        "mcp_url": f"{settings.public_base_url.rstrip('/')}/mcp",
+        "next_step": (
+            "Share join_token. An agent joins with the MCP tool "
+            "join_room(invitation_token=...); a human joins at POST /api/rooms/join."
+        ),
+    }
 
 
 @router.get("/rooms")
@@ -156,30 +172,8 @@ async def join_room(principal: PrincipalDep, command: JoinRoomCommand) -> dict[s
 
 
 async def _identity_for_user(user, command: JoinRoomCommand):
-    """A human joining gets (or reuses) a `human` identity in their org.
-
-    Identities are the unit that joins a room, so a human needs one too — this keeps
-    humans and agents genuinely the same kind of principal rather than a special case
-    threaded through the core.
-    """
-    from ..db import database as db
-    from ..domain.identity import PrincipalKind
-
-    row = await db.fetch_one(
-        "SELECT * FROM agent_identities WHERE owner_user_id = ? AND kind = 'human' LIMIT 1",
-        (user.id,),
-    )
-    if row is not None:
-        return store.to_identity(row)
-    return await rooms.create_identity(
-        org_id=user.org_id,
-        owner_user_id=user.id,
-        display_name=command.display_name or user.display_name,
-        kind=PrincipalKind.HUMAN,
-        host_class=HostClass.BROWSER_HUMAN,
-        description=command.description,
-        capabilities=command.capabilities,
-    )
+    """A human joining gets (or reuses) the `human` identity in their org."""
+    return await rooms.ensure_human_identity(user, display_name=command.display_name)
 
 
 @router.post("/rooms/{room_id}/leave")

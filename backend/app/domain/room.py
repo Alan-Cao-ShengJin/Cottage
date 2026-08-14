@@ -73,6 +73,15 @@ ROLE_SCOPES: dict[ParticipantRole, tuple[Scope, ...]] = {
     ParticipantRole.OWNER: OWNER_SCOPES,
 }
 
+#: Ordering for "never reduce standing". Redeeming an invitation must not demote an
+#: existing participant — an owner clicking their own room's collaborator link would
+#: otherwise lock themselves out of their own room.
+ROLE_RANK: dict[ParticipantRole, int] = {
+    ParticipantRole.OBSERVER: 0,
+    ParticipantRole.COLLABORATOR: 1,
+    ParticipantRole.OWNER: 2,
+}
+
 #: Scopes an untrusted identity may never hold, whatever its role says
 #: (`docs/SECURITY.md` §5).
 UNTRUSTED_DENIED_SCOPES: frozenset[Scope] = frozenset(

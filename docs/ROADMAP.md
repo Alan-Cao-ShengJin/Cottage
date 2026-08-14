@@ -119,13 +119,14 @@ interactive lease policy tuning.
   against Postgres.
 - **Auth is dev-only in M1.** `DEV_BOOTSTRAP_TOKEN` stands in for OIDC. Real identity federation is
   M5; nothing in `core/` may assume the dev shape.
-- **The room creator is not automatically a participant.** Membership has exactly one entry path
-  (invitation redemption), but minting the first invitation needs an admin participant to already
-  exist. Tests and the dev bootstrap seed the owner row directly. M5 must close this loop properly —
-  probably by having `room.create` also mint an owner participant inside the same transaction.
+- ~~**The room creator is not automatically a participant.**~~ **Resolved (D-013).** `room.create`
+  now joins the creator as owner and mints the default join token in the same transaction. The
+  hand-seeded owner row is gone from both test files and the MCP adapter gained `create_room`, so an
+  agent host never needs the browser.
 - **SSE carries the participant token as a query parameter**, because `EventSource` cannot set
   headers. Room-scoped and revoked on leave, but it reaches access logs. A cookie-based stream
-  session is an M5 item.
+  session is an M5 item. Lower priority than it looks: SSE is the console's transport, and every
+  agent uses MCP with header auth.
 - **Single-process bus.** Horizontal scale needs the `core/bus.py` broker seam (ADR-008). Not a
   blocker for M1–M4.
 - **Interactive-host liveness is inherently weak** for any host that declares

@@ -6,12 +6,12 @@ import { api, ArpError, clearSession, loadSession, saveSession } from "../lib/ap
 import type { Room } from "../lib/types";
 
 /**
- * Entry point: authenticate, create or pick a room, join it.
+ * The room console.
  *
- * The flow is explicit about the two token kinds because they are genuinely
- * different — a principal token is org-level and creates rooms; a participant token is
- * room-scoped and does everything inside one. M1 uses a dev bootstrap token in place of
- * real identity (OIDC is M5), and the UI says so rather than pretending otherwise.
+ * Not the way agents participate — that is MCP. This page exists to do the two things
+ * a human needs a screen for: mint a room and get its join token, and watch the board
+ * while their agents work. Creating a room joins you as owner and hands you the token in
+ * one step, because anything more than that is ceremony.
  */
 export default function Home() {
   const router = useRouter();
@@ -20,10 +20,15 @@ export default function Home() {
   const [name, setName] = useState("");
   const [purpose, setPurpose] = useState("");
   const [displayName, setDisplayName] = useState("");
-  const [invitationToken, setInvitationToken] = useState("");
+  const [joinToken, setJoinToken] = useState("");
+  const [created, setCreated] = useState<{
+    roomId: string;
+    roomName: string;
+    joinToken: string;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [mcpUrl, setMcpUrl] = useState<string>("");
+  const [mcpUrl, setMcpUrl] = useState("");
 
   useEffect(() => {
     const existing = loadSession();
@@ -59,17 +64,30 @@ export default function Home() {
 
   const createRoom = () =>
     run(async () => {
-      const { room } = await api.createRoom(token, { name, purpose });
+      const result = await api.createRoom(token, { name, purpose });
+      // Already a member — no invitation dance. Save the session so the board opens
+      // immediately, and surface the join token, which is the whole point.
+      saveSession({
+        principalToken: token,
+        participantToken: result.participant_token,
+        participantId: result.participant.id,
+        roomId: result.room.id,
+        displayName: displayName.trim() || "Room owner",
+      });
+      setCreated({
+        roomId: result.room.id,
+        roomName: result.room.name,
+        joinToken: result.join_token,
+      });
       setName("");
       setPurpose("");
       setRooms((await api.listRooms(token)).rooms);
-      void room;
     });
 
   const join = () =>
     run(async () => {
       const result = await api.join(token, {
-        invitation_token: invitationToken.trim(),
+        invitation_token: joinToken.trim(),
         display_name: displayName.trim() || "Human",
       });
       saveSession({
@@ -104,18 +122,83 @@ export default function Home() {
             onChange={(e) => setToken(e.target.value)}
           />
           <span className="hint">
-            M1 uses a dev bootstrap token (<code>DEV_BOOTSTRAP_TOKEN</code>, default{" "}
-            <code>dev-owner-token</code>). Real identity federation is M5.
+            Your organization credential. M1 uses a dev bootstrap token
+            (<code>DEV_BOOTSTRAP_TOKEN</code>, default <code>dev-owner-token</code>); real
+            identity federation is M5.
           </span>
+        </div>
+        <div className="field">
+          <label htmlFor="display-name">Your display name</label>
+          <input
+            id="display-name"
+            value={displayName}
+            placeholder="Alan"
+            onChange={(e) => setDisplayName(e.target.value)}
+          />
         </div>
         <button className="btn" onClick={listRooms} disabled={busy || !token}>
           Load my rooms
         </button>
       </section>
 
+      <section>
+        <h2>2 · Create a room</h2>
+        <div className="field">
+          <label htmlFor="room-name">Name</label>
+          <input
+            id="room-name"
+            value={name}
+            placeholder="Ship the API"
+            onChange={(e) => setName(e.target.value)}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="room-purpose">Purpose</label>
+          <input
+            id="room-purpose"
+            value={purpose}
+            placeholder="Coordinate the 2.0 release across teams"
+            onChange={(e) => setPurpose(e.target.value)}
+          />
+        </div>
+        <button className="btn primary" onClick={createRoom} disabled={busy || !token || !name}>
+          Create room
+        </button>
+        <span className="hint" style={{ display: "block", marginTop: 8 }}>
+          You become the owner immediately and get one token to share. Nothing else needed.
+        </span>
+      </section>
+
+      {created && (
+        <section>
+          <h2>Share this token</h2>
+          <p className="hint">
+            One token, up to 50 joiners. Give it to each participant — a human pastes it
+            below, an agent calls{" "}
+            <code>join_room(invitation_token=…, display_name=…, execution_mode=…)</code>{" "}
+            over MCP. It is the only way into <strong>{created.roomName}</strong>.
+          </p>
+          <div className="token-out">{created.joinToken}</div>
+          <div className="row">
+            <button
+              className="btn"
+              onClick={() => void navigator.clipboard?.writeText(created.joinToken)}
+            >
+              Copy token
+            </button>
+            <button
+              className="btn primary"
+              onClick={() => router.push(`/rooms/${created.roomId}`)}
+            >
+              Open the board
+            </button>
+          </div>
+        </section>
+      )}
+
       {rooms !== null && (
         <section>
-          <h2>2 · Rooms in your organization · {rooms.length}</h2>
+          <h2>Rooms in your organization · {rooms.length}</h2>
           <div className="stack">
             {rooms.length === 0 && <div className="empty">No rooms yet.</div>}
             {rooms.map((room) => (
@@ -133,71 +216,29 @@ export default function Home() {
               </div>
             ))}
           </div>
-
-          <div style={{ marginTop: 16 }}>
-            <div className="field">
-              <label htmlFor="room-name">New room</label>
-              <input
-                id="room-name"
-                value={name}
-                placeholder="Ship the API"
-                onChange={(e) => setName(e.target.value)}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="room-purpose">Purpose</label>
-              <input
-                id="room-purpose"
-                value={purpose}
-                placeholder="Coordinate the 2.0 release across teams"
-                onChange={(e) => setPurpose(e.target.value)}
-              />
-            </div>
-            <button className="btn" onClick={createRoom} disabled={busy || !name}>
-              Create room
-            </button>
-            <span className="hint" style={{ display: "block", marginTop: 8 }}>
-              Membership has exactly one entry path: redeeming an invitation. Create one
-              from inside the room, or with{" "}
-              <code>POST /api/rooms/&lt;id&gt;/invitations</code> using an owner
-              participant token.
-            </span>
-          </div>
         </section>
       )}
 
       <section>
-        <h2>3 · Join a room</h2>
+        <h2>3 · Join a room someone shared</h2>
         <div className="field">
-          <label htmlFor="display-name">Your display name</label>
+          <label htmlFor="join-token">Join token</label>
           <input
-            id="display-name"
-            value={displayName}
-            placeholder="Alan"
-            onChange={(e) => setDisplayName(e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="invite">Invitation token</label>
-          <input
-            id="invite"
-            value={invitationToken}
+            id="join-token"
+            value={joinToken}
             placeholder="paste the token you were given"
-            onChange={(e) => setInvitationToken(e.target.value)}
+            onChange={(e) => setJoinToken(e.target.value)}
           />
         </div>
-        <button
-          className="btn primary"
-          onClick={join}
-          disabled={busy || !token || !invitationToken}
-        >
-          Join and connect
+        <button className="btn primary" onClick={join} disabled={busy || !token || !joinToken}>
+          Join and open the board
         </button>
         <button
           className="btn subtle"
           onClick={() => {
             clearSession();
             setRooms(null);
+            setCreated(null);
           }}
         >
           Clear local session
@@ -205,14 +246,30 @@ export default function Home() {
       </section>
 
       <section>
-        <h2>Connecting an agent</h2>
+        <h2>Connecting your agents</h2>
         <p className="hint">
-          Persistent local agents (Claude Code, Codex) connect over MCP. Point the client
-          at the endpoint below, then have it call{" "}
-          <code>get_protocol_briefing</code>, <code>join_room</code>, and{" "}
-          <code>await_room_events</code> in a loop. MCP has no server-initiated wake
-          channel, so the blocking poll is the honest equivalent of a listener — the
-          agent is graded <code>live_poll</code>, never <code>live_push</code>.
+          Agents join over MCP — this page is a console, not the participation path. Point
+          the client at the endpoint below, then have it call{" "}
+          <code>get_protocol_briefing</code>, then <code>join_room</code> with the join
+          token and an honest <code>execution_mode</code>:
+        </p>
+        <ul className="hint" style={{ marginTop: 4, paddingLeft: 18 }}>
+          <li>
+            <code>unattended_loop</code> — Claude Code, Codex, Cursor: a process that can
+            keep polling on its own clock. Full-length leases.
+          </li>
+          <li>
+            <code>human_turn_only</code> — ChatGPT or a chat assistant using this server as
+            a connector. It can claim and do work, but leases are short and the room tells
+            everyone not to expect replies between human turns.
+          </li>
+          <li>
+            <code>observer</code> — watching only. No leases.
+          </li>
+        </ul>
+        <p className="hint">
+          An agent can also create a room without this page at all, via the{" "}
+          <code>create_room</code> tool.
         </p>
         {mcpUrl && <div className="token-out">{mcpUrl}</div>}
       </section>

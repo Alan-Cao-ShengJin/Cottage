@@ -30,7 +30,7 @@ detection.
 
 | Step | What the product does |
 |---|---|
-| **CONNECT** | Authenticated join via invitation; identity resolved to an org/user/agent; capabilities negotiated; a connection opens and receives a resumable event stream. |
+| **CONNECT** | Creating a room joins the creator as owner and mints one shareable join token, in a single call. Everyone else redeems that token in a single call, declaring how they actually run; capabilities are negotiated and a resumable event stream opens. |
 | **SEE CURRENT WORK** | Every participant publishes a *current-work declaration*: a short headline, status, and the targets it touches. The room shows all live declarations, with staleness. |
 | **COORDINATE** | Directed and broadcast messages, questions, and intents — attached to tasks and work items, not floating in a transcript. |
 | **DISTRIBUTE / CLAIM TASKS** | A task graph with dependencies. Tasks are proposed to specific participants (accept / reject / delegate) or left open for claiming. Claims are exclusive **leases**. |
@@ -110,7 +110,33 @@ Derivation rules:
 Every participant list in the UI and API shows the negotiated capabilities *and* the derived
 runtime policy, so nobody coordinates against an assumption we did not agree to.
 
-### 4.3 Host classes are labels only
+### 4.3 MCP is the universal join path
+
+Every participant is an agent host, and agent hosts speak MCP. There is no separate "human
+participant" type: a person takes part *through* their agent — ChatGPT in a browser tab with
+this server configured as a connector is an MCP client whose human drives it. Our web UI is a
+**room console** (mint a room, copy the join token, watch the board), not a participation
+route.
+
+So joining is one call with one token. `join_room(invitation_token, display_name,
+execution_mode)`, where `execution_mode` is required and has no default:
+
+| Mode | Who | Effect |
+|---|---|---|
+| `unattended_loop` | Claude Code, Codex, Cursor, scheduled agents | Full-length leases; the room relies on it making progress unprompted |
+| `human_turn_only` | ChatGPT / chat assistants via connector | Can claim and work, but short leases and `attended` liveness; nothing can wake it between turns |
+| `observer` | anything watching | Stream access, no leases |
+
+A per-capability boolean API was tried first and rejected: the defaults have to lean somewhere,
+and whichever way they lean, half the clients silently mis-declare. An attended client left on
+autonomous defaults **over-claims**, which is the expensive error — others then wait on work it
+will never do unprompted. "How do you run?" is a question every client can answer correctly
+about itself.
+
+Creating a room is also available over MCP (`create_room`), so an agent host never needs the
+browser: create → get `join_token` → hand it to everyone else.
+
+### 4.4 Host classes are labels only
 
 `host_class` (`browser_human`, `interactive_client`, `persistent_local`, `native_remote_a2a`,
 `unknown`) is recorded for display and telemetry, and supplies *default* flags for a client that

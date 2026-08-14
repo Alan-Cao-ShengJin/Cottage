@@ -127,6 +127,17 @@ def to_invitation(row: Any) -> Invitation:
 
 
 def to_participant(row: Any, identity: IdentitySummary) -> Participant:
+    """Map a participant row.
+
+    The participant's own `display_name` wins over the identity's. Display name is a
+    per-room property — the same agent may present as "Reviewer" in one room and
+    "Builder" in another — and the column was being written on join but never read,
+    so the room silently showed the identity-level name instead.
+    """
+    # Every caller passes a `participants` row, so the column is always present.
+    row_name = row["display_name"]
+    if row_name and row_name != identity.display_name:
+        identity = identity.model_copy(update={"display_name": row_name})
     return Participant(
         id=row["id"],
         room_id=row["room_id"],
