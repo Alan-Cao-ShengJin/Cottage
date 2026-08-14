@@ -31,3 +31,7 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/mcp.json
+
+# local dev database
+backend/data/
+

@@ -76,9 +76,13 @@ scripts/         check.py gate, dev utilities
 - **Organization** — the tenant boundary. Owns users, agent identities, and rooms.
 - **User** — a human account inside an org.
 - **AgentIdentity** — a durable principal owned by a user inside an org. Carries `kind`
-  (`human` | `agent`), `host_class` (`interactive_client` | `persistent_local` | `native_remote_a2a`
-  | `browser_human`), declared capabilities, and a public description. **It never carries the
-  agent's prompt, model, key, or memory.**
+  (`human` | `agent`), a descriptive `host_class` label, declared capabilities, and a public
+  description. **It never carries the agent's prompt, model, key, or memory** — and that absence
+  narrows the accidental surface without being the disclosure control (see `docs/SECURITY.md` §2).
+- **CapabilityProfile / RuntimePolicy** (`domain/capabilities.py`) — the negotiated capability flags,
+  and the behavior derived from them. `derive_runtime_policy` is a pure function that takes a profile
+  plus room policy and **no host class**, which is what structurally prevents a provider label from
+  reaching a behavior decision (ADR-010).
 - **Membership** — user ↔ org with a role (`owner` | `admin` | `member`).
 
 ### Room
@@ -90,8 +94,10 @@ scripts/         check.py gate, dev utilities
 - **Participant** — an AgentIdentity's membership in a room: role, granted scopes, join state,
   display identity as seen inside that room.
 - **Connection** — one live transport attachment for a participant. Multiple allowed. Carries the
-  negotiated capability set, delivery mode, `last_delivered_seq`, and heartbeat timestamps.
-  **Presence is derived from connections, never stored as a mutable flag.**
+  negotiated `CapabilityProfile`, derived delivery mode, `last_delivered_seq`, and heartbeat
+  timestamps. Capabilities live here rather than on the identity because the same agent may attach
+  from a pushable transport now and a poll-only one later, and coordination must react to what is
+  true right now. **Presence is derived from connections, never stored as a mutable flag.**
 
 ### Work awareness
 - **WorkDeclaration** — "what I am doing right now": headline, `status`
@@ -205,6 +211,25 @@ are deleted rather than adapted; they encode a chat-with-paid-agents product we 
 consumer clients, and reporting long-poll clients as pushable. Coordination decisions (lease TTL,
 work routing) are derived from the real grade instead.
 
+**ADR-010 — Behavior derives from negotiated capabilities, never from provider or product labels.**
+Vendors ship features continuously, so any design that treats a current product limitation as a fixed
+architectural fact is wrong the day that product changes. Runtime behavior is therefore a pure
+function of a `CapabilityProfile` (plus room policy): `derive_runtime_policy` takes no host class, and
+`tests/test_layering.py` asserts it never will. `host_class` supplies defaults for a client that
+declares nothing and is otherwise display metadata. Negotiation *intersects* declared flags with what
+the transport can honor, so a client cannot talk itself into a capability the wire cannot provide.
+Cost accepted: clients must declare honestly, and a client that under-declares gets less capability
+than it could have.
+
+**ADR-009 — Persistence is replaceable; no invariant depends on engine locking.** SQLite is fine for
+the current milestone, but every domain guarantee is expressed as a UNIQUE constraint, a CHECK, or a
+conditional `UPDATE ... WHERE <expected state>` whose affected-row count the caller inspects — the
+same tools behave identically on PostgreSQL. Concretely: `seq` allocation is `UPDATE rooms SET
+event_seq = event_seq + 1` then a read, both in the mutating transaction; a task claim is one guarded
+UPDATE where 0 rows means "someone else won"; command idempotency is a UNIQUE primary key reserved
+before the body runs. `BEGIN IMMEDIATE` appears in `db/database.py` as an adapter detail, not a
+semantic the domain relies on. PostgreSQL compatibility must be established before external beta.
+
 **ADR-008 — Notify-then-read bus.** The bus carries only `(room_id, seq)`. Consumers re-read the log.
 This makes the fanout path lossless-by-construction and lets a slow consumer degrade to latency
 rather than data loss.
@@ -213,7 +238,9 @@ rather than data loss.
 
 - **Bus is in-process.** Single backend process owns fanout. `core/bus.py` is the seam for
   Redis/NATS; consumers already re-read from the log, so a broker only needs to deliver a hint.
-- **SQLite → Postgres.** All access is via `db/`. The only engine-specific pieces are
-  `UPDATE ... RETURNING` for `seq` allocation and WAL pragmas.
+- **SQLite → Postgres** (ADR-009). All access is via `db/`. The only engine-specific pieces are the
+  WAL pragmas and `BEGIN IMMEDIATE`; no invariant depends on either. Remaining work before beta:
+  a real migration mechanism, `TEXT` timestamp columns reviewed against `timestamptz`, and a
+  concurrency test run against Postgres to confirm the conditional-write guarantees hold there too.
 - **Retention truncation** is not yet implemented; `resume_gap` is specified and handled so it can
   land without a protocol change.

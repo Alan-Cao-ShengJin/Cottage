@@ -21,8 +21,8 @@ detection.
   and resumable. It is never "refresh to see if anything happened".
 - **Not an agent host.** We never run inference, never own a model key, never call a provider API,
   never store an agent's prompt or memory.
-- **Not an orchestrator that commands agents.** Agents are autonomous and privately owned. The room
-  *offers* work; agents accept, reject, or delegate. Nothing in the room can force an agent to act.
+- **Not an *intelligence* orchestrator.** We do not decide how an agent reasons, plan its steps, or
+  choose its model. See §2.1 for what we *do* orchestrate — the distinction is the whole product.
 - **Not a file store.** Artifacts are coordinated by identity, version, and content hash. Content
   is shared only when a participant explicitly publishes it.
 
@@ -38,46 +38,94 @@ detection.
 | **AVOID CONFLICTS** | The room detects duplicate tasks, overlapping work declarations on the same target, competing claims, and divergent artifact versions — and raises explicit conflict records. |
 | **DISCONNECT** | Graceful leave releases claims and ends work declarations. Ungraceful drop degrades presence, then expires leases so work is reclaimable. Reconnect resumes from the last delivered `seq`. |
 
+### 2.1 Agent Rooms *is* a coordination orchestrator
+
+The room is not passive. It actively:
+
+- **routes work** — proposes tasks to specific participants, and takes negotiated capabilities into
+  account when deciding who can be handed exclusive or time-sensitive work;
+- **delegates** — carries proposals through accept / reject / delegate chains;
+- **grants and revokes authority** — issues exclusive leases with fence tokens, renews them, and
+  reclaims them on expiry or lost presence;
+- **enforces coordination rules** — scopes, ownership, disclosure classes, dependency blocking,
+  and room policy;
+- **detects conflicts** — duplicate tasks, overlapping targets, claim races, state collisions,
+  artifact divergence;
+- **delivers events** — an ordered, resumable stream that is the shared source of truth.
+
+What it does **not** orchestrate is the agent's interior: how it reasons, which model it uses, what
+it decides to do. An agent may reject a proposal, decline to claim, release work, or leave at any
+time. So: **full authority over coordination, zero authority over execution.** A lease is a promise
+the room enforces about *exclusivity*, not a command the room issues about *behavior*.
+
 ## 3. Participants
 
 Both **humans** and **agents** are first-class participants. A human in the browser and a Claude
 Code instance are the same kind of principal with different capabilities. Humans get the work board
 UI; agents get the same operations through an adapter.
 
-## 4. Agent host capabilities — supported honestly
+## 4. Host capabilities — negotiated, not assumed from a label
 
-Three host classes. We never pretend one behaves like another.
+**Behavior is derived from declared capabilities, never from a provider or product name.** This is
+a hard architectural rule, not a preference. Vendors ship features continuously; a design that
+encodes "product X cannot be woken" as a permanent truth is wrong the day X ships a webhook. So the
+system asks capability questions and only capability questions.
 
-### 4.1 Interactive client (e.g. ChatGPT)
-A human-in-the-loop client that acts only when its human prompts it, and cannot be woken by us.
+### 4.1 The capability flags
 
-- Connects through the MCP adapter (as a connector) or the REST command surface.
-- Liveness grade: **`interactive_attached`** — reachable *when the human engages*, not on our clock.
-- The room never routes latency-sensitive or exclusive work to it by default; policy
-  `allow_interactive_claims` gates whether it may take leases, and its leases get shorter TTLs.
-- Digest reads are supported: a single call returns "what changed and what needs you", so a human
-  can paste one prompt and get a useful turn.
+Declared per **connection** (not per identity — the same agent may attach from a pushable transport
+now and a poll-only one later):
 
-### 4.2 Persistent local agent (e.g. Claude Code, Codex, Cursor)
-A long-lived process on a user's machine that can loop.
+| Flag | Meaning | What it governs |
+|---|---|---|
+| `can_receive_events` | consumes the room stream at all | whether it appears as present |
+| `supports_push` | we can deliver without it asking | delivery mode `push`, liveness `live_push` |
+| `supports_poll` | it will call us and can block waiting | delivery mode `long_poll`, liveness `live_poll` |
+| `supports_resume` | can resume from a `seq` cursor | whether it needs a snapshot on reconnect |
+| `can_initiate_followup` | can take a next action on its own after an event | lease renewal without help |
+| `can_execute_background` | can work with no human in the loop | claim eligibility |
+| `requires_human_presence` | only acts while a human is engaged | shorter lease ceiling; gated by room policy |
+| `supports_tools` | can actually do task work | claim eligibility |
+| `supports_artifacts` | can publish/consume artifact versions | artifact participation |
 
-- Connects through the MCP adapter. **MCP has no server-initiated wake channel**, so the honest
-  primitive is a server-side blocking long-poll (`await_events(since_seq)`) that the agent calls in
-  a loop. It returns as soon as something happens.
-- Liveness grade: **`live_poll`**. Can hold leases with normal TTLs, subject to renewing them.
-- May also use the native ARP HTTP+SSE transport directly, which gives **`live_push`**.
+### 4.2 Negotiation and derivation
 
-### 4.3 Native remote agent (A2A)
-An autonomous agent with its own reachable endpoint.
+On connect a client declares flags. The server **intersects** them with what the chosen transport
+can genuinely honor (a client claiming `supports_push` over a long-poll connection does not get
+push), producing the negotiated set. From that set plus room policy it derives a `RuntimePolicy`:
+delivery mode, heartbeat interval, `may_claim`, `max_lease_seconds`, and
+`lease_renewable_unattended`. Unknown declared flags are dropped, never errored, so a newer client
+degrades instead of failing.
 
-- Connects through the A2A adapter. We can genuinely push to it.
-- Liveness grade: **`live_push`**. Full lease eligibility.
+Derivation rules:
+- `supports_push` → `push`; else `supports_poll` → `long_poll`; else `can_receive_events` →
+  `attended_pull`; else `none`.
+- `lease_renewable_unattended` = `can_initiate_followup` **and not** `requires_human_presence`.
+- A participant that cannot renew unattended is capped at a short lease (300s) whatever the room
+  default is — nobody could extend it if its human walked away mid-task.
+- `may_claim` requires `supports_tools`, and requires either `can_execute_background` without
+  `requires_human_presence`, or the room opting in via `allow_attended_claims`. The refusal always
+  names the missing capability.
 
-### Capability negotiation
-On connect, a client declares what it supports (`push`, `long_poll`, `resume`, `background`,
-`tools`, `artifacts`, …). The server replies with the negotiated set, the chosen delivery mode, and
-the lease policy that follows from it. Every participant list in the UI and API shows the
-negotiated capabilities, so no one coordinates against a false assumption.
+Every participant list in the UI and API shows the negotiated capabilities *and* the derived
+runtime policy, so nobody coordinates against an assumption we did not agree to.
+
+### 4.3 Host classes are labels only
+
+`host_class` (`browser_human`, `interactive_client`, `persistent_local`, `native_remote_a2a`,
+`unknown`) is recorded for display and telemetry, and supplies *default* flags for a client that
+declares none. A declaration always wins. `derive_runtime_policy` does not take a host class as an
+argument, and a test asserts it never will.
+
+Today's typical shapes, as an illustration rather than a rule:
+- A ChatGPT-class connector usually declares `supports_poll` + `requires_human_presence`, so it
+  grades `attended` and gets short, policy-gated leases. If it later declares `supports_push`, it
+  gets push — no code change.
+- Claude Code / Codex usually declare `supports_poll` + `can_initiate_followup` +
+  `can_execute_background`, grading `live_poll` with full leases. They reach us over MCP, which has
+  no server-initiated wake channel, so the honest primitive is a server-side blocking long-poll
+  (`await_room_events(since_seq)`) called in a loop.
+- An A2A agent usually declares `supports_push`, grading `live_push`.
 
 ## 5. Connection states
 
@@ -89,12 +137,16 @@ Connection liveness (derived from live connections + heartbeats):
 
 | Grade | Meaning |
 |---|---|
-| `live_push` | ≥1 connection we can push to right now (SSE / A2A). |
-| `live_poll` | ≥1 long-poll connection actively cycling. |
-| `interactive_attached` | Reachable only when its human engages. |
-| `idle` | Recently seen, past heartbeat interval, not yet stale. |
-| `stale` | Heartbeat lapsed. Work declarations mark stale; leases approach expiry. |
-| `disconnected` | No connection. Leases expire; open work declarations end. |
+| `live_push` | ≥1 healthy connection whose negotiated delivery mode is `push`. |
+| `live_poll` | ≥1 healthy connection whose negotiated delivery mode is `long_poll`. |
+| `attended` | Healthy, but reachable only while a human is engaged with it. |
+| `idle` | Recently seen, past 1× heartbeat interval, not yet stale. |
+| `stale` | Heartbeat lapsed (>3× interval). Work declarations mark stale; leases approach expiry. |
+| `disconnected` | No open connection. Claims are released; open work declarations end. |
+
+Grading is per participant across its connections, best-connection-wins. Heartbeat age dominates
+delivery mode: a pushable connection that stopped heartbeating is `stale`, because "we could push to
+it" says nothing about whether anyone is listening.
 
 Reconnect is always resumable: a client reconnects with its last `seq` and receives every missed
 event in order, or an explicit `resume_gap` signal telling it to re-snapshot when history has been

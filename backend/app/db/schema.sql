@@ -1,5 +1,20 @@
--- Agent Room V0 schema. Applied idempotently at startup (see db/database.py).
--- Deterministic initialization: every statement is CREATE ... IF NOT EXISTS.
+-- Agent Rooms schema. Applied idempotently at startup (see db/database.py).
+--
+-- PORTABILITY CONTRACT (ADR-009): no domain invariant may depend on
+-- SQLite-specific locking. Every guarantee here is expressed as a UNIQUE
+-- constraint, a CHECK, or a conditional UPDATE whose affected-row count the
+-- caller inspects. That set of tools behaves identically on PostgreSQL, so the
+-- storage engine is replaceable without revisiting correctness.
+--
+-- Consequences you will see reflected in core/:
+--   * event seq is allocated by `UPDATE rooms SET event_seq = event_seq + 1`
+--     inside the mutating transaction, then read back;
+--   * a task claim is taken by an UPDATE guarded on the pre-state, and a
+--     0-row result means "someone else won", not "retry";
+--   * command idempotency is a UNIQUE key on command_receipts, not a mutex.
+--
+-- Types are kept to TEXT/INTEGER/REAL so the DDL translates mechanically. Times
+-- are RFC 3339 UTC strings, which sort lexicographically.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -9,69 +24,323 @@ CREATE TABLE IF NOT EXISTS schema_version (
     applied_at  TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS rooms (
+-- ---------------------------------------------------------------------------
+-- Identity & tenancy
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS organizations (
     id          TEXT PRIMARY KEY,
-    join_code   TEXT NOT NULL UNIQUE,
-    title       TEXT NOT NULL,
-    objective   TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'active',   -- active | expired | closed
-    created_at  TEXT NOT NULL,
-    expires_at  TEXT NOT NULL,
-    -- guardrail bookkeeping (see services/guardrails.py)
-    agent_turns_used    INTEGER NOT NULL DEFAULT 0,
-    last_speaker_id     TEXT,
-    consecutive_turns   INTEGER NOT NULL DEFAULT 0,
-    autonomy_enabled    INTEGER NOT NULL DEFAULT 1
+    name        TEXT NOT NULL,
+    slug        TEXT NOT NULL UNIQUE,
+    created_at  TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS agents (
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    org_id        TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    email         TEXT NOT NULL UNIQUE,
+    display_name  TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'member',
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_org ON users(org_id);
+
+-- A durable principal owned by a user. NOTE: there is deliberately no column for
+-- a system prompt, model, API key, or private memory, and adding one is a
+-- security regression, not a feature (docs/SECURITY.md §2).
+CREATE TABLE IF NOT EXISTS agent_identities (
+    id                     TEXT PRIMARY KEY,
+    org_id                 TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    owner_user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    display_name           TEXT NOT NULL,
+    kind                   TEXT NOT NULL,              -- human | agent
+    host_class             TEXT NOT NULL DEFAULT 'unknown',  -- descriptive label only
+    description            TEXT NOT NULL DEFAULT '',
+    declared_capabilities  TEXT NOT NULL DEFAULT '[]',  -- JSON array
+    trust                  TEXT NOT NULL DEFAULT 'member',
+    created_at             TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_identities_org ON agent_identities(org_id);
+CREATE INDEX IF NOT EXISTS idx_identities_owner ON agent_identities(owner_user_id);
+
+-- Bearer credentials, stored hashed and shown once. M1 uses these directly;
+-- M5 federates identity (OIDC) and keeps this table for agent tokens only.
+CREATE TABLE IF NOT EXISTS principal_tokens (
+    token_hash    TEXT PRIMARY KEY,
+    subject_kind  TEXT NOT NULL,   -- user | agent_identity
+    subject_id    TEXT NOT NULL,
+    org_id        TEXT NOT NULL,
+    label         TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    expires_at    TEXT,
+    revoked_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tokens_subject ON principal_tokens(subject_kind, subject_id);
+
+-- ---------------------------------------------------------------------------
+-- Rooms
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS rooms (
+    id                  TEXT PRIMARY KEY,
+    org_id              TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    name                TEXT NOT NULL,
+    purpose             TEXT NOT NULL DEFAULT '',
+    visibility          TEXT NOT NULL DEFAULT 'internal',  -- internal | cross_org
+    status              TEXT NOT NULL DEFAULT 'open',      -- open | closed | purged
+    -- The room row is the sequencer. Incremented inside the mutating
+    -- transaction; see core/eventlog.py.
+    event_seq           INTEGER NOT NULL DEFAULT 0,
+    retained_from_seq   INTEGER NOT NULL DEFAULT 1,
+    policy              TEXT NOT NULL DEFAULT '{}',   -- JSON RoomPolicy
+    retention           TEXT NOT NULL DEFAULT '{}',   -- JSON RetentionPolicy
+    created_at          TEXT NOT NULL,
+    created_by_user_id  TEXT NOT NULL,
+    expires_at          TEXT,
+    closed_at           TEXT,
+    CHECK (event_seq >= 0),
+    CHECK (retained_from_seq >= 1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rooms_org ON rooms(org_id, status);
+
+CREATE TABLE IF NOT EXISTS invitations (
+    id                          TEXT PRIMARY KEY,
+    room_id                     TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    token_hash                  TEXT NOT NULL UNIQUE,
+    target_kind                 TEXT NOT NULL,          -- email | org | link
+    target_value                TEXT,
+    role                        TEXT NOT NULL,
+    scopes                      TEXT NOT NULL,          -- JSON array
+    max_redemptions             INTEGER NOT NULL DEFAULT 1,
+    redemptions                 INTEGER NOT NULL DEFAULT 0,
+    expires_at                  TEXT,
+    created_at                  TEXT NOT NULL,
+    created_by_participant_id   TEXT,
+    revoked_at                  TEXT,
+    CHECK (redemptions >= 0),
+    CHECK (redemptions <= max_redemptions)
+);
+
+CREATE INDEX IF NOT EXISTS idx_invitations_room ON invitations(room_id);
+
+CREATE TABLE IF NOT EXISTS participants (
     id                  TEXT PRIMARY KEY,
     room_id             TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-    owner_name          TEXT NOT NULL,
-    agent_name          TEXT NOT NULL,
-    provider            TEXT NOT NULL,            -- openai | claude-code | human | other
-    public_objective    TEXT NOT NULL DEFAULT '',
-    status              TEXT NOT NULL DEFAULT 'active',  -- active | left
-    autonomous          INTEGER NOT NULL DEFAULT 0,      -- server-driven agent loop?
-    joined_at           TEXT NOT NULL,
-    last_seen_at        TEXT NOT NULL,
-    -- opaque token the agent presents to act as itself
-    token               TEXT NOT NULL UNIQUE
+    agent_identity_id   TEXT NOT NULL REFERENCES agent_identities(id) ON DELETE CASCADE,
+    org_id              TEXT NOT NULL,
+    role                TEXT NOT NULL,
+    scopes              TEXT NOT NULL,                  -- JSON array
+    trust               TEXT NOT NULL DEFAULT 'member',
+    state               TEXT NOT NULL DEFAULT 'joined', -- invited | joined | left | removed
+    display_name        TEXT NOT NULL,
+    token_hash          TEXT UNIQUE,
+    joined_at           TEXT,
+    left_at             TEXT,
+    -- One participant row per identity per room: rejoining reuses the row, so a
+    -- participant id is stable across reconnects and remains a valid audit ref.
+    UNIQUE (room_id, agent_identity_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_agents_room ON agents(room_id);
+CREATE INDEX IF NOT EXISTS idx_participants_room ON participants(room_id, state);
+
+CREATE TABLE IF NOT EXISTS connections (
+    id                   TEXT PRIMARY KEY,
+    room_id              TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    participant_id       TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    host_class           TEXT NOT NULL DEFAULT 'unknown',
+    profile              TEXT NOT NULL DEFAULT '{}',   -- JSON CapabilityProfile
+    delivery_mode        TEXT NOT NULL,
+    heartbeat_interval_s INTEGER NOT NULL,
+    opened_at            TEXT NOT NULL,
+    last_heartbeat_at    TEXT NOT NULL,
+    last_delivered_seq   INTEGER NOT NULL DEFAULT 0,
+    closed_at            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_connections_participant
+    ON connections(participant_id, closed_at);
+CREATE INDEX IF NOT EXISTS idx_connections_open ON connections(room_id, closed_at);
+
+-- ---------------------------------------------------------------------------
+-- The event log: system of record (ADR-002 / D-003)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS room_events (
+    room_id                        TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    seq                            INTEGER NOT NULL,
+    id                             TEXT NOT NULL UNIQUE,
+    type                           TEXT NOT NULL,
+    ts                             TEXT NOT NULL,
+    actor_participant_id           TEXT,
+    actor_display_name             TEXT NOT NULL DEFAULT 'room',
+    actor_kind                     TEXT,
+    actor_org_id                   TEXT,
+    privacy_class                  TEXT NOT NULL DEFAULT 'room_public',
+    audience                       TEXT NOT NULL DEFAULT 'room',
+    -- JSON array or NULL. NULL = "apply the privacy-class filter"; a list is an
+    -- explicit allowlist enforced at fanout (docs/SECURITY.md §6).
+    restricted_to_participant_ids  TEXT,
+    causation_id                   TEXT,
+    payload                        TEXT NOT NULL DEFAULT '{}',
+    -- (room_id, seq) is the total order per room. The PK makes a duplicate seq
+    -- impossible even under a concurrent allocator bug, on any engine.
+    PRIMARY KEY (room_id, seq),
+    CHECK (seq >= 1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_room_type ON room_events(room_id, type);
+
+-- Idempotency for commands. The UNIQUE PK is the whole mechanism: a second
+-- attempt to insert the same command_id fails, and the caller returns the stored
+-- result instead of acting twice (docs/PROTOCOL.md §2).
+CREATE TABLE IF NOT EXISTS command_receipts (
+    command_id      TEXT PRIMARY KEY,
+    room_id         TEXT NOT NULL,
+    participant_id  TEXT,
+    command_type    TEXT NOT NULL,
+    seq             INTEGER,
+    result          TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_receipts_room ON command_receipts(room_id);
+
+-- ---------------------------------------------------------------------------
+-- Projections (read models rebuilt from the log)
+-- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS messages (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    room_id             TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-    agent_id            TEXT REFERENCES agents(id) ON DELETE SET NULL,  -- NULL => system/human
-    sender_label        TEXT NOT NULL,
-    recipient_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,  -- NULL => whole room
-    content             TEXT NOT NULL,
-    message_type        TEXT NOT NULL DEFAULT 'chat',
-    -- chat | system | human | memory_update | task_update | ask_human | join | leave
-    created_at          TEXT NOT NULL
+    id                 TEXT PRIMARY KEY,
+    room_id            TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    seq                INTEGER NOT NULL,
+    participant_id     TEXT,
+    body               TEXT NOT NULL,
+    about_ref          TEXT,
+    privacy_class      TEXT NOT NULL DEFAULT 'room_public',
+    audience           TEXT NOT NULL DEFAULT 'room',
+    to_participant_id  TEXT,
+    created_at         TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id, id);
+CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id, seq);
 
-CREATE TABLE IF NOT EXISTS shared_memory (
-    room_id     TEXT PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,
-    data        TEXT NOT NULL,          -- JSON blob, see models.SharedMemoryData
-    updated_at  TEXT NOT NULL,
-    updated_by  TEXT
+CREATE TABLE IF NOT EXISTS work_declarations (
+    id                TEXT PRIMARY KEY,
+    room_id           TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    participant_id    TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    headline          TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'active',
+    targets           TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    task_id           TEXT,
+    note              TEXT NOT NULL DEFAULT '',
+    privacy_class     TEXT NOT NULL DEFAULT 'room_public',
+    started_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    heartbeat_at      TEXT NOT NULL,
+    expected_done_by  TEXT,
+    ended_at          TEXT,
+    end_reason        TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_work_room_open ON work_declarations(room_id, ended_at);
+CREATE INDEX IF NOT EXISTS idx_work_participant ON work_declarations(participant_id, ended_at);
 
 CREATE TABLE IF NOT EXISTS tasks (
-    id                  TEXT PRIMARY KEY,
-    room_id             TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-    title               TEXT NOT NULL,
-    description         TEXT NOT NULL DEFAULT '',
-    assigned_agent_id   TEXT REFERENCES agents(id) ON DELETE SET NULL,
-    status              TEXT NOT NULL DEFAULT 'open',  -- open | claimed | done | cancelled
-    result              TEXT,
-    created_at          TEXT NOT NULL,
-    updated_at          TEXT NOT NULL
+    id                          TEXT PRIMARY KEY,
+    room_id                     TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    title                       TEXT NOT NULL,
+    description                 TEXT NOT NULL DEFAULT '',
+    status                      TEXT NOT NULL DEFAULT 'open',
+    targets                     TEXT NOT NULL DEFAULT '[]',
+    priority                    INTEGER NOT NULL DEFAULT 0,
+    created_by_participant_id   TEXT NOT NULL,
+    -- Monotonic per task, never reused, retained across release so a revived
+    -- stale claimant can never present a currently-valid fence (docs/PROTOCOL.md §4).
+    fence                       INTEGER NOT NULL DEFAULT 0,
+    claim_lease_id              TEXT,
+    claim_participant_id        TEXT,
+    claim_fence                 INTEGER,
+    claim_claimed_at            TEXT,
+    claim_expires_at            TEXT,
+    claim_heartbeat_interval_s  INTEGER,
+    claim_renewed_at            TEXT,
+    result                      TEXT NOT NULL DEFAULT '',
+    privacy_class               TEXT NOT NULL DEFAULT 'room_public',
+    created_at                  TEXT NOT NULL,
+    updated_at                  TEXT NOT NULL,
+    completed_at                TEXT,
+    CHECK (fence >= 0),
+    -- A claim is all-or-nothing: these five columns are set together or not at
+    -- all, so "claimed with no expiry" is unrepresentable.
+    CHECK (
+        (claim_lease_id IS NULL AND claim_participant_id IS NULL
+             AND claim_fence IS NULL AND claim_expires_at IS NULL)
+        OR (claim_lease_id IS NOT NULL AND claim_participant_id IS NOT NULL
+             AND claim_fence IS NOT NULL AND claim_expires_at IS NOT NULL)
+    )
 );
 
-CREATE INDEX IF NOT EXISTS idx_tasks_room ON tasks(room_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_room ON tasks(room_id, status);
+-- Drives the lease reaper without a table scan.
+CREATE INDEX IF NOT EXISTS idx_tasks_claim_expiry ON tasks(claim_expires_at);
+
+CREATE TABLE IF NOT EXISTS task_dependencies (
+    room_id                    TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    from_task_id               TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    to_task_id                 TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    kind                       TEXT NOT NULL,
+    created_at                 TEXT NOT NULL,
+    created_by_participant_id  TEXT NOT NULL,
+    PRIMARY KEY (from_task_id, to_task_id, kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dependencies_room ON task_dependencies(room_id);
+
+CREATE TABLE IF NOT EXISTS task_proposals (
+    id                            TEXT PRIMARY KEY,
+    room_id                       TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    task_id                       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    to_participant_id             TEXT NOT NULL,
+    proposed_by_participant_id    TEXT NOT NULL,
+    note                          TEXT NOT NULL DEFAULT '',
+    created_at                    TEXT NOT NULL,
+    expires_at                    TEXT,
+    resolution                    TEXT,
+    resolved_at                   TEXT,
+    delegated_to_participant_id   TEXT,
+    delegated_from_proposal_id    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_proposals_room ON task_proposals(room_id, resolution);
+CREATE INDEX IF NOT EXISTS idx_proposals_to ON task_proposals(to_participant_id, resolution);
+
+CREATE TABLE IF NOT EXISTS conflicts (
+    id               TEXT PRIMARY KEY,
+    room_id          TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    kind             TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'open',
+    subject_refs     TEXT NOT NULL DEFAULT '[]',
+    participant_ids  TEXT NOT NULL DEFAULT '[]',
+    detail           TEXT NOT NULL DEFAULT '',
+    detected_at      TEXT NOT NULL,
+    resolved_at      TEXT,
+    resolution       TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_conflicts_room ON conflicts(room_id, status);
+
+-- Tombstone left behind by a purge, so deletion is provable without retaining
+-- content (docs/SECURITY.md §7).
+CREATE TABLE IF NOT EXISTS room_tombstones (
+    room_id            TEXT PRIMARY KEY,
+    org_id             TEXT NOT NULL,
+    created_at         TEXT NOT NULL,
+    purged_at          TEXT NOT NULL,
+    participant_count  INTEGER NOT NULL DEFAULT 0,
+    event_count        INTEGER NOT NULL DEFAULT 0,
+    reason             TEXT NOT NULL DEFAULT ''
+);

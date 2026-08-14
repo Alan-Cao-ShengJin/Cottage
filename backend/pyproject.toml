@@ -1,0 +1,43 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+exclude = [".venv", "data", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    # Long lines in prose comments are more readable than awkward wrapping; the
+    # formatter already keeps code within the limit.
+    "E501",
+    # `zip(strict=)` is 3.10+, but this codebase avoids zip in hot paths anyway.
+    "B905",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately import inside functions to keep the invariant they are pinning
+# adjacent to the assertion, and use dynamic imports to reach past layering on purpose.
+"tests/*" = ["B008", "SIM117", "E402", "F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["app"]
+exclude = "(\\.venv|data)"
+# Pragmatic rather than strict: the value here is catching real shape errors across a
+# large surface, and full strictness on pydantic + aiosqlite Row access would generate
+# noise that trains people to ignore the tool.
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+no_implicit_optional = true
+ignore_missing_imports = true
+disallow_untyped_defs = false
+warn_return_any = false
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+# Row access is `Any` by nature; annotating every column read would add noise, not safety.
+module = ["app.core.store", "app.core.eventlog"]
+disable_error_code = ["index", "arg-type"]

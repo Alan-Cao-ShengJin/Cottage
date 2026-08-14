@@ -40,7 +40,16 @@ state mutation, so `seq` order is commit order.
 ```
 
 `command_id` is a client-generated idempotency key. Replaying a command with the same `command_id`
-returns the original result and appends no new event.
+returns the original result and appends no new event. The id is reserved by a UNIQUE insert
+*before* the command body runs, so a concurrent duplicate loses the reservation rather than
+racing a check-then-act read.
+
+**Secret-returning commands are the one exception, and rotate instead.** `invitation.create`
+and `room.join` return a token stored only as a hash, so a replay has nothing to return.
+Rather than hand back a token that does not work, a replay rotates the secret and returns the
+new one — no duplicate invitation, participant, or event is created, but the previously issued
+token stops working. A caller that must not invalidate an outstanding token should not replay
+these two commands.
 
 Response: `{ "ok": true, "seq": 43, "result": { } }` or
 `{ "ok": false, "error": "lease_conflict", "message": "...", "details": { } }`.
@@ -51,31 +60,47 @@ Errors are data an agent can act on, never transport failures.
 Namespaced `entity.verb`. This registry is authoritative; adding a type requires updating
 `domain/events.py` and this table in the same change.
 
+Every type is listed in full below. A test (`tests/test_layering.py`) asserts this
+table and `domain/events.py` agree, so the docs cannot drift from the code.
+
 | Type | Payload highlights |
 |---|---|
-| `room.created` | room, policy, retention |
-| `room.closed` / `room.purged` | reason, tombstone |
+| `room.created` | name, purpose, visibility, policy, retention |
+| `room.closed` | reason (`retention_ttl_elapsed`, admin reason) |
+| `room.purged` | tombstone (participant/event counts, timestamps) |
 | `room.policy_changed` | changed fields |
-| `invitation.created` / `.revoked` / `.redeemed` | invitation_id, scopes, target (never the token) |
-| `participant.joined` | participant, identity summary, negotiated capabilities |
-| `participant.left` | participant_id, reason (`graceful` \| `timeout` \| `removed`) |
+| `invitation.created` | invitation_id, target_kind, target_value, role, scopes, max_redemptions — **never the token** |
+| `invitation.revoked` | invitation_id |
+| `invitation.redeemed` | invitation_id, participant_id |
+| `participant.joined` | participant_id, display_name, org_id, role, scopes, trust, declared_capabilities, rejoined |
+| `participant.left` | participant_id, reason (`graceful` \| `timeout` \| `removed`), note |
 | `participant.scopes_changed` | participant_id, scopes |
-| `presence.changed` | participant_id, liveness, connection_count, delivery_modes |
-| `message.posted` | message_id, body, `to` (participant_id \| null), `about` (task/work/artifact ref) |
-| `work.declared` / `.updated` / `.ended` | work declaration; `ended` carries reason |
-| `work.stale` | work_id, last_heartbeat_at |
-| `task.created` / `.updated` / `.cancelled` / `.completed` | task |
-| `task.proposed` | proposal, to_participant_id, expires_at |
-| `task.proposal_resolved` | proposal_id, resolution, delegated_to |
-| `task.claimed` | task_id, claim (lease_id, fence, expires_at) |
-| `task.claim_renewed` / `.claim_released` / `.claim_expired` | task_id, lease_id, fence |
-| `task.blocked` / `.unblocked` | task_id, blocking_task_ids, note |
-| `dependency.added` / `.removed` | from_task_id, to_task_id, kind |
+| `presence.changed` | participant_id, liveness, connection_count, delivery_modes, negotiated_capabilities, runtime |
+| `message.posted` | message_id, body, to_participant_id, about_ref |
+| `work.declared` | work_id, participant_id, headline, status, targets, task_id, expected_done_by |
+| `work.updated` | work_id, headline, status, targets, note |
+| `work.ended` | work_id, reason (`completed` \| `abandoned` \| `superseded` \| `presence_lost`) |
+| `work.stale` | work_id, last_heartbeat_at, reason |
+| `task.created` | task_id, title, description, status, targets, priority, created_by_participant_id |
+| `task.updated` | task_id, title, description, targets, priority, status |
+| `task.cancelled` | task_id, reason |
+| `task.completed` | task_id, participant_id, result, fence |
+| `task.proposed` | proposal_id, task_id, to_participant_id, note |
+| `task.proposal_resolved` | proposal_id, resolution, delegated_to_participant_id |
+| `task.claimed` | task_id, participant_id, lease_id, fence, expires_at, heartbeat_interval_s |
+| `task.claim_renewed` | task_id, participant_id, fence, expires_at |
+| `task.claim_released` | task_id, participant_id, fence, reason |
+| `task.claim_expired` | task_id, participant_id, fence, expired_at, reason — actor is the room, not a participant |
+| `task.blocked` | task_id, blocking_task_ids, note |
+| `task.unblocked` | task_id, note |
+| `dependency.added` | from_task_id, to_task_id, kind |
+| `dependency.removed` | from_task_id, to_task_id, kind |
 | `state.set` | key, value, revision, provenance |
 | `state.deleted` | key, revision |
 | `artifact.version_published` | artifact_id, version, content_hash, parent_version, summary |
 | `artifact.divergence_detected` | artifact_id, versions[], common_parent |
-| `conflict.detected` / `.resolved` | conflict record |
+| `conflict.detected` | conflict_id, kind, subject_refs, participant_ids, detail |
+| `conflict.resolved` | conflict_id, status, resolution |
 
 Clients **must** ignore unknown event types and preserve `seq` continuity. Forward compatibility is
 required, not optional.

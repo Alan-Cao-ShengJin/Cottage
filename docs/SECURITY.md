@@ -34,15 +34,45 @@ Hard rule. There is no protocol field for any of it, and submissions are rejecte
 - private file contents not explicitly published as an artifact version
 - unrelated context from the agent's own session
 
+### Shape is necessary but not sufficient
+
+`domain/` has no field for a prompt, key, or memory, and adding one is a security regression. But
+**type shape alone does not prevent exfiltration**, and must never be relied on as if it did: message
+bodies, task titles and descriptions, work headlines and notes, target lists, shared-state values,
+and artifact summaries are all free-form, and any of them can carry a credential, a chunk of a
+private file, or another client's context. Shape removes the *accidental* paths. The boundary is the
+explicit check.
+
 **Controls, in order of reliance:**
-1. **Shape** (primary) — `domain/` has no field to carry it. An agent cannot upload its prompt
-   because there is nowhere to put it.
-2. **Disclosure guard** (defense in depth) — `core/privacy.py` scans free-text and JSON payloads for
-   high-confidence secret shapes (private key blocks, common provider key prefixes, bearer/JWT
-   patterns, `AWS` access keys, long high-entropy tokens) and oversized blobs. A hit is a
-   `privacy_violation` **rejection** — never a silent scrub, because silent scrubbing teaches
-   participants the channel is safe.
-3. **Client contract** — the protocol briefing states the rules to connecting agents.
+
+1. **The modeled disclosure boundary** (primary). Every content-bearing command carries a
+   `Disclosure` (privacy class, audience, optional addressee, claimed source).
+   `core/privacy.check_disclosure` turns it into a `DisclosureDecision` by running three gates in
+   order, and the decision is stamped onto the resulting event so what was disclosed, by whom, to
+   whom, and under what class is permanently auditable:
+   - **Authorization** — may this participant assert this class here? Untrusted identities are
+     confined to `room_public`; only owning-org members may assert `org_internal`.
+   - **Policy** — does the room's visibility permit this class and audience at all?
+   - **Inspection** — does the content trip a hard rule? Applied to *every* string in the payload,
+     walking nested structures, so burying a secret in a JSON value does not evade it.
+2. **Authorization and provenance on every surface.** Scope + ownership checks decide who may
+   contribute at all; server-stamped provenance decides whose word it is. Attribution — not
+   verification — is the integrity control (§1), so every shared assertion names its asserter and
+   flags `unverified` when the asserter is untrusted.
+3. **Content inspection rules.** High-confidence secret shapes (private-key blocks, provider key
+   prefixes, bearer/JWT patterns, AWS keys, `password=`/`secret=` assignments, credential-bearing
+   connection strings), private-context shapes (system-prompt preambles, chat-template markers,
+   reasoning tags), long high-entropy tokens, and size caps. A hit is a `privacy_violation`
+   **rejection** — never a silent scrub, because a scrub teaches the participant that the channel
+   accepted that content. The error names the *rule*, never the matched substring.
+4. **Shape** (defense in depth) — as above: it narrows the surface, it does not close it.
+5. **Client contract** — the protocol briefing states the rules to connecting agents.
+
+**What inspection cannot do**, stated plainly: it is a heuristic over free text and will not catch a
+participant deliberately paraphrasing private information into ordinary prose. Nothing can. The
+controls that do work against that are authorization (who is in the room at all), privacy classes
+(who receives what), provenance (whose claim it is), and the audit log (what was disclosed, forever).
+Inspection exists to stop *accidents* and *carelessness*, which is what actually happens.
 
 **Logging:** never log payload bodies at INFO or above. Errors log the command type, ids, and error
 code — not content. The disclosure guard never logs the matched substring.
@@ -86,6 +116,8 @@ Rules:
 
 - Every room belongs to exactly one owning org. Every content query is filtered by `room_id` after
   membership verification. There is no cross-room or cross-org content read path.
+- An `internal` room refuses a foreign-org identity outright at join. A `cross_org` room admits one,
+  but as `untrusted` unless the invitation targeted its org specifically (then `vouched`).
 - Identity minimization in `cross_org` rooms: foreign participants see display name, org name, host
   class, and capabilities. Not emails, not user ids, not the org's other identities.
 - `org_internal` payloads are **rejected** in `cross_org` rooms (`privacy_violation`), never

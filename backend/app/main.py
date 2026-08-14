@@ -1,6 +1,8 @@
-"""FastAPI application: REST + SSE + the MCP server, in one process.
+"""ASGI composition: ARP HTTP + SSE, the MCP adapter, and the background reaper.
 
-Run with:  uvicorn app.main:app --reload   (from the backend/ directory)
+One process, one service layer. The MCP adapter is mounted onto the same app so
+there is nothing extra to run and no way for the two doors into the product to drift
+apart on behavior.
 """
 
 from __future__ import annotations
@@ -14,74 +16,107 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .agents.runner import runner
+from .adapters.mcp.server import mcp
 from .api.routes import router
 from .config import settings
+from .core import presence, rooms, tasks, work
+from .core.bus import bus
+from .core.errors import RoomError
 from .db.database import init_db
-from .errors import RoomError
-from .mcp_server import mcp
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("agent_room")
+log = logging.getLogger("agent_rooms")
 
-# Build the MCP ASGI app once; its session manager is created lazily on first call.
 mcp_app = mcp.streamable_http_app()
 
-JANITOR_INTERVAL_SECONDS = 60
 
+async def _reaper() -> None:
+    """Expire leases, close dead connections, stale work, close expired rooms.
 
-async def _expiry_janitor() -> None:
-    """Flip rooms to `expired` on schedule so the UI and agents agree on time.
-
-    Rooms also expire lazily on read; this exists so an idle room still stops
-    accepting agent traffic promptly. Rows are kept for debugging — real
-    deletion is DELETE /api/rooms/{code} or scripts/cleanup.py.
+    Correctness does not depend on this loop: lease expiry is enforced on every read
+    (`core/store.to_task`), so a reaper that is late or dead cannot let two
+    participants hold one task. What it provides is *timeliness* — the durable status
+    change and the `task.claim_expired` event that tells the room work is reclaimable.
     """
-    from .services import rooms
+    from .db import database as db
 
     while True:
         try:
-            await asyncio.sleep(JANITOR_INTERVAL_SECONDS)
-            expired = await rooms.expire_due_rooms()
-            if expired:
-                log.info("janitor expired %d room(s)", len(expired))
+            await asyncio.sleep(settings.reaper_interval_seconds)
+            await tasks.reap_expired_leases()
+            await presence.reap_dead_connections()
+            await rooms.expire_due_rooms()
+
+            rows = await db.fetch_all("SELECT id FROM rooms WHERE status = 'open'")
+            for row in rows:
+                room = await rooms.store.load_room(row["id"])
+                await work.mark_stale_declarations(room)
         except asyncio.CancelledError:
             raise
-        except Exception:  # pragma: no cover - never let the janitor die
-            log.exception("expiry janitor iteration failed")
+        except Exception:  # pragma: no cover - never let the reaper die
+            log.exception("reaper iteration failed")
+
+
+async def _bootstrap_dev_identity() -> None:
+    """Seed a dev org/user and a fixed token so the slice is runnable immediately.
+
+    Dev only (`DEV_BOOTSTRAP`). Real identity federation is M5; nothing in `core/`
+    assumes this shape.
+    """
+    org_id, user_id = await rooms.ensure_org_and_user(
+        org_name="Dev Org",
+        org_slug="dev-org",
+        email="dev@example.com",
+        display_name="Dev Owner",
+    )
+    await rooms.set_principal_token(
+        token=settings.dev_bootstrap_token,
+        subject_kind="user",
+        subject_id=user_id,
+        org_id=org_id,
+        label="dev bootstrap",
+    )
+    log.warning(
+        "DEV_BOOTSTRAP is on: user %s authenticates with DEV_BOOTSTRAP_TOKEN. "
+        "Never enable this outside local development.",
+        user_id,
+    )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    runner.start()
-    janitor = asyncio.create_task(_expiry_janitor())
+    if settings.dev_bootstrap:
+        await _bootstrap_dev_identity()
+
+    reaper = asyncio.create_task(_reaper())
     log.info(
-        "agent-room up | openai=%s model=%s | ttl=%ss | max_turns=%d",
-        "on" if settings.openai_enabled else "OFF (set OPENAI_API_KEY)",
-        settings.openai_model,
-        settings.room_ttl_seconds,
-        settings.max_room_agent_turns,
+        "agent-rooms up | protocol=arp/1 | reaper=%ss | heartbeat=%ss | no model provider (by design)",
+        settings.reaper_interval_seconds,
+        settings.heartbeat_interval_seconds,
     )
     # The MCP streamable-HTTP session manager must be running for /mcp to serve.
     async with mcp.session_manager.run():
         try:
             yield
         finally:
-            janitor.cancel()
+            reaper.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await janitor
-            await runner.shutdown()
+                await reaper
+            bus.clear()
 
 
 app = FastAPI(
-    title="Agent Room",
-    version="0.1.0",
-    description="Temporary shared rooms where AI agents belonging to different humans coordinate.",
+    title="Agent Rooms",
+    version="0.2.0",
+    description=(
+        "A provider-neutral live collaboration network for independently owned AI "
+        "agents. Coordination, not inference."
+    ),
     lifespan=lifespan,
 )
 
@@ -97,22 +132,20 @@ app.add_middleware(
 
 @app.exception_handler(RoomError)
 async def room_error_handler(_: Request, exc: RoomError) -> JSONResponse:
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"error": exc.code, "message": exc.message},
-    )
+    """Domain errors are structured data with a stable `error` code, so a
+    coordinating agent can branch on the reason rather than parse prose."""
+    return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
 
 
 app.include_router(router)
-
-# Remote MCP endpoint for Claude Code: http://localhost:8000/mcp
 app.mount("/mcp", mcp_app)
 
 
 @app.get("/")
 async def index() -> dict[str, str]:
     return {
-        "service": "agent-room",
+        "service": "agent-rooms",
+        "protocol": "arp/1",
         "docs": "/docs",
         "api": "/api",
         "mcp": f"{settings.public_base_url.rstrip('/')}/mcp",

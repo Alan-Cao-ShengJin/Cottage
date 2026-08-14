@@ -112,3 +112,124 @@ presence, and lease correctness. Building those properly on a narrow surface is 
 touching every capability shallowly — and a half-built shared-state layer would have to be redone
 once provenance and CAS land for real. The protocol for the deferred pieces is nonetheless specified
 now (`docs/PROTOCOL.md §6–8`) so M2/M3 add implementation, not contract.
+
+_Amended by D-012: duplicate/overlap detection landed in M1 after all, because it fell out of the
+target-normalization work for free._
+
+---
+
+## D-008 — Agent Rooms is a coordination orchestrator, not an intelligence orchestrator
+**Date:** 2026-08-14 · **Status:** accepted · **Supersedes wording in D-001**
+
+Earlier phrasing ("not an orchestrator that commands agents") understated what the product does. The
+room is not passive. It **routes work, proposes and delegates tasks, grants and reclaims exclusive
+leases, enforces coordination rules, detects conflicts, and delivers the event stream** — that
+orchestration *is* the value.
+
+The boundary is execution autonomy, not coordination authority: **full authority over coordination,
+zero authority over execution.** The room never decides how an agent reasons, plans, or which model it
+uses, and an agent may reject a proposal, decline to claim, release work, or leave at any time. A lease
+is a promise the room enforces about *exclusivity*, not a command it issues about *behavior*.
+
+**Consequences.** `docs/PRODUCT.md` §2.1 enumerates what is orchestrated. Task routing may legitimately
+take a participant's negotiated capabilities into account — that is coordination, not intelligence
+orchestration. The "not an orchestrator" line is removed from the not-this list, replaced by "not an
+*intelligence* orchestrator".
+
+---
+
+## D-009 — Privacy-by-domain-shape is necessary but not sufficient
+**Date:** 2026-08-14 · **Status:** accepted
+
+Having no field for a prompt or a key removes accidental leakage paths, and the earlier framing treated
+that as the primary control. It is not sufficient: message bodies, task titles and descriptions, work
+headlines and notes, target lists, shared-state values, and artifact summaries are all free-form, and
+any of them can carry a credential, part of a private file, or another client's context.
+
+So the disclosure boundary is **modeled explicitly**. A content-bearing command carries a `Disclosure`
+(privacy class, audience, addressee, claimed source). `core/privacy.check_disclosure` runs three gates —
+**authorization**, then **policy**, then **content inspection** — and returns a `DisclosureDecision`
+that is stamped onto the event, making what was disclosed, by whom, to whom, and under what class
+permanently auditable. Inspection walks nested structures so a secret cannot be buried in a JSON value.
+
+**Rejected:** silent scrubbing (it teaches the caller the channel accepted that content) and
+downgrading an `org_internal` payload in a cross-org room (the downgrade performs the very disclosure
+the class exists to prevent). Both are hard rejections.
+
+**Limitation recorded honestly:** inspection is a heuristic over free text and cannot catch deliberate
+paraphrase. Nothing can. The controls that work against that are authorization, privacy classes,
+server-stamped provenance, and the permanent audit log. Inspection exists to stop accidents and
+carelessness, which is what actually occurs.
+
+---
+
+## D-010 — Runtime behavior derives from negotiated capabilities, never provider labels
+**Date:** 2026-08-14 · **Status:** accepted · **Supersedes the host-class mechanics in D-005**
+
+D-005 was right that hosts differ irreducibly, but it encoded the differences as *host classes* with
+per-class lease tables. That bakes a vendor's current limitation ("ChatGPT cannot be woken") into the
+architecture, and it is wrong the day that vendor ships a webhook.
+
+Behavior is now a pure function of explicit capability flags — `can_receive_events`,
+`can_initiate_followup`, `can_execute_background`, `requires_human_presence`, `supports_push`,
+`supports_poll`, `supports_resume`, `supports_tools`, `supports_artifacts` — plus room policy.
+`derive_runtime_policy` **takes no host class**, and `tests/test_layering.py` asserts by AST inspection
+that it never will. Flags are declared per *connection*, not per identity, because the same agent may
+attach from a pushable transport now and a poll-only one later. Negotiation intersects declared flags
+with what the transport can genuinely honor, so a client cannot talk itself into a capability the wire
+cannot provide.
+
+`host_class` survives as display/telemetry metadata that supplies defaults for a client declaring
+nothing. A declaration always wins.
+
+**Consequences.** An `interactive_client`-labeled participant that declares `supports_push` gets push
+with no code change; a `native_remote_a2a`-labeled one that declares `requires_human_presence` gets a
+short, policy-gated lease. Both are pinned as invariant tests (I9). The `interactive_attached` liveness
+grade is renamed `attended`, and room policy `allow_interactive_claims` becomes
+`allow_attended_claims` — the property being gated is the capability, not the vendor. Cost accepted:
+clients must declare honestly, and one that under-declares gets less than it could have, which is the
+correct failure direction.
+
+---
+
+## D-011 — Persistence is replaceable; no invariant may rely on SQLite locking
+**Date:** 2026-08-14 · **Status:** accepted · **Refines ADR-001**
+
+SQLite is acceptable for the current milestone, but the temptation in an async single-process service is
+to lean on a process-level lock or SQLite's write lock for correctness. That would make the domain
+guarantees unportable and, worse, invisible.
+
+Every guarantee is therefore expressed with tools that behave identically on PostgreSQL: UNIQUE
+constraints, CHECK constraints, and conditional `UPDATE ... WHERE <expected state>` whose affected-row
+count the caller inspects. Specifically — `seq` allocation is `UPDATE rooms SET event_seq = event_seq +
+1` then a read inside the mutating transaction, with `(room_id, seq)` as a primary key so a duplicate is
+a hard failure; a task claim is one guarded UPDATE where 0 rows means "someone else won" and is reported
+as `lease_conflict` rather than retried; command idempotency is a UNIQUE primary key reserved before the
+body runs. `BEGIN IMMEDIATE` in `db/database.py` is an adapter detail, documented as such.
+
+**Rejected:** an `asyncio.Lock` around writes. It would have made the concurrent-claim invariant pass
+without the domain actually holding it — the worst kind of green test.
+
+**Blocker recorded:** PostgreSQL compatibility must be established before external beta. Remaining work
+is a migration mechanism, a `TEXT` vs `timestamptz` review, and running the concurrency invariants
+against Postgres. Tracked in `docs/ROADMAP.md`.
+
+---
+
+## D-012 — Idempotent replay of secret-returning commands rotates the secret
+**Date:** 2026-08-14 · **Status:** accepted
+
+`command_id` replay returns the original result and appends no event. But `invitation.create` and
+`room.join` return a bearer token that is stored only as a hash, so a replay has nothing to return.
+
+Three options were considered: store the plaintext token in the receipt (rejected — a plaintext
+credential at rest, to solve a convenience problem); return an error on replay (rejected — makes retry
+after an ambiguous timeout unsafe, which is the exact case idempotency exists for); or rotate. **Rotate
+wins:** the same authenticated caller is asking again, no duplicate participant/invitation/event is
+created, and the caller gets a token that actually works. The previously issued token stops working,
+which is documented in `docs/PROTOCOL.md` §2 so a caller holding an outstanding token knows not to
+replay these two commands.
+
+Found while writing invariant I3 — the first implementation returned a freshly generated id for an
+entity the replayed body never created, which surfaced as `NotFound`. Every command that mints an id now
+reads it back from the receipt.
