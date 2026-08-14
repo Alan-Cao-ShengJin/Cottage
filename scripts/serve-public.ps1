@@ -149,8 +149,12 @@ try {
     Write-Host ''
 
     Write-Host "Starting the server on $publicUrl ..." -ForegroundColor Cyan
+    # `--no-use-colors`: uvicorn's ANSI colour codes are not interpreted by the default
+    # Windows console, so they arrive as literal `←[32m` noise interleaved with the
+    # verification output — which is exactly the part you need to read.
     $server = Start-Process -FilePath $python `
-        -ArgumentList '-m', 'uvicorn', 'app.main:app', '--port', $Port, '--app-dir', 'backend' `
+        -ArgumentList '-m', 'uvicorn', 'app.main:app', '--port', $Port, '--app-dir', 'backend',
+                      '--no-use-colors' `
         -PassThru -NoNewWindow
 
     # Confirm *our* server is the one answering before trusting any verification result.
