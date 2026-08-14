@@ -866,8 +866,28 @@ async def leave_room(*, participant: Participant, command: LeaveRoomCommand) -> 
 async def ensure_org_and_user(
     *, org_name: str, org_slug: str, email: str, display_name: str
 ) -> tuple[str, str]:
-    """Idempotently create an org + owner user. Returns `(org_id, user_id)`."""
+    """Idempotently create an org + owner user. Returns `(org_id, user_id)`.
+
+    **The person is the anchor, not the org name.** This used to resolve the org by slug
+    first, so renaming a configured org created a *second* org while the existing user kept
+    the first — and since rooms are written under `user.org_id` but listed by the token's
+    `org_id`, the operator's console went permanently empty with every room still sitting in
+    the original org (D-024). Looking the user up first makes a rename a rename.
+
+    The slug is left alone deliberately: it is an internal key that other rows resolve
+    through, and changing it to match a new display name would be the same fork by a
+    different route.
+    """
     now = utcnow_iso()
+    existing_user = await db.fetch_one("SELECT id, org_id FROM users WHERE email = ?", (email,))
+    if existing_user is not None:
+        org_id = existing_user["org_id"]
+        await db.execute(
+            "UPDATE organizations SET name = ? WHERE id = ? AND name != ?",
+            (org_name, org_id, org_name),
+        )
+        return org_id, existing_user["id"]
+
     row = await db.fetch_one("SELECT id FROM organizations WHERE slug = ?", (org_slug,))
     org_id = row["id"] if row else ids.new_id(ids.ORG)
     if row is None:
@@ -875,14 +895,12 @@ async def ensure_org_and_user(
             "INSERT INTO organizations (id, name, slug, created_at) VALUES (?,?,?,?)",
             (org_id, org_name, org_slug, now),
         )
-    row = await db.fetch_one("SELECT id FROM users WHERE email = ?", (email,))
-    user_id = row["id"] if row else ids.new_id(ids.USER)
-    if row is None:
-        await db.execute(
-            "INSERT INTO users (id, org_id, email, display_name, role, created_at) "
-            "VALUES (?,?,?,?,'owner',?)",
-            (user_id, org_id, email, display_name, now),
-        )
+    user_id = ids.new_id(ids.USER)
+    await db.execute(
+        "INSERT INTO users (id, org_id, email, display_name, role, created_at) "
+        "VALUES (?,?,?,?,'owner',?)",
+        (user_id, org_id, email, display_name, now),
+    )
     return org_id, user_id
 
 
@@ -940,16 +958,44 @@ async def issue_principal_token(
 async def set_principal_token(
     *, token: str, subject_kind: str, subject_id: str, org_id: str, label: str = ""
 ) -> None:
-    """Install a specific token value. Dev bootstrap only, so a fixed token from
-    config can be used without copying a generated one out of the logs."""
-    await db.execute(
-        """
-        INSERT OR REPLACE INTO principal_tokens
-            (token_hash, subject_kind, subject_id, org_id, label, created_at)
-        VALUES (?,?,?,?,?,?)
-        """,
-        (hash_token(token), subject_kind, subject_id, org_id, label, utcnow_iso()),
-    )
+    """Install a specific token value from configuration, replacing any previous one.
+
+    **Rotation has to revoke, and it did not.** This was `INSERT OR REPLACE` keyed on
+    `token_hash`, so a new value simply added a row: every token ever configured for this
+    subject stayed valid forever. Rotating a leaked `OPERATOR_TOKEN` therefore did nothing,
+    and an instance that had *once* booted on the published default kept accepting it even
+    after the guards were satisfied (D-024). The old token is where the danger lives, so
+    installing the new one revokes it in the same transaction.
+
+    Scoped to this subject's *configured* credentials — `client_id IS NULL`, i.e. not minted
+    by the OAuth flow. Rotating the operator's token must not sign every agent out, and an
+    access token a human granted at consent is not this function's to revoke. Matching on
+    provenance rather than on `label` also retires tokens written under an earlier label,
+    which is the case that would otherwise survive a rename of this very credential.
+    """
+    now = utcnow_iso()
+    new_hash = hash_token(token)
+    async with db.transaction() as tx:
+        await tx.execute(
+            """
+            UPDATE principal_tokens
+               SET revoked_at = ?
+             WHERE subject_kind = ?
+               AND subject_id = ?
+               AND client_id IS NULL
+               AND token_hash != ?
+               AND revoked_at IS NULL
+            """,
+            (now, subject_kind, subject_id, new_hash),
+        )
+        await tx.execute(
+            """
+            INSERT OR REPLACE INTO principal_tokens
+                (token_hash, subject_kind, subject_id, org_id, label, created_at)
+            VALUES (?,?,?,?,?,?)
+            """,
+            (new_hash, subject_kind, subject_id, org_id, label, now),
+        )
 
 
 async def provisioning_context_for_invitation(token: str) -> tuple[str, str]:
@@ -995,20 +1041,25 @@ async def authenticate_principal(token: str) -> Principal:
     if row is None or row["revoked_at"] or is_past(row["expires_at"]):
         raise Unauthenticated("Unknown or revoked token.")
 
+    # The subject's own org wins over the copy denormalised onto the token row. They should
+    # never disagree, but when they did, the effect was silent and total: rooms are created
+    # under `user.org_id` while every list is scoped by the principal's `org_id`, so a
+    # mismatch made the operator's own rooms invisible to them (D-024). One authority
+    # removes the failure mode rather than relying on the two staying in step.
     if row["subject_kind"] == "user":
         user_row = await db.fetch_one("SELECT * FROM users WHERE id = ?", (row["subject_id"],))
         if user_row is None:
             raise Unauthenticated("Token subject no longer exists.")
-        return Principal(kind="user", org_id=row["org_id"], user=store.to_user(user_row))
+        user = store.to_user(user_row)
+        return Principal(kind="user", org_id=user.org_id, user=user)
 
     identity_row = await db.fetch_one(
         "SELECT * FROM agent_identities WHERE id = ?", (row["subject_id"],)
     )
     if identity_row is None:
         raise Unauthenticated("Token subject no longer exists.")
-    return Principal(
-        kind="agent_identity", org_id=row["org_id"], identity=store.to_identity(identity_row)
-    )
+    identity = store.to_identity(identity_row)
+    return Principal(kind="agent_identity", org_id=identity.org_id, identity=identity)
 
 
 async def list_rooms_for_org(org_id: str, limit: int = 50) -> list[Room]:

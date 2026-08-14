@@ -16,10 +16,12 @@ decisions correct rather than optimistic.
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from typing import Any
 from urllib.parse import urlparse
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.streamable_http import MCP_SESSION_ID_HEADER
 from mcp.server.transport_security import TransportSecuritySettings
 
 from ...config import settings
@@ -109,22 +111,55 @@ mcp = FastMCP(
 
 #: MCP session → participant token. A session holds one participant, so this
 #: remembers "who you are" between tool calls. Every tool also accepts an explicit
-#: token so a recycled session can recover without rejoining — session affinity is a
-#: convenience, never the authorization.
-_session_tokens: dict[str, str] = {}
+#: token so a caller can always identify itself without relying on this — session
+#: affinity is a convenience, never the authorization.
+#:
+#: Bounded, because entries for sessions that vanished without calling `leave_room`
+#: would otherwise accumulate for the life of the process. Eviction is safe: it costs
+#: the caller an explicit `participant_token`, it cannot grant anything.
+_SESSION_TOKEN_LIMIT = 512
+_session_tokens: OrderedDict[str, str] = OrderedDict()
 
 
-def _session_key(ctx: Context | None) -> str:
-    if ctx is None:
-        return "default"
-    try:
-        return f"session:{id(ctx.session)}"
-    except Exception:  # pragma: no cover - transport without a session
-        return "default"
+def _remember_session(ctx: Context | None, participant_token: str) -> None:
+    key = _session_key(ctx)
+    if key is None:
+        return
+    _session_tokens[key] = participant_token
+    _session_tokens.move_to_end(key)
+    while len(_session_tokens) > _SESSION_TOKEN_LIMIT:
+        _session_tokens.popitem(last=False)
+
+
+def _session_key(ctx: Context | None) -> str | None:
+    """The transport's session id, or None when there is no session to key on.
+
+    **Not `id(ctx.session)`, which is what this used to be.** `id()` is a memory
+    address, and CPython reuses addresses after garbage collection — so a new session
+    could land on the address of a finished one and inherit its entry from
+    `_session_tokens`, i.e. act as a previous caller's participant. The old code also
+    funnelled every session-less call into one shared `"default"` bucket, which is the
+    same bleed without needing a coincidence.
+
+    The streamable-HTTP transport assigns an unguessable UUID per session and the client
+    echoes it on each request, so it is unique, never reused, and read from the request
+    carrying *this* call — the same per-message source that identity resolution uses for
+    the reason recorded in `auth.py`.
+
+    Returning None rather than a placeholder is the point: with no session to key on, the
+    caller must present its own token.
+    """
+    request = getattr(getattr(ctx, "request_context", None), "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return None
+    session_id = headers.get(MCP_SESSION_ID_HEADER) or headers.get("Mcp-Session-Id")
+    return f"session:{session_id}" if session_id else None
 
 
 async def _participant(ctx: Context | None, token: str | None) -> Participant:
-    resolved = token or _session_tokens.get(_session_key(ctx))
+    key = _session_key(ctx)
+    resolved = token or (_session_tokens.get(key) if key else None)
     if not resolved:
         raise Unauthenticated(
             "You have not joined a room in this session. Call join_room first, or "
@@ -280,7 +315,7 @@ async def create_room(
         )
         # Bind this session so later tools need no token, and open a polling connection
         # so the creator is present rather than a room with nobody in it.
-        _session_tokens[_session_key(ctx)] = created.participant_token
+        _remember_session(ctx, created.participant_token)
         declared = _default_agent_capabilities()
         negotiated = await presence.connect(
             participant=created.participant,
@@ -431,7 +466,7 @@ async def join_room(
                 description=description,
             ),
         )
-        _session_tokens[_session_key(ctx)] = result.participant_token
+        _remember_session(ctx, result.participant_token)
 
         negotiated = await presence.connect(
             participant=result.participant,
@@ -573,7 +608,9 @@ async def leave_room(
     try:
         participant = await _participant(ctx, participant_token)
         await rooms.leave_room(participant=participant, command=LeaveRoomCommand(note=note))
-        _session_tokens.pop(_session_key(ctx), None)
+        key = _session_key(ctx)
+        if key:
+            _session_tokens.pop(key, None)
         return {"ok": True}
     except RoomError as exc:
         return _err(exc)

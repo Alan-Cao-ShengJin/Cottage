@@ -68,4 +68,12 @@ EXPOSE 8080
 
 # `sh -c` so ${PORT} expands: hosting platforms assign it, and a hardcoded port means the
 # platform's health check hits nothing.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+#
+# `--forwarded-allow-ips='*'` because uvicorn only trusts X-Forwarded-* from 127.0.0.1 by
+# default. Behind a platform proxy that arrives from another address, so the headers were
+# ignored and every redirect was emitted as `http://` — observed on the live instance:
+# `GET /room` answered `location: http://agent-rooms.fly.dev/room/`, which the proxy then
+# has to bounce back to https. Harmless-looking for a page, not harmless for an OAuth
+# redirect. Trusting `*` is correct *here* specifically because the container is only
+# reachable through that proxy; a deployment that exposes the port directly must narrow it.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --forwarded-allow-ips='*'"]

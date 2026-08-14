@@ -684,3 +684,103 @@ The instance is real and the volume holds: `agent-rooms.fly.dev` serves the cons
 origin, the full OAuth + MCP flow is green over the internet, and rooms plus their `event_seq`
 survive a redeploy unchanged. That half stands. What it does not deliver is the half the product
 is named for, and the roadmap now says so instead of implying otherwise.
+
+---
+
+## D-024 — Auditing the first deployment: four defects that produce no error message
+**Date:** 2026-08-15 · **Status:** accepted · **Extends D-022**
+
+An adversarial audit of the M2.0 deployment artifacts (13 agents, six lenses, each finding put to
+a refuter that had to try to disprove it) returned 22 confirmed and 18 refuted findings. Four are
+recorded here because they share a property: **every one of them fails silently.** No exception, no
+log line, no failing health check — just an instance that is wrong.
+
+### 1. The exposure guard failed open on ignorance
+
+`check_public_safety` asked one question — does `PUBLIC_BASE_URL` name a public host? — and returned
+early when the answer was no. Behind a tunnel that was sound: the variable had to be set for the
+tunnel to work at all, so an unset value really did mean "local". On a hosting platform it inverts.
+`<app>.fly.dev` exists whether or not anyone sets the variable, and the default value is
+`http://localhost:8000` — so a forgotten `fly secrets set PUBLIC_BASE_URL=…` does not merely lose
+information, it **asserts privacy that does not exist**. Both guards then wave through the operator
+token published in this repository, on a hostname anyone can reach. The same variable builds the
+MCP Host allowlist, so `/mcp` would also answer `421` to its own real hostname — the join path dead
+before authentication, with one log line to explain it.
+
+Fixed by failing closed on ignorance rather than assuming safety:
+
+- `public_base_url_declared` distinguishes "set to localhost" from "not set";
+- `hosting_platform` reads platform-injected markers (`FLY_APP_NAME`, `RAILWAY_ENVIRONMENT`,
+  `K_SERVICE`, …) and is used **only to tighten** — a test asserts that adding a platform marker can
+  turn accept into refuse but never refuse into accept, because env-var sniffing is exactly the kind
+  of mechanism that grows an accidental escape hatch;
+- an undeclared URL on a recognised platform refuses to boot, naming the variable and the command;
+- the published default token is refused on any recognised platform *regardless* of what the URL
+  says, so a wrong-but-parseable URL cannot buy it a pass;
+- a scheme-less `PUBLIC_BASE_URL=agent-rooms.fly.dev` — which parses to no hostname and therefore
+  reads as local — is a configuration error rather than a silent disarm.
+
+Local development with nothing configured still boots, which is the constraint that makes this a
+fix rather than a trade.
+
+### 2. Session affinity could hand over another participant's identity
+
+The MCP adapter remembers "who you are" between tool calls so clients need not resend a participant
+token. It keyed that map on **`id(ctx.session)`** — a memory address. CPython reuses addresses after
+garbage collection, so a new session could land on a finished one's address and inherit its entry,
+acting as the previous participant with correct-looking provenance on every event. Worse, and needing
+no coincidence: every session-less call fell into one shared `"default"` bucket, making two such
+callers the same caller by construction.
+
+`docs/SECURITY.md` §1 names the primary threat as a participant learning or influencing more than it
+was authorized to, and attribution as the integrity guarantee. This was a hole in exactly that.
+
+Fixed by keying on the transport's `mcp-session-id` — a server-assigned UUID, never reused, read from
+the request carrying *this* call (the same per-message source D-017 established as the only reliable
+one). No session id now yields **no key at all** rather than a placeholder, so the caller must present
+its own token. The map is bounded at 512 entries with oldest-first eviction, which is safe by
+construction: eviction can only remove an affinity, never grant one.
+
+### 3. Rotating the operator token revoked nothing
+
+`set_principal_token` was `INSERT OR REPLACE` keyed on `token_hash`, so configuring a new value simply
+added a row. Every token ever configured stayed valid forever. Rotating a leaked `OPERATOR_TOKEN`
+therefore accomplished nothing, and an instance that had once booted on the published default kept
+honouring it even after the guards were satisfied. Now installing a token revokes that subject's other
+*configured* credentials in the same transaction, matched on provenance (`client_id IS NULL`) rather
+than label — so OAuth access tokens a human granted at consent are untouched, and tokens written under
+an earlier label are still retired.
+
+### 4. Renaming the operator's org forked it, silently and permanently
+
+`ensure_org_and_user` resolved the org by slug, then the user by email. Change `OPERATOR_ORG_NAME` and
+a *second* org appears while the existing user keeps the first — and because rooms are created under
+`user.org_id` but listed by the principal's `org_id`, the operator's console goes permanently empty
+with every room still present in the database. The person is now the anchor: an existing email reuses
+its org and renames it. Independently, `authenticate_principal` now reports the subject's own
+`org_id` instead of the copy denormalised onto the token row, so the two cannot disagree again.
+
+### Also fixed from the same audit
+
+- **`fly launch` rewrites a committed `fly.toml`**, which would have discarded the volume mount —
+  producing a deployment that boots and loses every room on the next deploy. `docs/DEPLOY.md` now
+  uses `fly apps create`.
+- **`cat` on a live database is not a backup.** The schema sets `PRAGMA journal_mode = WAL`, so a
+  plain read can capture a torn write and fail only at restore. Replaced with `VACUUM INTO`. (I had
+  previously told the product owner no WAL pragma was set; that was wrong — `schema.sql:19`.)
+- **`--forwarded-allow-ips`.** uvicorn trusts `X-Forwarded-*` only from 127.0.0.1, so behind a
+  platform proxy every redirect was emitted as `http://` — confirmed live: `GET /room` answered
+  `location: http://agent-rooms.fly.dev/room/`. Cosmetic for a page, not for an OAuth redirect.
+- **The console advertised the wrong credential**, still naming `DEV_BOOTSTRAP_TOKEN` and offering
+  the published default as its placeholder — drift from the D-021 rename, live on the deployed page.
+  On a public instance a placeholder reads as an instruction, and that is the one value nobody
+  should paste.
+
+### What this says about method
+
+The audit was worth more than its cost, and specifically the *refuter* stage was: 18 of 40 findings
+did not survive contact with the files. But note what it did **not** find — that an invitation token
+authenticates nobody (D-023). Six lenses over the same artifacts missed the product's central
+capability being absent, because every lens took the operator's point of view. Finding that needed a
+different move: playing the stranger. Reviewing the artifacts you built, however adversarially, is
+not the same as using the thing as someone who does not already have the keys.

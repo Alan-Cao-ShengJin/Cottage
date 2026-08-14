@@ -122,16 +122,18 @@ export default function Home() {
         <h2>1 · Authenticate</h2>
         <div className="field">
           <label htmlFor="token">Principal token</label>
+          {/* Deliberately not showing the published default as a placeholder: on a
+              deployed instance that reads as an instruction, and the one value nobody
+              should paste here is the one printed in the repository. */}
           <input
             id="token"
             value={token}
-            placeholder="dev-owner-token"
+            placeholder="paste your operator token"
             onChange={(e) => setToken(e.target.value)}
           />
           <span className="hint">
-            Your organization credential. M1 uses a dev bootstrap token
-            (<code>DEV_BOOTSTRAP_TOKEN</code>, default <code>dev-owner-token</code>); real
-            identity federation is M5.
+            This instance&rsquo;s <code>OPERATOR_TOKEN</code> — the credential that creates
+            rooms. Multi-person login is M5; until then one operator holds it.
           </span>
         </div>
         <div className="field">

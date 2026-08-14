@@ -41,6 +41,28 @@ def _bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+#: Environment variables a hosting platform injects into every process it runs. Presence of
+#: any one means "something other than a laptop is serving this", which is the fact the
+#: startup guards need and cannot get from our own configuration.
+HOSTING_PLATFORM_MARKERS: tuple[tuple[str, str], ...] = (
+    ("FLY_APP_NAME", "fly.io"),
+    ("FLY_MACHINE_ID", "fly.io"),
+    ("RAILWAY_ENVIRONMENT", "railway"),
+    ("RENDER", "render"),
+    ("K_SERVICE", "cloud run"),
+    ("DYNO", "heroku"),
+    ("WEBSITE_INSTANCE_ID", "azure app service"),
+    ("KUBERNETES_SERVICE_HOST", "kubernetes"),
+)
+
+
+def _detect_hosting_platform() -> str | None:
+    for env_var, platform in HOSTING_PLATFORM_MARKERS:
+        if (os.getenv(env_var) or "").strip():
+            return platform
+    return None
+
+
 @dataclass(frozen=True)
 class Settings:
     # --- storage -------------------------------------------------------
@@ -56,6 +78,22 @@ class Settings:
     public_base_url: str = field(
         default_factory=lambda: os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
     )
+    #: Whether `PUBLIC_BASE_URL` was actually set, as opposed to defaulted.
+    #:
+    #: Recorded separately because the default is a *localhost* URL, so an unset variable
+    #: does not merely lose information — it actively asserts "I am local" to every check
+    #: that reads it. A field rather than a property so it can be overridden in tests the
+    #: same way every other setting is.
+    public_base_url_declared: bool = field(
+        default_factory=lambda: bool((os.getenv("PUBLIC_BASE_URL") or "").strip())
+    )
+    #: The hosting platform this process appears to run on, or None.
+    #:
+    #: Used **only to tighten** the startup guards, never to relax them: an unrecognised
+    #: platform leaves behaviour exactly as it was, while a recognised one turns "no public
+    #: address declared" from an assumption of safety into a refusal to boot. Every marker
+    #: is injected by the platform itself, so no request can conjure one.
+    hosting_platform: str | None = field(default_factory=lambda: _detect_hosting_platform())
     cors_origins: tuple[str, ...] = field(
         default_factory=lambda: tuple(
             o.strip()
@@ -156,9 +194,14 @@ class Settings:
     def is_publicly_reachable(self) -> bool:
         """Whether this instance is exposed beyond the local machine.
 
-        Derived from `PUBLIC_BASE_URL`, which is what you must set when running behind
-        a tunnel so the MCP URL handed to clients is correct. Setting it to a real
-        hostname is therefore a reliable signal that strangers can reach this process.
+        Derived from `PUBLIC_BASE_URL`, because whatever address we hand to clients is by
+        definition an address they can reach us on.
+
+        **This answers "did someone declare a public address", not "is this process
+        reachable".** Those came apart the moment we deployed: behind a tunnel the variable
+        had to be set for anything to work, so it was a sound proxy; on a hosting platform
+        `<app>.fly.dev` exists whether or not anyone set it. `hosting_platform` covers that
+        gap, and `check_public_safety` uses both.
         """
         # `urlparse().hostname` strips IPv6 brackets and the port, which naive string
         # splitting on ":" does not — `http://[::1]:8000` would otherwise parse as "[".
@@ -168,6 +211,19 @@ class Settings:
             # A malformed URL is not a reason to assume we are safely local.
             return True
         return host not in LOCAL_HOSTS
+
+    @property
+    def public_base_url_is_parseable(self) -> bool:
+        """Whether the configured URL yields a host at all.
+
+        `PUBLIC_BASE_URL=agent-rooms.fly.dev` (no scheme) parses to *no* hostname, which
+        lands in `LOCAL_HOSTS` via the empty string and reads as local — a typo that
+        silently disarms the guards. Treated as a configuration error instead.
+        """
+        try:
+            return bool(urlparse(self.public_base_url).hostname)
+        except ValueError:
+            return False
 
     @property
     def operator_token_is_default(self) -> bool:
@@ -202,14 +258,73 @@ UNSAFE_PUBLIC_MCP = (
     "PUBLIC_BASE_URL on localhost."
 )
 
+UNDECLARED_PUBLIC_BASE_URL = (
+    "Refusing to start: this looks like a deployment on {platform}, but PUBLIC_BASE_URL "
+    "is not set.\n"
+    "\n"
+    "Unset does not mean local. It means every safety check below reads the default "
+    "'http://localhost:8000', concludes this instance is private, and waves through the "
+    "published default operator token — on a hostname anyone can reach. The MCP endpoint "
+    "would also answer 421 to its own real hostname, because the Host allowlist is built "
+    "from this same value.\n"
+    "\n"
+    "Set PUBLIC_BASE_URL to the address clients will use, e.g.:\n"
+    "  fly secrets set PUBLIC_BASE_URL=https://<app>.fly.dev\n"
+    "\n"
+    "If this is genuinely not a deployment, set PUBLIC_BASE_URL=http://localhost:8000 "
+    "explicitly to say so."
+)
+
+UNPARSEABLE_PUBLIC_BASE_URL = (
+    "Refusing to start: PUBLIC_BASE_URL={value!r} has no hostname.\n"
+    "\n"
+    "A value without a scheme parses to no host at all, which every check then reads as "
+    "'local' — so a typo here silently disarms them. Include the scheme:\n"
+    "  PUBLIC_BASE_URL=https://rooms.example.com"
+)
+
+UNSAFE_DEFAULT_OPERATOR_ON_PLATFORM = (
+    "Refusing to start: running on {platform} with the published default OPERATOR_TOKEN.\n"
+    "\n"
+    "That token is printed in this repository, so anyone who reads it owns every room on "
+    "this instance. Set OPERATOR_TOKEN to a long random secret:\n"
+    "  fly secrets set OPERATOR_TOKEN=$(openssl rand -hex 20)"
+)
+
 
 def check_public_safety(config: Settings) -> None:
     """Raise if this instance would be exposed without real protection.
 
-    Called at startup. A warning would not be enough for either case: the failure is
-    silent, total, and only discovered after the damage. Two independent checks rather
-    than one, so turning off a single switch cannot open the endpoint.
+    Called at startup. A warning would not be enough for any of these: the failure is
+    silent, total, and only discovered after the damage.
+
+    **Fails closed on ignorance, which it did not always do.** The original version asked
+    one question — "does `PUBLIC_BASE_URL` name a public host?" — and returned early when
+    the answer was no. On a laptop behind a tunnel that was sound, because the variable had
+    to be set for the tunnel to work at all. On a hosting platform it inverted: the app is
+    reachable at a hostname the platform assigns, so forgetting to set the variable left
+    both guards disarmed *and* handed the instance to whoever had read the default token
+    out of the repo. An audit of the first deployment found it (D-024).
+
+    So: an unset value on a recognised platform is a configuration error, not an assertion
+    of privacy, and the default token is refused on any recognised platform regardless of
+    what the URL says. Platform detection only ever *adds* refusals — an unrecognised
+    platform behaves exactly as before, so this cannot become a way to boot something the
+    old checks would have stopped.
     """
+    platform = config.hosting_platform
+
+    if config.public_base_url_declared and not config.public_base_url_is_parseable:
+        raise RuntimeError(UNPARSEABLE_PUBLIC_BASE_URL.format(value=config.public_base_url))
+
+    if platform is not None:
+        if not config.public_base_url_declared:
+            raise RuntimeError(UNDECLARED_PUBLIC_BASE_URL.format(platform=platform))
+        # Independent of the URL: on a platform, the published default is never acceptable,
+        # so a wrong-but-parseable URL cannot buy it a pass either.
+        if config.bootstrap_operator and config.operator_token_is_default:
+            raise RuntimeError(UNSAFE_DEFAULT_OPERATOR_ON_PLATFORM.format(platform=platform))
+
     if not config.is_publicly_reachable:
         return
     if config.bootstrap_operator and config.operator_token_is_default:

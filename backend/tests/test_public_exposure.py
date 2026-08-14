@@ -124,6 +124,143 @@ def test_the_two_guards_are_independent():
 
 
 # ---------------------------------------------------------------------------
+# Failing closed when we do not know whether we are exposed
+#
+# The guards above all begin by asking `is_publicly_reachable`, which reads
+# `PUBLIC_BASE_URL`. Behind a tunnel that was sound — the variable had to be set for the
+# tunnel to work. On a hosting platform it inverts: the app is reachable at a hostname the
+# platform assigns, so an *unset* variable leaves both guards disarmed while the instance is
+# live. An audit of the first deployment found it (D-024). These tests cover the case where
+# configuration does not tell us the truth.
+# ---------------------------------------------------------------------------
+
+
+def test_undeclared_base_url_on_a_platform_refuses_to_start():
+    """The exact shape of a forgotten `fly secrets set PUBLIC_BASE_URL=...`.
+
+    Everything here looks locked down to the old checks: the URL *reads* as localhost, so
+    `is_publicly_reachable` is False and both guards return early — while the published
+    default token guards a public hostname.
+    """
+    from app.config import UNDECLARED_PUBLIC_BASE_URL
+
+    config = _settings(
+        public_base_url="http://localhost:8000",
+        public_base_url_declared=False,
+        hosting_platform="fly.io",
+        bootstrap_operator=True,
+        operator_token=DEFAULT_OPERATOR_TOKEN,
+        mcp_require_auth=True,
+    )
+    assert config.is_publicly_reachable is False, "the premise: config claims to be local"
+
+    with pytest.raises(RuntimeError) as exc:
+        check_public_safety(config)
+    assert str(exc.value) == UNDECLARED_PUBLIC_BASE_URL.format(platform="fly.io")
+    # Must name the variable and the fix, since this fires during a deploy someone is
+    # watching scroll past.
+    assert "PUBLIC_BASE_URL" in str(exc.value)
+    assert "fly secrets set" in str(exc.value)
+
+
+def test_the_published_default_token_is_refused_on_a_platform_whatever_the_url_says():
+    """Independent of the URL check, so a wrong-but-parseable URL cannot buy it a pass.
+
+    Belt and braces on purpose: the URL guard depends on the deployer having configured one
+    thing correctly, and this is the case where they configured it *incorrectly*.
+    """
+    from app.config import UNSAFE_DEFAULT_OPERATOR_ON_PLATFORM
+
+    config = _settings(
+        # Declared, parseable, and wrong — points at some other deployment.
+        public_base_url="https://someone-elses-app.fly.dev",
+        public_base_url_declared=True,
+        hosting_platform="fly.io",
+        bootstrap_operator=True,
+        operator_token=DEFAULT_OPERATOR_TOKEN,
+        mcp_require_auth=True,
+    )
+    with pytest.raises(RuntimeError) as exc:
+        check_public_safety(config)
+    assert str(exc.value) == UNSAFE_DEFAULT_OPERATOR_ON_PLATFORM.format(platform="fly.io")
+
+
+def test_a_scheme_less_base_url_is_a_configuration_error_not_a_local_instance():
+    """`PUBLIC_BASE_URL=agent-rooms.fly.dev` parses to *no* hostname.
+
+    The empty host then matches `LOCAL_HOSTS`, so the typo silently disarms every guard.
+    Refusing is the only safe reading: we were told to be public and cannot tell where.
+    """
+    from app.config import UNPARSEABLE_PUBLIC_BASE_URL
+
+    config = _settings(
+        public_base_url="agent-rooms.fly.dev",
+        public_base_url_declared=True,
+        bootstrap_operator=True,
+        operator_token=DEFAULT_OPERATOR_TOKEN,
+    )
+    assert config.public_base_url_is_parseable is False
+    with pytest.raises(RuntimeError) as exc:
+        check_public_safety(config)
+    assert str(exc.value) == UNPARSEABLE_PUBLIC_BASE_URL.format(value="agent-rooms.fly.dev")
+
+
+def test_platform_detection_only_ever_tightens():
+    """A recognised platform must never *permit* something the old checks refused.
+
+    Stated as a test because the mechanism is env-var sniffing, which is exactly the kind of
+    thing that grows an accidental escape hatch. For every configuration, adding a platform
+    marker may turn accept into refuse, never refuse into accept.
+    """
+    configurations = [
+        {"public_base_url": "https://rooms.example.com", "operator_token": DEFAULT_OPERATOR_TOKEN},
+        {"public_base_url": "https://rooms.example.com", "mcp_require_auth": False},
+        {"public_base_url": "http://localhost:8000", "operator_token": DEFAULT_OPERATOR_TOKEN},
+        {"public_base_url": "https://rooms.example.com", "operator_token": "a-real-secret-value"},
+    ]
+    for overrides in configurations:
+        base: dict[str, object] = {
+            "bootstrap_operator": True,
+            "mcp_require_auth": True,
+            "public_base_url_declared": True,
+        }
+        base.update(overrides)
+
+        def refused(config: dict[str, object], platform: str | None) -> bool:
+            try:
+                check_public_safety(_settings(**{**config, "hosting_platform": platform}))
+                return False
+            except RuntimeError:
+                return True
+
+        without = refused(base, None)
+        with_platform = refused(base, "fly.io")
+        assert with_platform or not without, (
+            f"platform detection made {overrides} *more* permissive: "
+            f"refused={without} without a platform, refused={with_platform} with one"
+        )
+
+
+def test_local_development_still_boots_with_nothing_configured():
+    """The convenience this whole mechanism must not destroy.
+
+    A fresh clone, no `.env`, `uvicorn` — no platform marker, no declared URL, published
+    default token. That has to keep working, or the guard has bought safety by making the
+    project unusable.
+    """
+    check_public_safety(
+        _settings(
+            public_base_url="http://localhost:8000",
+            public_base_url_declared=False,
+            hosting_platform=None,
+            bootstrap_operator=True,
+            operator_token=DEFAULT_OPERATOR_TOKEN,
+            mcp_require_auth=False,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
 # ChatGPT Action schema
 # ---------------------------------------------------------------------------
 
