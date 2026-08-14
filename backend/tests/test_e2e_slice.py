@@ -260,9 +260,11 @@ async def test_agent_can_create_and_share_a_room_entirely_over_mcp(fresh_db, org
 
     # Both are present, and the creator is an owner.
     state = await mcp_tools.get_room_state(participant_token=created["participant_token"])
-    names = sorted(p["identity"]["display_name"] for p in state["participants"])
+    names = sorted(p["name"] for p in state["participants"])
     assert names == ["Creator Agent", "Second Agent"]
-    creator = next(p for p in state["participants"] if p["id"] == created["participant_id"])
+    creator = next(
+        p for p in state["participants"] if p["participant_id"] == created["participant_id"]
+    )
     assert creator["role"] == "owner"
 
     # And the whole thing is auditable from seq 1 with no gaps.
@@ -322,9 +324,9 @@ async def test_human_turn_only_client_gets_short_leases_and_is_told_why(fresh_db
 
     # Other participants see the honest grade, not an optimistic one.
     state = await mcp_tools.get_room_state(participant_token=joined["participant_token"])
-    me = next(p for p in state["participants"] if p["id"] == joined["participant_id"])
-    assert me["presence"]["liveness"] == "attended"
-    assert me["presence"]["runtime"]["lease_renewable_unattended"] is False
+    me = next(p for p in state["participants"] if p["participant_id"] == joined["participant_id"])
+    assert me["liveness"] == "attended"
+    assert me["may_claim"] is True
 
 
 async def test_observer_mode_cannot_claim_but_can_still_coordinate(fresh_db, org, make_room):
@@ -384,9 +386,7 @@ async def test_one_user_can_bring_several_agents_as_separate_participants(fresh_
 
     # And they are graded independently, which is the whole point of separate seats.
     state = await mcp_tools.get_room_state(participant_token=created["participant_token"])
-    grades = {
-        p["identity"]["display_name"]: p["presence"]["liveness"] for p in state["participants"]
-    }
+    grades = {p["name"]: p["liveness"] for p in state["participants"]}
     assert grades["Claude Code"] == "live_poll"
     assert grades["Codex"] == "live_poll"
     assert grades["ChatGPT"] == "attended"
@@ -531,7 +531,7 @@ async def test_default_join_link_is_reusable_by_several_agents(fresh_db, org, ma
         assert joined["ok"] is True, joined
 
     state = await mcp_tools.get_room_state(participant_token=room.owner_token)
-    assert len([p for p in state["participants"] if p["state"] == "joined"]) == 4
+    assert len(state["participants"]) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -593,15 +593,15 @@ async def test_three_execution_modes_coexist_with_honest_grades(fresh_db, org, m
 
     # The local agent sees both others, each graded honestly.
     state = await mcp_tools.get_room_state(participant_token=local["participant_token"])
-    assert "Refactoring the stream handler" in [w["headline"] for w in state["work"]]
+    assert "Refactoring the stream handler" in [w["headline"] for w in state["current_work"]]
 
-    by_id = {p["id"]: p for p in state["participants"]}
-    assert by_id[sse.participant.id]["presence"]["liveness"] == "live_push"
-    assert by_id[connector["participant_id"]]["presence"]["liveness"] == "attended"
-    assert (
-        by_id[connector["participant_id"]]["presence"]["runtime"]["lease_renewable_unattended"]
-        is False
-    )
+    by_id = {p["participant_id"]: p for p in state["participants"]}
+    assert by_id[sse.participant.id]["liveness"] == "live_push"
+    assert by_id[connector["participant_id"]]["liveness"] == "attended"
+    # The compact view surfaces the decision (`may_claim`) rather than the negotiation
+    # detail behind it; `lease_renewable_unattended` is asserted at the source in
+    # test_mcp_auth and via the shorter lease above.
+    assert by_id[connector["participant_id"]]["may_claim"] is True
 
     # And the SSE participant sees the MCP ones as poll/attended — not as push.
     sse_state = await projections.snapshot(room_id=room.room.id, recipient=sse.participant)

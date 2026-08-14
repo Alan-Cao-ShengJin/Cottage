@@ -54,6 +54,7 @@ from ...domain.commands import (
 from ...domain.disclosure import Audience, Disclosure
 from ...domain.room import Participant, PrivacyClass, RoomVisibility
 from ...domain.work import WorkStatus
+from . import compact
 from .auth import principal_for_tool
 
 log = logging.getLogger(__name__)
@@ -438,11 +439,16 @@ async def join_room(
             transport="long_poll",
         )
         snapshot = await projections.snapshot(room_id=result.room.id, recipient=result.participant)
+        # Deliberately *not* the whole snapshot. Returning it cost ~3,400 tokens of the
+        # caller's context on a modest room, unasked — and a client that wants the board
+        # can spend that by calling get_room_state. Here: the cursor, and enough of a
+        # headline to know whether anything needs attention at all.
         return {
             "ok": True,
             "participant_token": result.participant_token,
             "participant_id": result.participant.id,
             "room_id": result.room.id,
+            "room_name": result.room.name,
             "connection_id": negotiated.connection.id,
             "negotiated_capabilities": [
                 c.value for c in negotiated.connection.negotiated_capabilities
@@ -453,7 +459,7 @@ async def join_room(
             "max_lease_seconds": negotiated.runtime.max_lease_seconds,
             "heartbeat_interval_s": negotiated.runtime.heartbeat_interval_s,
             "cursor": snapshot["snapshot_seq"],
-            "snapshot": snapshot,
+            "room_at_a_glance": _glance(snapshot),
             "execution_mode": execution_mode,
             "display_name": effective_name,
             "display_name_was_overridden": effective_name != display_name,
@@ -461,12 +467,29 @@ async def join_room(
             # other participants' view of it matches its own.
             "what_this_means": _explain(execution_mode, negotiated.runtime),
             "next_step": (
-                "Call declare_current_work with your headline and targets, then "
-                "await_room_events(since_seq=cursor) in a loop."
+                "Call get_room_state to see the board, declare_current_work with your "
+                "headline and targets, then await_room_events(since_seq=cursor) in a loop."
             ),
         }
     except RoomError as exc:
         return _err(exc)
+
+
+def _glance(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Counts, not content: enough to decide whether to spend a read on the full board."""
+    tasks_by_status: dict[str, int] = {}
+    for task in snapshot.get("tasks") or []:
+        tasks_by_status[task["status"]] = tasks_by_status.get(task["status"], 0) + 1
+    return {
+        "participants": sum(
+            1 for p in snapshot.get("participants") or [] if p.get("state") == "joined"
+        ),
+        "active_work": len(snapshot.get("work") or []),
+        "tasks": tasks_by_status,
+        "open_conflicts": sum(
+            1 for c in snapshot.get("conflicts") or [] if c.get("status") == "open"
+        ),
+    }
 
 
 def _explain(execution_mode: str, runtime) -> str:
@@ -563,18 +586,27 @@ async def leave_room(
 
 @mcp.tool()
 async def get_room_state(
-    participant_token: str | None = None, ctx: Context | None = None
+    detail: str = "compact",
+    max_messages: int = compact.DEFAULT_MAX_MESSAGES,
+    participant_token: str | None = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Read the room: who is connected, what each is doing, the task board, conflicts.
 
     Use this to orient. For staying live, prefer `await_room_events`.
+
+    `detail="compact"` (the default) returns the coordination view — who is here and how
+    reachable, current work with its targets, the task board with lease holders and fence
+    numbers, and any open conflicts. `detail="full"` adds room policy, scope lists, and
+    presence internals; it costs several times more of your context, so ask for it only if
+    you actually need those fields.
     """
     try:
         participant = await _participant(ctx, participant_token)
-        return {
-            "ok": True,
-            **await projections.snapshot(room_id=participant.room_id, recipient=participant),
-        }
+        snapshot = await projections.snapshot(room_id=participant.room_id, recipient=participant)
+        if detail == "full":
+            return {"ok": True, **snapshot}
+        return {"ok": True, **compact.room_state(snapshot, max_messages=max_messages)}
     except RoomError as exc:
         return _err(exc)
 
@@ -583,6 +615,8 @@ async def get_room_state(
 async def await_room_events(
     since_seq: int,
     timeout_seconds: int = 25,
+    max_events: int = compact.DEFAULT_MAX_EVENTS,
+    detail: str = "compact",
     participant_token: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
@@ -593,8 +627,12 @@ async def await_room_events(
     `cursor` from the previous call as `since_seq`. `timed_out: true` with no events
     is normal and means "nothing happened" — call again.
 
+    Events are compacted to what a coordinating agent acts on, and capped at
+    `max_events` (newest kept). `detail="full"` returns whole envelopes, which on a busy
+    room costs several thousand tokens of your context per call.
+
     A `resume_gap` result means history you missed was truncated; call
-    `get_room_state` and start from its `snapshot_seq`.
+    `get_room_state` and start from its `cursor`.
     """
     try:
         participant = await _participant(ctx, participant_token)
@@ -618,9 +656,15 @@ async def await_room_events(
         # A returning poll is also a heartbeat: it proves the agent is still cycling.
         await _touch(participant, cursor)
 
-        return {
+        if detail == "full":
+            payload_events: list[dict[str, Any]] = visible
+            dropped = 0
+        else:
+            payload_events, dropped = compact.events(visible, max_events=max_events)
+
+        result: dict[str, Any] = {
             "ok": True,
-            "events": visible,
+            "events": payload_events,
             "cursor": cursor,
             "timed_out": not visible,
             "hint": (
@@ -629,6 +673,15 @@ async def await_room_events(
                 else "Act on these events, then poll again with since_seq=cursor."
             ),
         }
+        if dropped:
+            # Never drop silently: a client that thinks it saw everything would
+            # coordinate on a partial view.
+            result["older_events_omitted"] = dropped
+            result["note"] = (
+                f"{dropped} older event(s) omitted to bound response size. Call "
+                "get_room_state for the current picture rather than replaying history."
+            )
+        return result
     except RoomError as exc:
         return _err(exc)
 
