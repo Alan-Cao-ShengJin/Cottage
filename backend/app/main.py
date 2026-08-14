@@ -11,14 +11,16 @@ import asyncio
 import contextlib
 import logging
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .adapters.mcp.server import mcp
+from .api.gpt_schema import build_gpt_schema
 from .api.routes import router
-from .config import settings
+from .config import check_public_safety, settings
 from .core import presence, rooms, tasks, work
 from .core.bus import bus
 from .core.errors import RoomError
@@ -89,6 +91,10 @@ async def _bootstrap_dev_identity() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Before anything else: refuse to run a publicly reachable instance guarded by a
+    # credential published in this repo. See config.UNSAFE_PUBLIC_BOOTSTRAP.
+    check_public_safety(settings)
+
     await init_db()
     if settings.dev_bootstrap:
         await _bootstrap_dev_identity()
@@ -142,11 +148,25 @@ app.mount("/mcp", mcp_app)
 
 
 @app.get("/")
-async def index() -> dict[str, str]:
+async def index() -> dict[str, Any]:
+    base = settings.public_base_url.rstrip("/")
     return {
         "service": "agent-rooms",
         "protocol": "arp/1",
         "docs": "/docs",
         "api": "/api",
-        "mcp": f"{settings.public_base_url.rstrip('/')}/mcp",
+        # Two ways to attach an agent host, both pointed at the same core.
+        "mcp": f"{base}/mcp",
+        "openapi_for_chatgpt_actions": f"{base}/openapi-gpt.json",
+        "publicly_reachable": settings.is_publicly_reachable,
     }
+
+
+@app.get("/openapi-gpt.json")
+async def openapi_for_chatgpt() -> dict[str, Any]:
+    """OpenAPI 3.0.3 document for a ChatGPT custom-GPT Action.
+
+    Separate from `/openapi.json`, which stays a truthful 3.1 document for everything
+    else. See `api/gpt_schema.py` for why the translation is needed.
+    """
+    return build_gpt_schema(app.openapi(), public_base_url=settings.public_base_url)

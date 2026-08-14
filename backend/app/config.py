@@ -10,8 +10,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+
+#: Hosts that mean "only this machine can reach me". An empty host counts: a
+#: `PUBLIC_BASE_URL` with no host is not a public deployment, it is a misconfiguration.
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1", ""})
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -96,6 +101,60 @@ class Settings:
     dev_bootstrap_token: str = field(
         default_factory=lambda: os.getenv("DEV_BOOTSTRAP_TOKEN", "dev-owner-token")
     )
+
+    @property
+    def is_publicly_reachable(self) -> bool:
+        """Whether this instance is exposed beyond the local machine.
+
+        Derived from `PUBLIC_BASE_URL`, which is what you must set when running behind
+        a tunnel so the MCP URL handed to clients is correct. Setting it to a real
+        hostname is therefore a reliable signal that strangers can reach this process.
+        """
+        # `urlparse().hostname` strips IPv6 brackets and the port, which naive string
+        # splitting on ":" does not — `http://[::1]:8000` would otherwise parse as "[".
+        try:
+            host = (urlparse(self.public_base_url).hostname or "").lower()
+        except ValueError:
+            # A malformed URL is not a reason to assume we are safely local.
+            return True
+        return host not in LOCAL_HOSTS
+
+    @property
+    def dev_bootstrap_token_is_default(self) -> bool:
+        return self.dev_bootstrap_token == DEFAULT_DEV_TOKEN
+
+
+#: The published default. Anyone reading the repo knows it, so it must never guard a
+#: publicly reachable instance.
+DEFAULT_DEV_TOKEN = "dev-owner-token"
+
+#: Guardrail explained in one place so the startup check and its test agree.
+UNSAFE_PUBLIC_BOOTSTRAP = (
+    "Refusing to start: PUBLIC_BASE_URL points at a public hostname while "
+    "DEV_BOOTSTRAP is enabled with the default token.\n"
+    "\n"
+    "That combination hands full control of every room in this instance to anyone who "
+    "finds the URL — the default token is published in .env.example and in the repo.\n"
+    "\n"
+    "Pick one:\n"
+    "  * set DEV_BOOTSTRAP=false and provision a token yourself, or\n"
+    "  * set DEV_BOOTSTRAP_TOKEN to a long random secret, or\n"
+    "  * leave PUBLIC_BASE_URL on localhost if you are only testing locally."
+)
+
+
+def check_public_safety(config: Settings) -> None:
+    """Raise if this instance would be exposed with published credentials.
+
+    Called at startup. A warning would not be enough here: the failure is silent,
+    total, and only discovered after the damage.
+    """
+    if (
+        config.is_publicly_reachable
+        and config.dev_bootstrap
+        and config.dev_bootstrap_token_is_default
+    ):
+        raise RuntimeError(UNSAFE_PUBLIC_BOOTSTRAP)
 
 
 settings = Settings()
