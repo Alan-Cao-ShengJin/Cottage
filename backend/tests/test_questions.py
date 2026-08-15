@@ -159,10 +159,10 @@ async def test_the_answer_returns_the_work_to_open(make_room, join):
     assert reclaimed.claim.fence > task.claim.fence, "a new generation, so no late write lands"
 
 
-async def test_a_worker_cannot_answer_its_own_question(make_room, join):
-    """The one refusal that keeps blocking meaningful.
+async def test_a_runtime_cannot_answer_its_own_question(make_room, join):
+    """The refusal that keeps blocking meaningful.
 
-    A worker able to unblock itself has not asked a question; it has taken a pause
+    A runtime able to unblock itself has not asked a question; it has taken a pause
     it can end whenever it likes.
     """
     room = await make_room()
@@ -171,15 +171,83 @@ async def test_a_worker_cannot_answer_its_own_question(make_room, join):
     question = await questions.ask(
         participant=worker.participant,
         command=AskQuestionCommand(
-            body="Shall I proceed?", task_id=task.id, blocking=True, fence=task.claim.fence
+            body="Shall I proceed?",
+            task_id=task.id,
+            blocking=True,
+            fence=task.claim.fence,
+            connection_id=worker.connection_id,
         ),
     )
 
     with pytest.raises(Forbidden):
         await questions.answer(
             participant=worker.participant,
-            command=AnswerQuestionCommand(question_id=question.id, body="Yes, obviously."),
+            command=AnswerQuestionCommand(
+                question_id=question.id,
+                body="Yes, obviously.",
+                connection_id=worker.connection_id,
+            ),
         )
+
+
+async def test_the_human_at_the_same_seat_may_answer_their_own_worker(make_room, join):
+    """Scoped to the runtime, not the seat — found by running it live (D-055).
+
+    A person's chat surface and their companion worker are one participant. Refusing
+    per seat therefore blocked the one человек most obviously entitled to answer: the
+    human whose worker had just stood down and asked them something.
+
+    It is still recorded as a same-seat answer, because a reader deciding how much
+    independent input a worker received needs to know which kind it was.
+    """
+    from app.core import presence
+    from app.domain.capabilities import Capability, HostClass
+    from app.domain.commands import ConnectCommand
+
+    room = await make_room()
+    seat = await join(room, display_name="Alan's agent")
+    companion = await presence.connect(
+        participant=seat.participant,
+        command=ConnectCommand(
+            capabilities=[
+                Capability.CAN_RECEIVE_EVENTS,
+                Capability.SUPPORTS_POLL,
+                Capability.CAN_EXECUTE_BACKGROUND,
+                Capability.CAN_INITIATE_FOLLOWUP,
+                Capability.SUPPORTS_TOOLS,
+            ],
+            host_class=HostClass.PERSISTENT_LOCAL,
+            attachment_label="worker-main",
+        ),
+        transport="long_poll",
+    )
+    task = await tasks.create(participant=room.owner, command=CreateTaskCommand(title="Work"))
+    claimed = await tasks.claim(
+        participant=seat.participant,
+        command=ClaimTaskCommand(task_id=task.id, connection_id=companion.connection.id),
+    )
+    question = await questions.ask(
+        participant=seat.participant,
+        command=AskQuestionCommand(
+            body="Which environment?",
+            task_id=task.id,
+            blocking=True,
+            fence=claimed.claim.fence,
+            connection_id=companion.connection.id,
+        ),
+    )
+
+    answer = await questions.answer(
+        participant=seat.participant,
+        command=AnswerQuestionCommand(
+            question_id=question.id,
+            body="Staging.",
+            # The human's surface — a different runtime of the same seat.
+            connection_id=seat.connection_id,
+        ),
+    )
+    assert answer.answered_by_participant_id == seat.participant.id
+    assert (await store.load_task(task.id)).status is TaskStatus.OPEN
 
 
 async def test_an_ordinary_participant_may_answer(make_room, join):

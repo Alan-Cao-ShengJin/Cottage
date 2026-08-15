@@ -270,6 +270,79 @@ def test_cancel_kills_the_child_and_its_descendants(tmp_path):
     assert marker.read_text().count("tick") == settled, "a descendant outlived the stop"
 
 
+def test_a_non_ascii_answer_survives_the_pipe():
+    """Found in the first live run with a real model, not in this suite (D-052).
+
+    `text=True` alone decodes with the platform's preferred encoding, which on
+    Windows is a legacy codepage — so an agent that answered with an em dash wrote
+    `â€”` into a room-visible checkpoint. Every test until then produced ASCII, which
+    is exactly the kind of blind spot a deterministic executor creates: it is honest
+    about the loop and says nothing about what real output looks like.
+    """
+    executor = SubprocessExecutor(
+        _python(
+            """
+            import sys
+            sys.stdin.read()
+            sys.stdout.reconfigure(encoding="utf-8")
+            print("a stop is trustworthy \\u2014 durably \\u2014 in \\u65e5\\u672c\\u8a9e too")
+            """
+        )
+    )
+    result = executor.run_step(_context())
+    assert "—" in result.summary, "an em dash is an em dash"
+    assert "日本語" in result.summary
+    assert "â€”" not in result.summary, "and never its cp1252 misreading"
+
+
+def test_an_executor_that_cannot_proceed_asks_instead_of_guessing():
+    """The convention that lets a subprocess executor decline to invent an answer.
+
+    Without a way to say "I need to ask", an agent asked for something it was never
+    told will produce a plausible value — and a confident guess presented as work is
+    exactly the failure blocking questions exist to prevent (D-051). The marker is
+    taught in the prompt and parsed here, in one file, so the two halves cannot drift.
+    """
+    executor = SubprocessExecutor(
+        _python(
+            """
+            import sys
+            sys.stdin.read()
+            print("QUESTION: which environment did this ship to?")
+            """
+        )
+    )
+    result = executor.run_step(_context())
+    assert result.blocking is True
+    assert result.question == "which environment did this ship to?"
+    assert result.done is False
+    assert "rather than guess" in result.summary
+
+
+def test_ordinary_output_is_never_mistaken_for_a_question():
+    """The marker has to be the first word, or a summary that merely mentions a
+    question would park the task it was reporting progress on."""
+    executor = SubprocessExecutor(
+        _python(
+            """
+            import sys
+            sys.stdin.read()
+            print("Drafted the note. One open QUESTION remains for the reviewer.")
+            """
+        )
+    )
+    result = executor.run_step(_context())
+    assert result.blocking is False
+    assert result.question is None
+
+
+def test_the_prompt_tells_the_agent_how_to_ask():
+    """A convention the executor parses but never explains is one no agent follows."""
+    prompt = SubprocessExecutor("noop-agent").build_prompt(_context())
+    assert "QUESTION" in prompt
+    assert "do NOT guess" in prompt or "not guess" in prompt
+
+
 def test_cancel_is_safe_when_nothing_is_running():
     """It is called from the loop's own polling path, which does not synchronise
     with the step it is watching."""

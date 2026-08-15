@@ -204,6 +204,11 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("attachments", "runtime_role", "TEXT NOT NULL DEFAULT 'unspecified'"),
     ("attachments", "executor_kind", "TEXT NOT NULL DEFAULT ''"),
     ("attachments", "executor_model", "TEXT NOT NULL DEFAULT ''"),
+    # D-055. NULL on every question asked before runtimes were recorded, which the
+    # comparison treats as "unidentifiable" and therefore permits — an unknown runtime
+    # is not evidence of self-answering.
+    ("questions", "asked_by_attachment_id", "TEXT"),
+    ("questions", "answered_by_attachment_id", "TEXT"),
 )
 
 

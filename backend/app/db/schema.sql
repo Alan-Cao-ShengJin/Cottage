@@ -564,6 +564,12 @@ CREATE TABLE IF NOT EXISTS questions (
     -- is the only thing the room knows how to halt.
     task_id                   TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     asked_by_participant_id   TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    -- WHICH RUNTIME of that seat asked, so the self-answer refusal can be scoped to
+    -- the runtime rather than the seat (D-055). Scoped to the seat it blocked the
+    -- person who most obviously should answer: a human's chat surface and their
+    -- companion worker are one participant.
+    asked_by_attachment_id    TEXT,
+    answered_by_attachment_id TEXT,
     -- NULL means the room at large. Addressing narrows who is *expected* to reply,
     -- never who may: a question nobody answers is worse than one answered by the
     -- wrong person.

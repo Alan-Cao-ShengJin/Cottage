@@ -45,6 +45,27 @@ log = logging.getLogger(__name__)
 MAX_OPEN_QUESTIONS = 25
 
 
+def _same_runtime(asked_by: str | None, answering: str | None) -> bool:
+    """Whether the answer is coming from the runtime that asked (D-055).
+
+    The refusal is scoped to the **runtime**, not the seat. Scoped to the seat it
+    also blocked the person who most obviously should answer: a human's chat surface
+    and their companion worker are one participant, so "you cannot answer your own
+    question" meant the human could not answer their own worker. Found by running it.
+
+    Where either side is unidentifiable the answer is *false* — permit rather than
+    refuse. An unknown runtime is not evidence of self-answering, and refusing on an
+    absence would make the check fire hardest against clients that declare least,
+    which is the opposite of the incentive this project wants.
+
+    This is a weaker guarantee than it looks, and that is worth stating: a worker
+    determined to unblock itself could attach a second runtime. It gains nothing by
+    doing so — it could simply never have blocked — and the attempt is recorded, with
+    the answering runtime stamped on the event. Attribution, not prevention (D-025).
+    """
+    return bool(asked_by) and bool(answering) and asked_by == answering
+
+
 async def ask(*, participant: Participant, command: AskQuestionCommand) -> Question:
     """Ask something, optionally standing down from the work until it is answered."""
     room = await store.load_room(participant.room_id)
@@ -90,6 +111,7 @@ async def ask(*, participant: Participant, command: AskQuestionCommand) -> Quest
 
     async def body(tx: db.Tx) -> CommandOutcome:
         events: list[EventEnvelope] = []
+        asking = await tasks.caller_executor(participant, command.connection_id, tx=tx)
         if command.blocking:
             events += await _park_task_tx(
                 tx,
@@ -119,15 +141,16 @@ async def ask(*, participant: Participant, command: AskQuestionCommand) -> Quest
         await tx.execute(
             """
             INSERT INTO questions (
-                id, room_id, task_id, asked_by_participant_id, to_participant_id,
-                body, blocking, created_seq, created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?)
+                id, room_id, task_id, asked_by_participant_id, asked_by_attachment_id,
+                to_participant_id, body, blocking, created_seq, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 question_id,
                 room.id,
                 command.task_id,
                 participant.id,
+                asking.ref,
                 command.to_participant_id,
                 command.body,
                 1 if command.blocking else 0,
@@ -272,11 +295,14 @@ async def answer(*, participant: Participant, command: AnswerQuestionCommand) ->
         )
         if row is None:
             raise NotFound("Question does not exist.", question_id=command.question_id)
-        if row["asked_by_participant_id"] == participant.id:
+        answering = await tasks.caller_executor(participant, command.connection_id, tx=tx)
+        same_seat = row["asked_by_participant_id"] == participant.id
+        if same_seat and _same_runtime(row["asked_by_attachment_id"], answering.ref):
             raise Forbidden(
-                "You cannot answer your own question. A worker that could would be "
-                "able to unblock itself, which is the whole thing waiting exists to "
-                "prevent.",
+                "A runtime cannot answer its own question. Standing down and then "
+                "telling yourself to carry on is not waiting for anybody — it is a "
+                "pause you can end whenever you like. Another runtime of this seat "
+                "may answer, and so may anyone else in the room.",
                 question_id=command.question_id,
             )
         if row["answered_at"]:
@@ -299,6 +325,12 @@ async def answer(*, participant: Participant, command: AnswerQuestionCommand) ->
                 "asked_by_participant_id": row["asked_by_participant_id"],
                 "body": command.body,
                 "asked_at_seq": int(row["created_seq"]),
+                # Stated rather than hidden. An answer from the asker's own seat is
+                # legitimate — a human's control surface answering their own worker is
+                # the ordinary case — but a reader deciding how much independent input
+                # a worker actually received needs to know which it was (D-055).
+                "same_seat": same_seat,
+                "answered_by_attachment_id": answering.ref,
             },
             disclosure=decision,
             causation_id=command.command_id,
@@ -324,10 +356,11 @@ async def answer(*, participant: Participant, command: AnswerQuestionCommand) ->
         updated = await tx.execute(
             """
             UPDATE questions
-            SET answered_at = ?, answered_by_participant_id = ?, answer_id = ?
+            SET answered_at = ?, answered_by_participant_id = ?, answer_id = ?,
+                answered_by_attachment_id = ?
             WHERE id = ? AND answered_at IS NULL
             """,
-            (now, participant.id, answer_id, command.question_id),
+            (now, participant.id, answer_id, answering.ref, command.question_id),
         )
         if updated == 0:
             raise InvalidCommand(

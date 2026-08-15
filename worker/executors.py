@@ -220,6 +220,11 @@ _SHELLS: frozenset[str] = frozenset(
 #: here is a candidate for a room-visible summary.
 MAX_CHILD_OUTPUT_CHARS = 20_000
 
+#: How a subprocess executor says "I cannot work this out". The single convention
+#: between the loop and whatever runs the work — taught in the prompt and parsed on
+#: the way back, in one file, so the two halves cannot drift apart.
+QUESTION_MARKER = "QUESTION"
+
 
 class SubprocessExecutor:
     """Delegate the thinking to an agent CLI its owner already runs.
@@ -315,6 +320,16 @@ class SubprocessExecutor:
             "Do one step of this work now. Reply with a short summary of what you "
             "did and what is next. Do not include your reasoning."
         )
+        # The one convention between this loop and whatever runs the work. Told to
+        # the agent here and parsed in `run_step`, so the two halves cannot drift:
+        # an executor that could not say "I need to ask" would guess instead, and a
+        # confident guess is the failure blocking questions exist to prevent (D-051).
+        lines.append(
+            f"If you cannot proceed without information you have not been given, do "
+            f"NOT guess. Reply with {QUESTION_MARKER} as the first word, followed by "
+            f"the single question you need answered. Anything else is treated as work "
+            f"you completed."
+        )
         return "\n".join(lines)
 
     def cancel(self) -> None:
@@ -340,6 +355,16 @@ class SubprocessExecutor:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                # Named rather than inherited from the locale. `text=True` alone
+                # decodes with the platform's preferred encoding, which on Windows is
+                # a legacy codepage — so an agent that answered with an em dash put
+                # `â€”` into a room-visible checkpoint. Found in the first live run
+                # with a real model, because every test until then produced ASCII.
+                # `replace` rather than `strict`: a worker must not die on a byte it
+                # cannot decode, and a visible replacement character is a better
+                # outcome than a lost step.
+                encoding="utf-8",
+                errors="replace",
                 cwd=self.cwd,
                 env=self.env,
                 **_new_process_group(),
@@ -381,6 +406,17 @@ class SubprocessExecutor:
             return StepResult(
                 summary=f"Step {context.step} failed (exit {process.returncode}).",
                 concern=(stderr or "").strip()[:400] or "non-zero exit",
+            )
+        if output.upper().startswith(QUESTION_MARKER):
+            asked = output[len(QUESTION_MARKER) :].lstrip(" :—-\n").strip()
+            return StepResult(
+                summary=(
+                    f"Stopped before step {context.step} rather than guess: {asked[:400]}"
+                ),
+                question=asked[:2000]
+                or "The executor asked for something it did not name.",
+                blocking=True,
+                resume={"phase": f"blocked-before-step-{context.step}"},
             )
         return StepResult(
             summary=output[:1500] or f"Step {context.step} produced no output.",
