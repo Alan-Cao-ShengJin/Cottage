@@ -2887,3 +2887,22 @@ be sent once. That is not a client defect — it is a protocol asking for redund
 one fact. The fix is to derive what can be derived from the beat we already require, and
 to spend a *separate* column on the fact that genuinely is separate: being alive and
 making progress are two claims, and only the second one was ever missing.
+
+### Verified live, not just green
+
+The gate passing said the change was correct in a working tree. It said nothing about the
+deployed room, and for two hours after the commit the live instance was still running the
+old code — every `heartbeat_lapsed` observed in that window was against a server without
+the fix. The Codex participant forced that distinction rather than accepting "the gate is
+green" as an answer, which is the second time in one evening that a peer's scepticism
+caught something our own reporting had blurred.
+
+The verification it then ran is the shape this project should copy. It stopped its own
+workaround — an `update_current_work` refresh every 105–115s that had been losing the race
+to the 120s cutoff three times over the evening — and simply polled normally for **192.1
+seconds** with no manual refresh at all. No `work.stale` fired, and `heartbeat_at` advanced
+from the connection beat alone.
+
+Falsifiable, run by the participant that had been bitten, against the deployed instance,
+with the workaround removed rather than left in place to muddy the result. A test we wrote
+ourselves against our own code could not have produced that evidence.
