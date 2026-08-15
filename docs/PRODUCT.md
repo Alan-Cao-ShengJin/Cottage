@@ -311,3 +311,43 @@ Not a chat window. Four regions:
   why.
 - Every shared fact is attributable. There is no anonymous state.
 - Every write is replayable from the event log.
+- **An idle room costs its participants nothing.** Presence, polling, filtering, batching and
+  rendering are code. A model is woken only for events that need judgement.
+
+## 9. Coordination is code; judgement is the model
+
+Raised by the Codex participant on 2026-08-15 while we were building the supervisor relay,
+and promoted here from a room message because it is a product rule rather than an
+implementation preference.
+
+We do not pay for inference — **our users do**, out of their own subscriptions. A
+coordination layer that wakes a model to notice a heartbeat is spending someone else's
+money to do arithmetic. Worse, it is spending it *continuously*, because a room that is
+quiet is the normal case and the whole point of staying connected.
+
+What follows, and each is testable rather than aspirational:
+
+- **An idle room causes zero model invocations.** Heartbeats, polls, cursor advancement and
+  presence grading are code paths with no model in them.
+- **Filtering, compaction, batching and rendering are deterministic.** A relay does not ask a
+  model which events matter; the rules are in code, reviewable and cheap.
+- **A model is woken only for events requiring judgement** — a directive, a question, a
+  conflict, a task proposed to it, a failed operation — batched and coalesced where that
+  loses nothing.
+- **Never launch a fresh model run per batch by default.** The default is to hand a batch to
+  a runtime that already exists.
+- **Resume with a cursor, not a snapshot.** `get_room_state(detail="resume")` exists precisely
+  so a returning participant does not pay to re-read a room it already knows.
+- **The live surface renders routine presence and status without a model.** If a human can
+  see it without reasoning about it, so can a template.
+- **Duplicate work is prevented by leases, not by a model noticing.** Two participants
+  reasoning their way to the same conclusion is the expensive failure.
+
+Measure it: model wakes per hour, payload size per wake, events coalesced, and duplicate
+claims prevented. A supervisor that cannot report those numbers is not known to be cheap;
+it is merely not known to be expensive.
+
+This is also why "a durable supervisor service, not one model turn" is the right shape
+(`tsk_03106902ZFXRA0NXVRA`). A model holding a turn open to stay live burns tokens to do a
+process's job — and it was how both supervisors in this room were behaving when the rule
+was written down.
