@@ -1510,3 +1510,76 @@ and the answer is an error rather than a coin flip.
 1. Whether `renew` needs an atomic renew-with-takeover, or whether two calls is acceptable at a
    moment when a lease is about to expire.
 2. Whether `release` staying unenforced is agreed.
+
+---
+
+## D-035 — The lease is a claim on reality, not on rows
+
+_2026-08-15. Closes both points D-034 left open. The release position in D-034 is reversed._
+
+### Release does enforce affinity, and D-034's reasoning was wrong
+
+D-034 argued release should be exempt because it "can only give work up, never take it or do it
+twice", with the previous executor discovering the change through the fence. The rebuttal:
+
+> Worker A is actively sending an order / deploying / editing an external system; chat attachment
+> B releases the task without A knowing; another participant claims it and starts the same
+> external work before A reaches its next Cottage mutation and discovers the stale fence. Cottage
+> fencing protects Cottage state, not already-started side effects.
+
+Decisive. The error was reasoning about **database consistency** when the invariant is about the
+**world**. The lease is a claim on reality; the fence is only the receipt. Releasing a healthy
+runtime's lease is exactly as dangerous as seizing it, because both end with two runtimes free to
+perform the same external action.
+
+The rule, adopted in full: the executor releases normally; another attachment of the same
+participant may release only when the executor is non-live, stale or cleared; a human-originated
+`force_release` is permitted at any time with an auditable reason; a healthy autonomous attachment
+that wants to release another's execution must take over first. The escape hatch survives — a dead
+executor's work can always be freed — without the hazard.
+
+**The general lesson, recorded because it will recur:** whenever this design is reasoned about as
+row-level concurrency, the answers come out locally correct and miss the actual hazard. `AVOID
+CONFLICTS` in the core loop means external work, not table state.
+
+### Renew and take-over stay two operations
+
+No atomic renew-with-takeover in v1. They are different transitions and should stay separately
+auditable; combining them creates a privileged fast path needing its own authorization matrix and
+race semantics. The expiry-between-calls risk is contained by permitting `take_over` only while
+the lease is still active. If live evidence shows the race is common, add the convenience later
+with **exactly the same predicates** as sequential take-over-then-renew — and, kept verbatim as
+the design note it is: *do not hide an expired lease by letting atomic takeover resurrect it.*
+
+### ARP HTTP connection binding, tightened
+
+Mutating HTTP calls with more than one live connection must identify the calling connection. The
+server verifies it belongs to the authenticated participant, is open and live enough for the
+operation, and derives executor identity **from its own record** rather than anything the caller
+asserts. Exactly one live connection infers safely; zero rejects. A stale, closed or foreign id is
+a distinct `connection_mismatch`, never a fall back to best-policy.
+
+And the part D-034 failed to specify: **session-bound transports use their bound connection
+internally and must not accept a caller-supplied override.** Otherwise an MCP client could name a
+connection it is not, reintroducing the guess through the front door.
+
+### The same hazard arrives by timeout, and authorization cannot reach it
+
+Following from the reality-not-rows argument: a lease expiring while a worker is mid-deploy
+produces the identical outcome — task returns to the pool, the next participant claims it and
+starts the same external action. No release was called and no rule was broken; the room does it to
+itself, by design, because leases expire and nothing blocks forever.
+
+Expiry does not change — that would be locks, not leases (principle 9). But the mitigation cannot
+be authorization alone, because authorization cannot reach the timeout path. **A claim on a task
+that was previously held and expired returns a warning with it**: previously held by X, expired at
+T, external effects may be in flight. The event log already holds every fact required, so it costs
+a projection. It does not prevent double work; it stops the second runtime starting blind, which
+is the only thing available once expiry is accepted.
+
+### Mechanical, and the kind of thing that undoes the rest
+
+"Another attachment may release only if the executor is non-live" must be a conditional `UPDATE`
+with the staleness predicate in the `WHERE` clause, not a read-then-write. Otherwise B reads
+executor-is-stale, A reconnects, B releases anyway — precisely the race this design exists to
+prevent. The guarantee is the affected-row count, never the check preceding it (ADR-009).
