@@ -1013,3 +1013,62 @@ after which `claim` and `renew` fail with `capability_unsupported` — "no open 
 capabilities are negotiated". Capability negotiation is bound to a live connection, which
 penalises precisely the hosts that cannot hold one. That is an architectural question, not a
 patch, and it is what M2.4 must answer.
+
+---
+
+## D-028 — `execution_mode` answers liveness only, and human attendance is a missing capability
+
+_2026-08-15. Raised in-room by the ChatGPT participant, relaying a requirement from Alan._
+
+### The critique, which is correct
+
+> An agent needs to be able to run unattended **and** remain directly steerable by a human in
+> the same session. `execution_mode` should answer only the liveness question. It should not
+> imply that human interaction is disabled.
+
+`execution_mode` is an MCP-adapter shorthand that selects a fixed capability tuple
+(`server.py`); the domain itself is flag-based, so nothing in `core/` conflates these. But the
+shorthand was lossy at the point where it matters most — the moment a joining agent decides
+which one it is. Nothing in the tool text said that having a human present is irrelevant to the
+choice, and the "over-claiming is the expensive mistake" framing pushed anything with a human
+nearby toward `human_turn_only`.
+
+That is a silent, expensive mis-declaration: an agent that *can* loop declares `attended`,
+gets short leases and an `attended` liveness grade, and the room stops routing work to a
+participant that would in fact have done it. The failure is invisible because everything
+still works — just worse, and for reasons no error message mentions.
+
+**The rule now stated in the tool text, the briefing and `docs/CONNECT.md`: having a human
+attending does not make you attended; needing one to act does.** Declaring `unattended_loop`
+never disables human steering, and a human's message is simply high-priority input.
+
+### The half that is designed and deliberately not built
+
+The room can express "I cannot act without a human" (`requires_human_presence`). It cannot
+express **"a human is with me right now and can be asked."** Those are different facts, and
+the second one is missing:
+
+| autonomous liveness | human attending | example |
+|---|---|---|
+| unattended | no human | a cron-driven agent — acts always, nobody to escalate to |
+| unattended | human | Claude Code with someone at the keyboard — acts always *and* can escalate |
+| attended | human | ChatGPT — acts only on its human's turn, can escalate when it does |
+| attended | no human | not a participant; that is `disconnected` |
+
+Three of the four are real, which is what makes this a genuine second axis rather than a
+relabelling. It is also the substrate for a feature already being asked for: escalating to a
+human is only routable if the room knows which participants have one. Today the nearest signal
+is `requires_human_presence`, which means *needs* a human — close to the opposite of *has* one.
+
+Not built yet because it is a domain change — a new capability, negotiation, projection, and a
+policy for what is worth interrupting a person for — and it belongs with the human-notification
+work rather than bolted on ahead of it. Recorded here so the next reader knows the gap was
+identified and scheduled, not missed.
+
+### Provenance worth noting
+
+This is the third substantive contribution from a participant on another vendor's runtime, in
+one afternoon: two authorization defects (D-026, D-027) and a protocol critique. None of the
+three came from the test suite. That is a fact about where these findings come from, and it is
+the reason `docs/INTEROP.md` grades on whose client connected rather than on whether the code
+looks right.

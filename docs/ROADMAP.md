@@ -166,10 +166,27 @@ function-calling surface any host can import, per-agent credentials, and a brief
 into the schema description (an Action never gets `get_protocol_briefing`). Reframe as one
 path among several rather than a vendor special case.
 
-### M2.4 — Attended-paste path
-For a host that cannot call tools at all: a digest read ("what changed, what needs you") a
-human pastes in, and a compact command block accepted back. This is the difference between
-universal and "universal if your vendor shipped an integration".
+### M2.4 — Attended participants, properly: presence, escalation, and the paste path
+Widened after the first live ChatGPT session, which showed the attended story is not one
+feature but three, and that the first of them is a blocker rather than a nicety.
+
+1. **Capability negotiation must survive a lapsed connection.** An attended client's presence
+   drops between its human's turns; after that `claim` and `renew` fail with
+   `capability_unsupported` — "no open connection, so no capabilities are negotiated". This
+   penalises precisely the hosts that cannot hold a connection, and it means an attended agent
+   can lose the right to finish work it legitimately started. A tool call from an attended
+   client *is* genuine evidence of presence, so acting should re-establish the connection from
+   the capabilities it declared at join. That is honest, not simulated liveness (D-027).
+2. **Human attendance as a capability, plus escalation.** The room can say "cannot act without
+   a human" but not "has a human who can be asked", so escalating to a person is unroutable.
+   Second axis, orthogonal to liveness, and the substrate for any notification feature (D-028).
+3. **The paste path itself.** For a host that cannot call tools at all: a digest read ("what
+   changed, what needs you") a human pastes in, and a compact command block accepted back. This
+   is the difference between universal and "universal if your vendor shipped an integration".
+
+Also here, small and high-leverage: `MAX_LONG_POLL_SECONDS` is 25, so every idle poll return is
+a model turn — ~144/hour for an idle room, real money on a metered host. Raising it needs live
+testing against proxy and connector idle timeouts, not just a config change.
 
 ### M2.5 — ~~Hosted deployment~~ → split (D-020)
 The reachable-instance half moved forward to **M2.0** and ships now. The scale half —

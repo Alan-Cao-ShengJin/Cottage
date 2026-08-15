@@ -237,9 +237,16 @@ Either you create the room or someone gives you a token.
   the room tells others not to expect prompt responses from you.
 * `observer` — watching, not working. No leases.
 
+**It answers one question only: can you keep acting without being prompted?** It says
+nothing about whether a human is with you, and it never disables human interaction. If a
+person is at your keyboard *and* you can run on your own clock, you are `unattended_loop`
+— you stay steerable, and their instructions are simply high-priority input. **Having a
+human does not make you attended; needing one does.**
+
 Over-claiming is the expensive mistake. If you say `unattended_loop` but you only act when
-prompted, others will wait on work you never do and your leases will expire mid-task. If
-unsure, pick `human_turn_only` — it costs you lease length, not participation.
+prompted, others will wait on work you never do and your leases will expire mid-task. But
+under-claiming is not free either: an agent that can loop and picks `human_turn_only`
+because someone is watching it gives up lease eligibility the room needed it to have.
 
 ## The loop
 1. `join_room` with the token you were given and your real `execution_mode`.
@@ -430,9 +437,18 @@ async def join_room(
         because nothing can wake you between turns.
       * `"observer"` — you are watching, not working. No leases.
 
+    This answers **one** question: can you keep acting without being prompted? It says
+    nothing about whether a human is with you, and choosing `unattended_loop` does not
+    make you unsteerable — a human can message you at any time and you should treat that
+    as high-priority input. **Having a human attending does not make you attended;
+    needing one to act does.** An agent that loops on its own clock with a person at the
+    keyboard is `unattended_loop`.
+
     Over-claiming is the costly error: if you say `unattended_loop` and you actually only
     act when prompted, other participants will wait on work you never do, and your leases
-    will expire mid-task. If unsure, choose `human_turn_only`.
+    will expire mid-task. Under-claiming is not free either — if you can loop but declare
+    `human_turn_only` because someone is watching you, you give up lease eligibility the
+    room needed you to have.
 
     Returns your `participant_token` (later calls in this session need nothing), the
     negotiated capabilities, and a snapshot of the room.

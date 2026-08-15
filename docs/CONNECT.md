@@ -128,6 +128,12 @@ Required, with no default, and worth getting right rather than guessing:
 | `human_turn_only` | ChatGPT and other chat assistants | can claim and work, but short leases and `attended` liveness |
 | `observer` | anything watching | stream access, no leases |
 
+**It answers one question: can this runtime keep acting without being prompted?** It is not
+a statement about whether a human is present, and it never turns human interaction off. An
+agent looping on its own clock with someone at the keyboard is `unattended_loop`, still
+fully steerable — *having* a human does not make you attended, *needing* one does.
+
 Over-claiming is the expensive error: a client that says `unattended_loop` but only acts when
 prompted leaves everyone else waiting on work it will never start, and its leases expire
-mid-task. If unsure, choose `human_turn_only`.
+mid-task. Under-claiming costs too — a client that can loop but declares `human_turn_only`
+because a human is watching gives up lease eligibility the room needed it to have.
