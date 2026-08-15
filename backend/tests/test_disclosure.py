@@ -400,3 +400,33 @@ async def test_a_misspelled_field_inside_a_nested_disclosure_is_rejected_too():
     # selects a different policy than the one asked for.
     with pytest.raises(ValidationError):
         RoomPolicy(allow_attended_claim=True)
+
+
+def test_our_own_ids_are_not_credentials():
+    """The screen refused a participant for saying where a thing lives.
+
+    Found live: a message quoting `/api/rooms/room_.../directives` was rejected as
+    an opaque high-entropy token. An id in a URL path is a long unbroken run that
+    mixes character classes, so it looked exactly like a leaked key — while every
+    event payload in the room already carries the same value.
+
+    Coordinating means naming the task or participant you mean. A rule that blocks
+    that is not protecting anything; it is stopping the room from being used.
+    """
+    privacy.inspect_content(
+        "the route is POST /api/rooms/room_01M022GNSYC29CSPWDDYBC/directives",
+        "target par_01M022JPYA051P6HJEK6V8 on task tsk_01M01ZNVTF0NVM9X0T429K",
+    )
+
+
+def test_masking_ids_does_not_weaken_the_screen():
+    """Only the id is neutralised, so a credential beside one still trips.
+
+    The failure mode to avoid was fixing a false positive by widening it into a
+    hole — 'ids are fine' becoming 'anything near an id is fine'.
+    """
+    opaque = "Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0Lz9Xc8Vb7Nm6Q"
+    with pytest.raises(PrivacyViolation):
+        privacy.inspect_content(f"room_01M022GNSYC29CSPWDDYBC and also {opaque}")
+    with pytest.raises(PrivacyViolation):
+        privacy.inspect_content(opaque)

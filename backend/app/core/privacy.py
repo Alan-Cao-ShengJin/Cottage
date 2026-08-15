@@ -87,6 +87,25 @@ ENTROPY_MIN_LENGTH = 40
 ENTROPY_THRESHOLD_BITS_PER_CHAR = 4.0
 
 
+#: This system's own identifiers: a known prefix and 22 Crockford base32 characters.
+#:
+#: They are **not secrets**. Every event payload carries them, every projection prints
+#: them, and coordinating at all means naming the task or participant you mean. But an
+#: id inside a URL path is a long unbroken high-entropy run, so the credential screen
+#: refused a message for quoting `/api/rooms/room_.../directives` — a participant
+#: blocked from saying where a thing lives, by a rule meant to stop credential leaks.
+#:
+#: Neutralising them before the entropy scan keeps the screen honest rather than
+#: weakening it: a real credential next to an id still trips, because only the id
+#: itself is masked. This is not the security control regardless — the boundary is
+#: authorization and policy, and inspection is a backstop against an obvious mistake
+#: (`docs/SECURITY.md` §2).
+_OWN_ID = re.compile(
+    r"\b(?:org|usr|aid|room|inv|par|con|att|evt|msg|wrk|tsk|prp|clm|art|cft|dir|cmd)"
+    r"_[0-9A-HJKMNP-TV-Z]{22}\b"
+)
+
+
 def _shannon_bits_per_char(value: str) -> float:
     if not value:
         return 0.0
@@ -105,6 +124,7 @@ def _high_entropy_token(text: str) -> str | None:
     identifiers do not, so this catches an opaque credential without blocking a
     participant from pasting a stack trace.
     """
+    text = _OWN_ID.sub("<id>", text)
     for token in re.findall(rf"[A-Za-z0-9+/=_\-]{{{ENTROPY_MIN_LENGTH},}}", text):
         classes = sum(bool(re.search(pattern, token)) for pattern in (r"[a-z]", r"[A-Z]", r"[0-9]"))
         if classes >= 3 and _shannon_bits_per_char(token) >= ENTROPY_THRESHOLD_BITS_PER_CHAR:
