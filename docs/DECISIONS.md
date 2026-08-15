@@ -1729,3 +1729,77 @@ like one thing at different timescales. Named by *what they attest* they stop be
 the rule, recorded for the next time: when two identifiers look like the same thing at different
 timescales, ask what fact each certifies. If the answer is the same fact, one is redundant — and if
 it is not, they cannot be merged however similar their lifetimes look.
+
+---
+
+## D-038 — Only attest what the protocol can verify (amends D-037)
+
+_2026-08-15. D-037's certificate table was wrong one message after D-037 proposed the rule that
+would have caught it._
+
+D-037 said `runtime_instance` attests *"retains what the last process knew"*. It cannot. No wire
+protocol can verify knowledge: a process can stay alive while its model context is reset, a task is
+reinitialised, a subprocess dies, or volatile state is discarded.
+
+**The corrected table:**
+
+| identity | attests |
+|---|---|
+| `connection_id` | this transport, right now |
+| `attachment_id` | addressable as the same runtime across transport loss |
+| `runtime_instance` | **the same declared execution epoch — no process boundary has been declared** |
+
+Stronger evidence of continuity than `attachment_id`; not proof of memory. The recovery exemption
+is therefore a **conservative protocol heuristic**, not a guarantee, and must never be sold as one.
+
+### The rule gains its missing clause
+
+D-037's method note said to name identity layers by *what they attest* rather than by how long they
+live — and then, in the same message, attested something uncheckable. So:
+
+> **Name a layer by what it attests, and attest only what the protocol can verify.**
+
+An attestation nobody can check is a wish with a column name. The second clause is the one that
+would have caught this.
+
+### Persistence, stated correctly
+
+D-037's "never persist the epoch" was sloppy and, read literally, would make the comparison
+impossible. **The client must never carry it across process lifetimes; the server must record it on
+lease episodes and in event history, or recovery cannot be evaluated at all.** Client-side durable
+continuity is the prohibition; server-side audit is the mechanism.
+
+Generation semantics: minted fresh in volatile memory at process start; stable across that
+process's transport reconnects; scoped under attachment/participant; never loaded from disk,
+durable config, container image, environment template or restored checkpoint; regenerated after
+restart, crash recovery or a new replica. Multiple simultaneous connections from one process **may**
+share it; separate processes or replicas under one attachment **must not**.
+
+### Self-escalation, and the limit that keeps it honest
+
+A runtime that knows it lost context inside an epoch may escalate itself into `recovery_required`.
+One-way, as with `side_effect_mode` (D-036) — self-escalation only, never self-downgrade.
+
+But it cannot repair the gap, and the reason is structural: **a worker that lost its context may by
+definition not know it lost it.** An agent whose context was reset does not remember being reset.
+Voluntary escalation therefore only reaches runtimes that can observe their own discontinuity from
+outside — a supervisor restarting a subtask, a host with an explicit compaction hook.
+
+Evidence rather than hypothesis: the Claude Code participant's context was summarised **twice**
+during this session. Same process, same connection, same epoch by any declaration it could have
+made, and a genuine loss of what it had known. Holding a lease across either boundary would have
+made it exactly the case above — no process restart to declare, and no longer in possession of what
+the earlier stretch knew about the outside world.
+
+So self-escalation is a best-effort supplement, never a repair. And hosts that *do* expose a
+context-reset signal should be instructed to escalate or regenerate at that boundary — in the tool
+description, since that is where implementers read. It converts an invisible failure into a
+declarable one for the hosts capable of seeing it.
+
+### Two replicas sharing an epoch
+
+A host contract violation, undetectable by us, and **never a security boundary** — now stated in
+`docs/INTEROP.md` §5 beside the exactly-once limit, because it is the same kind of statement: a
+thing we cannot enforce, said out loud so nobody builds on it. The server may surface the anomaly
+(one epoch on connections whose lifetimes overlap and were never negotiated together is weak
+evidence of two processes) but logs rather than enforces.

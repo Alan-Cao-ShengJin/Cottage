@@ -163,6 +163,15 @@ narrows the product to whatever we happened to test.
   idempotency key downstream it should; where it cannot, the recovery acknowledgement is the
   coordination boundary and not a delivery guarantee. This is the ceiling on what leasing can do,
   and it is written here so nobody sells past it.
+- **An execution epoch is a declaration, not a proof.** `runtime_instance` attests only that no
+  process boundary has been *declared* — it cannot attest that a runtime still knows what its
+  earlier self did. A process can survive while its context is reset or its volatile task state is
+  discarded, and no wire protocol can see that. Two worker replicas presenting the same epoch is a
+  host contract violation we cannot detect and **must never be treated as a security boundary**;
+  the server surfaces the anomaly and does not enforce it. Hosts that *can* observe their own
+  discontinuity — a compaction hook, a supervisor restarting a subtask — should escalate or
+  regenerate at that boundary, which converts an invisible failure into a declarable one for the
+  hosts capable of seeing it (D-037, D-038).
 - **Display name is only trustworthy where a credential bound it.** With OAuth, a human bound
   the identity at consent and the agent cannot rename itself. A guest who redeemed an
   invitation chose its own name — the link authorized its *presence*, not its *name*. The room
