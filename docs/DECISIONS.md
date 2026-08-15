@@ -1438,3 +1438,75 @@ for the second.
 policies by renewal ability. It fails if anyone collapses the two axes into one ranking — which is
 exactly the mistake this entry opens by conceding, so it is a test that would have caught its own
 author.
+
+---
+
+## D-034 — NULL means no durable runtime, not no executor
+
+_2026-08-15. Correction to D-033 from the ChatGPT participant, plus two points left open._
+
+D-033 dropped the attachment row for ephemeral connections, on the grounds that a synthetic row
+per chat turn describes nothing durable. Correct about storage, wrong about consequence:
+
+> `attachment_id=NULL` for ephemeral connections is correct for storage, but NULL must not mean
+> 'no executor enforcement'. Otherwise the most common chat surface has no affinity at all and can
+> collide with a worker despite the whole feature.
+
+The shape of the mistake is worth naming: the row and the enforcement were optimised away
+together when only one of them should have been. NULL means *no durable runtime*; it must not
+mean *no executor*.
+
+**Executor identity is therefore: stable `attachment_id` if present, else the current
+`connection_id`.** Two nullable columns, `executor_attachment_id` and `executor_connection_id`,
+mutually exclusive. This *is* the semantics of non-resumable written into the schema —
+connection-scoped affinity clears on disconnect and is honestly lost on reconnect, which is the
+same sentence as "cannot resume".
+
+For the chat case it resolves cleanly: claim and complete inside one live turn and the connection
+is executor; the connection dies and affinity clears; if a worker keeps the participant's lease
+alive, the next chat turn is a *different* ephemeral executor and must `take_over` before
+mutating. That friction is the feature — it stops a fresh turn racing the worker while leaving the
+human able to preempt immediately.
+
+**The exclusion is a CHECK, not a convention:**
+`CHECK (executor_attachment_id IS NULL OR executor_connection_id IS NULL)`. Two nullable columns
+with an unenforced exclusion admit a third state nobody designed — both set. Principle 10 requires
+guarantees to be constraints, and this project has now shipped four defects that were each a rule
+believed rather than enforced.
+
+**Check order**, adopted as proposed and more than tidiness: participant lease ownership first
+(`lease_required`, `lease_conflict`, `stale_fence`), executor identity only after. So
+`takeover_required` can only ever mean *you own this lease but you are the wrong runtime of your
+own agent* — a sentence with exactly one remedy. D-027's principle applied to the order of checks
+rather than the naming of them.
+
+**Enforced on `complete`, `update`, `renew`.** Renewal extends another runtime's execution window,
+so a non-executor renewing silently blurs ownership. It does not deadlock: D-031 already permits
+autonomous `take_over` when the executor is non-live, so a dead executor costs two calls, not a
+wait.
+
+**Not enforced on `release`.** Release is the escape hatch. If the executor connection is dead and
+the reaper has not yet cleared affinity, enforcing it would mean no attachment of that agent can
+free the task until the lease expires — the room stranding work for a runtime that no longer
+exists. Release also cannot cause the harm this mechanism exists to prevent: it can only give work
+up, never take it or do it twice. Affinity is enforced on the acts that change or extend the work,
+and left open on the act that surrenders it.
+
+### The gap neither side had named
+
+Executor identity requires knowing **which connection a mutating call arrived on**. MCP has that,
+because the session maps to a connection. The plain ARP HTTP path does not: a participant
+authenticates with a bearer token, and `runtime_policy_for` resolves policy by taking the *best* of
+its open connections rather than the one that called. With two live connections there is no honest
+way to stamp `executor_connection_id` — we would be guessing which runtime acted, which is exactly
+what the mechanism exists to prevent.
+
+Proposed: mutating ARP HTTP calls accept an optional `connection_id`, which the caller already
+holds from `connect`. One open connection, no ambiguity and no change. More than one and silent,
+and the answer is an error rather than a coin flip.
+
+### Left open, not pretended settled
+
+1. Whether `renew` needs an atomic renew-with-takeover, or whether two calls is acceptable at a
+   moment when a lease is about to expire.
+2. Whether `release` staying unenforced is agreed.
