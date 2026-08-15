@@ -51,7 +51,7 @@ from ..domain.room import (
 from ..util import from_iso, is_past, utcnow, utcnow_iso
 from . import authz, eventlog, store
 from .dispatch import CommandOutcome, execute_command, publish_committed
-from .errors import CapabilityUnsupported, RateLimited
+from .errors import AmbiguousExecutor, CapabilityUnsupported, InvalidCommand, RateLimited
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +134,90 @@ def negotiate(
     return profile, runtime
 
 
+async def _resolve_attachment_tx(
+    tx: db.Tx,
+    *,
+    room: Room,
+    participant: Participant,
+    command: ConnectCommand,
+) -> tuple[str | None, EventEnvelope | None]:
+    """Find or create the durable runtime behind this connection.
+
+    No label means ephemeral, which is the honest default and gets no row — the
+    connection itself becomes the executor identity instead (D-034). A label lands
+    on the same row every time via `UNIQUE (participant_id, label)`, which is the
+    entire mechanism: reattachment is a lookup, not a heuristic.
+
+    A returning attachment may re-declare `is_resumable` and `host_class`, and we
+    take the newest declaration. A runtime that has been redeployed with different
+    abilities is telling the truth about itself now; refusing the update would pin
+    it to a claim it no longer makes.
+    """
+    if command.attachment_label is None:
+        return None, None
+
+    label = command.attachment_label.strip()
+    if not label:
+        return None, None
+
+    now = utcnow_iso()
+    existing = await tx.fetch_one(
+        "SELECT id FROM attachments WHERE participant_id = ? AND label = ?",
+        (participant.id, label),
+    )
+    if existing is not None:
+        await tx.execute(
+            "UPDATE attachments SET last_seen_at = ?, host_class = ?, is_resumable = ? "
+            "WHERE id = ?",
+            (
+                now,
+                command.host_class.value,
+                1 if command.attachment_resumable else 0,
+                existing["id"],
+            ),
+        )
+        return str(existing["id"]), None
+
+    attachment_id = ids.new_id(ids.ATTACHMENT)
+    await tx.execute(
+        """
+        INSERT INTO attachments (
+            id, room_id, participant_id, label, host_class, is_resumable,
+            created_at, last_seen_at
+        ) VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (
+            attachment_id,
+            room.id,
+            participant.id,
+            label,
+            command.host_class.value,
+            1 if command.attachment_resumable else 0,
+            now,
+            now,
+        ),
+    )
+    event = await eventlog.append(
+        tx,
+        room_id=room.id,
+        type_=EventType.ATTACHMENT_REGISTERED,
+        actor=EventActor(
+            participant_id=participant.id,
+            display_name=participant.identity.display_name,
+            kind=participant.identity.kind,
+            org_id=participant.org_id,
+        ),
+        payload={
+            "attachment_id": attachment_id,
+            "participant_id": participant.id,
+            "label": label,
+            "host_class": command.host_class.value,
+            "is_resumable": command.attachment_resumable,
+        },
+    )
+    return attachment_id, event
+
+
 async def connect(
     *, participant: Participant, command: ConnectCommand, transport: str
 ) -> NegotiatedConnection:
@@ -166,17 +250,22 @@ async def connect(
 
     async def body(tx: db.Tx) -> CommandOutcome:
         before = await _grade_participant(tx, participant.id, room)
+        attachment_id, attachment_event = await _resolve_attachment_tx(
+            tx, room=room, participant=participant, command=command
+        )
         await tx.execute(
             """
             INSERT INTO connections (
-                id, room_id, participant_id, host_class, profile, delivery_mode,
-                heartbeat_interval_s, opened_at, last_heartbeat_at, last_delivered_seq
-            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                id, room_id, participant_id, attachment_id, host_class, profile,
+                delivery_mode, heartbeat_interval_s, opened_at, last_heartbeat_at,
+                last_delivered_seq
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 connection_id,
                 room.id,
                 participant.id,
+                attachment_id,
                 command.host_class.value,
                 db.dumps(profile.model_dump()),
                 runtime.delivery_mode.value,
@@ -188,13 +277,18 @@ async def connect(
         )
         after = await _grade_participant(tx, participant.id, room)
         events: list[EventEnvelope] = []
+        if attachment_event is not None:
+            events.append(attachment_event)
         if after != before:
             events.append(
                 await _append_presence_changed(
                     tx, room=room, participant=participant, liveness=after, runtime=runtime
                 )
             )
-        return CommandOutcome(result={"connection_id": connection_id}, events=events)
+        return CommandOutcome(
+            result={"connection_id": connection_id, "attachment_id": attachment_id},
+            events=events,
+        )
 
     await execute_command(
         command_id=command.command_id,
@@ -439,19 +533,165 @@ def _transport_for(mode: DeliveryMode) -> str:
     return "sse"
 
 
-async def runtime_policy_for(participant: Participant, room: Room) -> RuntimePolicy:
+@dataclass(frozen=True)
+class Executor:
+    """Which runtime of a seat is doing the work, and the connections that are it.
+
+    `attachment_id` when the client declared a resumable durable runtime, otherwise
+    the single connection. Never both, and `connections` is what either of them
+    resolves to right now — which is how liveness is answered later without storing
+    a flag that would be wrong the moment a process died quietly.
+    """
+
+    attachment_id: str | None
+    connection_id: str | None
+    connections: tuple[Connection, ...] = ()
+
+    @property
+    def ref(self) -> str | None:
+        return self.attachment_id or self.connection_id
+
+    @property
+    def is_live(self) -> bool:
+        """Live means some connection of this runtime is still heard from.
+
+        Graded rather than merely open: a connection nobody has heard from in three
+        intervals is not evidence that anything is executing.
+        """
+        return any(grade_connection(c) not in _NOT_LIVE for c in self.connections)
+
+
+_NOT_LIVE: frozenset[Liveness] = frozenset({Liveness.DISCONNECTED, Liveness.STALE})
+
+
+async def _fetch_all(tx: db.Tx | None, sql: str, params: tuple) -> list[Any]:
+    """Read inside the caller's transaction when there is one.
+
+    An affinity decision made from a read outside the transaction that acts on it
+    is a decision about a slightly older world, which is the shape of every
+    check-then-act race.
+    """
+    return await (tx.fetch_all(sql, params) if tx is not None else db.fetch_all(sql, params))
+
+
+async def open_connections(participant_id: str, *, tx: db.Tx | None = None) -> list[Connection]:
+    rows = await _fetch_all(
+        tx,
+        "SELECT * FROM connections WHERE participant_id = ? AND closed_at IS NULL",
+        (participant_id,),
+    )
+    return [store.to_connection(r) for r in rows]
+
+
+async def resolve_executor(
+    *, participant: Participant, connection_id: str | None = None, tx: db.Tx | None = None
+) -> Executor:
+    """Decide which runtime of this seat is about to execute.
+
+    Order, from D-034: a named connection wins; otherwise a single open connection
+    is unambiguous; otherwise all open connections belonging to one attachment are
+    unambiguous because they *are* one runtime. Anything else is genuinely unknown
+    and is refused rather than guessed.
+    """
+    conns = await open_connections(participant.id, tx=tx)
+    if not conns:
+        raise CapabilityUnsupported(
+            "You have no open connection to this room, so nothing can be recorded "
+            "as executing. Connect first.",
+            participant_id=participant.id,
+        )
+
+    if connection_id is not None:
+        named = next((c for c in conns if c.id == connection_id), None)
+        if named is None:
+            raise InvalidCommand(
+                "That connection is not open for this participant.",
+                connection_id=connection_id,
+            )
+        chosen = [named]
+    else:
+        attachments = {c.attachment_id for c in conns}
+        # Unambiguous two ways: there is only one connection, or every connection
+        # belongs to one durable runtime and therefore *is* one executor.
+        if len(conns) == 1 or (len(attachments) == 1 and None not in attachments):
+            chosen = conns
+        else:
+            raise AmbiguousExecutor(
+                "This participant has several open connections from different "
+                "runtimes, so which one is executing cannot be inferred. Send "
+                "connection_id, or reconnect with an attachment_label so your "
+                "connections are recognised as one runtime.",
+                connection_ids=sorted(c.id for c in conns),
+                participant_id=participant.id,
+            )
+
+    attachment_id = chosen[0].attachment_id
+    if attachment_id is not None:
+        # Every open connection of that attachment is the same runtime, so affinity
+        # survives any one of them dying — and returns to nothing when they all do,
+        # because `is_live` asks about connections rather than about a stored flag.
+        #
+        # `is_resumable` deliberately does *not* switch this. Making it select
+        # connection-scoping instead would reintroduce the guess this function
+        # exists to refuse: with several connections of one non-resumable runtime,
+        # there is no principled way to pick which connection is "the" executor.
+        # What the declaration is actually for is recovery (D-036/D-038), where
+        # "the same attachment came back" is only evidence if the client promised
+        # the label would mean that.
+        siblings = tuple(c for c in conns if c.attachment_id == attachment_id)
+        return Executor(attachment_id=attachment_id, connection_id=None, connections=siblings)
+
+    return Executor(attachment_id=None, connection_id=chosen[0].id, connections=(chosen[0],))
+
+
+async def executor_of(task_row: Any, *, tx: db.Tx | None = None) -> Executor:
+    """Rebuild the executor recorded on a lease, with its connections as they are now.
+
+    Liveness is never stored on the lease. A worker that dies without saying so
+    would leave a stored flag reading `live` forever, and the whole point of asking
+    at enforcement time is that nobody has to remember to clear it.
+    """
+    attachment_id = task_row["executor_attachment_id"]
+    connection_id = task_row["executor_connection_id"]
+    if attachment_id is None and connection_id is None:
+        return Executor(attachment_id=None, connection_id=None, connections=())
+    if attachment_id is not None:
+        rows = await _fetch_all(
+            tx,
+            "SELECT * FROM connections WHERE attachment_id = ? AND closed_at IS NULL",
+            (attachment_id,),
+        )
+    else:
+        rows = await _fetch_all(
+            tx,
+            "SELECT * FROM connections WHERE id = ? AND closed_at IS NULL",
+            (connection_id,),
+        )
+    return Executor(
+        attachment_id=attachment_id,
+        connection_id=connection_id,
+        connections=tuple(store.to_connection(r) for r in rows),
+    )
+
+
+async def runtime_policy_for(
+    participant: Participant, room: Room, *, executor: Executor | None = None
+) -> RuntimePolicy:
     """The policy in force for a participant right now.
 
     Derived from its *live* connections, so a participant that reattached with
     different capabilities is judged on what it can do now, not what it once
     claimed. With no live connection there is nothing to derive from, and claiming
     is refused — an unreachable participant cannot be handed exclusive work.
+
+    When an executor is given, the derivation narrows to that runtime's own
+    connections. Without that narrowing a seat with a background worker attached
+    would lend the worker's unattended standing to its chat surface, which is the
+    honest-capabilities rule broken by an accident of sharing a seat.
     """
-    rows = await db.fetch_all(
-        "SELECT * FROM connections WHERE participant_id = ? AND closed_at IS NULL",
-        (participant.id,),
-    )
-    conns = [store.to_connection(r) for r in rows]
+    conns = list(executor.connections) if executor is not None else []
+    if not conns:
+        conns = await open_connections(participant.id)
     if not conns:
         raise CapabilityUnsupported(
             "You have no open connection to this room, so no capabilities are "

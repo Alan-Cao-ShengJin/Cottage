@@ -120,6 +120,19 @@ mcp = FastMCP(
 _SESSION_TOKEN_LIMIT = 512
 _session_tokens: OrderedDict[str, str] = OrderedDict()
 
+#: One durable runtime identity for everything arriving over MCP as this participant.
+#:
+#: Without it, a connector that calls `join_room` more than once accumulates open
+#: connections, and the next claim is refused as `executor_ambiguous` — correctly,
+#: since two unlabelled connections really are indistinguishable runtimes. Labelling
+#: them says the true thing instead: they are one connector, reconnecting.
+#:
+#: `resumable=False` because we cannot promise it. The MCP session behind these
+#: connections may be a fresh process with none of the previous one's knowledge, and
+#: this flag is read later as evidence for recovery claims (D-036, D-038). Claiming
+#: resumability we have not verified is precisely the failure principle 5 forbids.
+MCP_ATTACHMENT_LABEL = "mcp"
+
 
 def _remember_session(ctx: Context | None, participant_token: str) -> None:
     key = _session_key(ctx)
@@ -326,7 +339,11 @@ async def create_room(
         declared = _default_agent_capabilities()
         negotiated = await presence.connect(
             participant=created.participant,
-            command=ConnectCommand(capabilities=declared),
+            command=ConnectCommand(
+                capabilities=declared,
+                attachment_label=MCP_ATTACHMENT_LABEL,
+                attachment_resumable=False,
+            ),
             transport="long_poll",
         )
         return {
@@ -486,7 +503,12 @@ async def join_room(
 
         negotiated = await presence.connect(
             participant=result.participant,
-            command=ConnectCommand(capabilities=declared, since_seq=since_seq),
+            command=ConnectCommand(
+                capabilities=declared,
+                since_seq=since_seq,
+                attachment_label=MCP_ATTACHMENT_LABEL,
+                attachment_resumable=False,
+            ),
             transport="long_poll",
         )
         snapshot = await projections.snapshot(room_id=result.room.id, recipient=result.participant)

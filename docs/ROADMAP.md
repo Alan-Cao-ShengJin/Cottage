@@ -170,7 +170,12 @@ path among several rather than a vendor special case.
 Widened after the first live ChatGPT session, which showed the attended story is not one
 feature but three, and that the first of them is a blocker rather than a nicety.
 
-1. **Expose runtime attachment** (D-029). One logical agent, several concurrent attachments: a
+1. **Expose runtime attachment** (D-029). ✅ **Done 2026-08-15 (D-044).** `attachments`,
+   `connections.attachment_id` and executor affinity on tasks are live: a client declares
+   `attachment_label` on connect, executor identity is the attachment (else the connection),
+   affinity is derived from executor liveness rather than cleared on a branch, and
+   `take_over_execution` / `release(force=True)` are the visible escape hatches. 27 state-axis
+   tests. Original description follows. One logical agent, several concurrent attachments: a
    persistent worker that loops and holds leases, plus a chat session that steers. The schema
    already supports this — `connections` is many-per-participant with a per-attachment
    capability profile, and policy already derives from the best live attachment with a ranking

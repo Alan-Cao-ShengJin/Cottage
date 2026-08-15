@@ -76,6 +76,7 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 | `participant.left` | participant_id, reason (`graceful` \| `timeout` \| `removed`), note |
 | `participant.scopes_changed` | participant_id, scopes |
 | `presence.changed` | participant_id, liveness, connection_count, delivery_modes, negotiated_capabilities, runtime |
+| `presence.attachment_registered` | attachment_id, participant_id, label, host_class, is_resumable |
 | `message.posted` | message_id, body, to_participant_id, about_ref |
 | `work.declared` | work_id, participant_id, headline, status, targets, task_id, expected_done_by |
 | `work.updated` | work_id, headline, status, targets, note |
@@ -87,10 +88,11 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 | `task.completed` | task_id, participant_id, result, fence |
 | `task.proposed` | proposal_id, task_id, to_participant_id, note |
 | `task.proposal_resolved` | proposal_id, resolution, delegated_to_participant_id |
-| `task.claimed` | task_id, participant_id, lease_id, fence, expires_at, heartbeat_interval_s |
+| `task.claimed` | task_id, participant_id, lease_id, fence, expires_at, heartbeat_interval_s, lease_seconds, executor_attachment_id, executor_connection_id |
 | `task.claim_renewed` | task_id, participant_id, fence, expires_at |
-| `task.claim_released` | task_id, participant_id, fence, reason |
-| `task.claim_expired` | task_id, participant_id, fence, expired_at, reason — actor is the room, not a participant |
+| `task.claim_released` | task_id, participant_id, fence, note, forced, reason |
+| `task.executor_changed` | task_id, participant_id, fence, previous_executor_ref, previous_executor_live, executor_attachment_id, executor_connection_id, reason |
+| `task.claim_expired` | task_id, participant_id, fence, expired_at, executor_attachment_id, executor_connection_id, reason — actor is the room, not a participant |
 | `task.blocked` | task_id, blocking_task_ids, note |
 | `task.unblocked` | task_id, note |
 | `dependency.added` | from_task_id, to_task_id, kind |

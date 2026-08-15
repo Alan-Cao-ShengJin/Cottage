@@ -2081,3 +2081,76 @@ traverses nothing is worse than no meta-test, since it looks like coverage.
 **The pattern worth keeping:** three times now a fix has been applied at the layer where the defect
 was noticed rather than wherever the defect could exist (D-042, and twice before it). The remedy is
 not more care — it is converting the fix into an invariant a test enforces over the whole graph.
+
+---
+
+## D-044 — Executor affinity, built: the seat holds the lease, one runtime does the work
+
+_2026-08-15. Slice 2 of M2.4, implementing D-032 → D-035. Two corrections to those entries,
+both found by building rather than by reasoning further._
+
+`attachments` (durable runtime identity, `UNIQUE (participant_id, label)`), `connections.attachment_id`,
+and `tasks.executor_attachment_id` / `executor_connection_id` are now live rather than deployed-and-unused.
+A client declares `attachment_label` on connect; without one it is ephemeral and its connection is the
+executor. `presence.resolve_executor` decides, `presence.executor_of` rebuilds, and every holder-gated
+mutation asks whether the recorded executor is still live.
+
+### Correction 1: the clearing branch I promised was the wrong design
+
+The plan — repeated in-room — was a branch clearing affinity at both `presence.disconnect` and
+`reap_dead_connections`, "reaper first, because it is the ungraceful path and the one that gets
+forgotten." Writing it made the better answer obvious: **do not store liveness, derive it.**
+`executor_of` resolves the recorded executor to its currently-open connections and grades them, so a
+worker that dies without saying anything is not live the moment its heartbeat lapses, with nothing to
+remember to clear. Affinity is therefore cleared in exactly one place — wherever the *claim* is
+cleared — because the executor is a property of a lease and cannot outlive one.
+
+The general form: a clearing branch is a duty to remember. Deriving the same fact from state that is
+already maintained has no forgotten path, which is precisely the property I wanted the reaper-first
+ordering to buy.
+
+That said, the forgotten path still happened — in the lease reaper, which cleared the claim and left
+the executor columns set. It was caught by the schema `CHECK` rather than by review, one run after
+being written. Worth stating plainly: the constraint did the job a comment could not have.
+
+### Correction 2: `is_resumable` must not switch affinity
+
+First implementation used it to select connection-scoped affinity, per a literal reading of D-034.
+That reintroduced the exact guess `AmbiguousExecutor` exists to refuse: with several connections of
+one non-resumable runtime there is no principled way to pick which connection is "the" executor, so
+the code silently took the first. It would also have broken the MCP path, where a connector calling
+`join_room` twice has two open connections.
+
+Affinity now keys on the attachment whenever there is one. `is_resumable` is recorded and read later
+by recovery (D-036/D-038), where "the same attachment came back" is evidence *only* if the client
+promised the label would mean that. The flag answers a question about process restarts; it was being
+used to answer one about transport.
+
+### What is enforced, and the one thing that is not
+
+`complete`, `update` and `release` refuse a caller that is not the live executor —
+`executor_conflict`, distinct from `lease_conflict` because the caller *does* hold the lease.
+Re-claim is guarded too: the idempotent branch matches on participant, so without the check the
+cheapest takeover was also the most invisible one.
+
+`renew` is deliberately exempt. It changes duration, never who executes, and a sibling extending its
+own seat's lease cannot produce two runtimes acting at once.
+
+### Two escape hatches, because nothing may hold work hostage
+
+`task.take_over_execution` moves execution between runtimes of one seat and **increments the fence**,
+so the displaced runtime's next mutation fails as stale rather than landing late. It requires a
+reason and emits `task.executor_changed`. `release(force=True)` is the human override: a human
+principal or a room admin, never without a reason, stamped `forced` on the event. An agent may not
+grant itself either one merely by sharing a seat.
+
+### A defect this exposed in existing code
+
+`runtime_policy_for` derived policy from the participant's *best* live connection. A seat with a
+background worker attached therefore lent the worker's unattended standing to its chat surface — an
+honest-capabilities violation produced by nothing but sharing a seat. It now narrows to the
+executor's own connections when one is given.
+
+`backend/tests/test_executor_affinity.py`: 27 tests over the state axis, written alongside per
+D-033 — including capabilities changing on resume, a stale-but-open socket, and the assertion that
+absence of a recorded executor imposes no affinity, since every pre-existing lease has NULL there.

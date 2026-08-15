@@ -45,9 +45,11 @@ from ..domain.commands import (
     CreateTaskCommand,
     ReleaseClaimCommand,
     RenewClaimCommand,
+    TakeOverExecutionCommand,
     UpdateTaskCommand,
 )
 from ..domain.events import EventEnvelope, EventType
+from ..domain.identity import PrincipalKind
 from ..domain.room import Participant, Room, Scope
 from ..domain.task import HELD_TASK_STATUSES, Task, TaskStatus
 from ..util import is_past, iso_in, normalize_target, utcnow_iso
@@ -56,6 +58,7 @@ from .actors import SYSTEM_ACTOR, actor_for
 from .dispatch import CommandOutcome, execute_command, publish_committed
 from .errors import (
     CapabilityUnsupported,
+    ExecutorConflict,
     InvalidCommand,
     LeaseConflict,
     LeaseRequired,
@@ -102,9 +105,13 @@ async def create(*, participant: Participant, command: CreateTaskCommand) -> Tas
     status = TaskStatus.PROPOSED if command.propose_to_participant_id else TaskStatus.OPEN
 
     runtime = None
+    executor = None
     if command.claim_immediately:
         # Resolved before the transaction so a capability refusal costs nothing.
-        runtime = await presence.runtime_policy_for(participant, room)
+        executor = await presence.resolve_executor(
+            participant=participant, connection_id=command.connection_id
+        )
+        runtime = await presence.runtime_policy_for(participant, room, executor=executor)
         _require_may_claim(runtime)
 
     async def body(tx: db.Tx) -> CommandOutcome:
@@ -170,7 +177,7 @@ async def create(*, participant: Participant, command: CreateTaskCommand) -> Tas
                     note=command.description[:500],
                 )
             )
-        elif command.claim_immediately and runtime is not None:
+        elif command.claim_immediately and runtime is not None and executor is not None:
             claimed = await _claim_tx(
                 tx,
                 room=room,
@@ -178,6 +185,7 @@ async def create(*, participant: Participant, command: CreateTaskCommand) -> Tas
                 task_id=task_id,
                 lease_seconds=runtime.max_lease_seconds,
                 heartbeat_interval_s=runtime.heartbeat_interval_s,
+                executor=executor,
             )
             events += claimed
 
@@ -223,6 +231,7 @@ async def _claim_tx(
     task_id: str,
     lease_seconds: int,
     heartbeat_interval_s: int,
+    executor: presence.Executor,
 ) -> list[EventEnvelope]:
     """Take the lease with one conditional UPDATE. Raises on loss.
 
@@ -237,6 +246,19 @@ async def _claim_tx(
     if row["status"] in {"done", "cancelled"}:
         raise InvalidCommand(
             "That task is already finished.", task_id=task_id, status=row["status"]
+        )
+
+    # The idempotent re-claim branch below matches on participant, which is the seat
+    # rather than the runtime. Without this check a chat surface could re-claim its
+    # own seat's lease and quietly become the executor of work a sibling worker is
+    # still performing — a takeover with none of a takeover's visibility (D-035).
+    if (
+        row["claim_lease_id"]
+        and not is_past(row["claim_expires_at"])
+        and row["claim_participant_id"] == participant.id
+    ):
+        await _require_executor_or_dead(
+            tx, row, participant=participant, executor=executor, action="re-claim"
         )
 
     now = utcnow_iso()
@@ -255,6 +277,8 @@ async def _claim_tx(
             claim_expires_at = ?,
             claim_heartbeat_interval_s = ?,
             claim_renewed_at = NULL,
+            executor_attachment_id = ?,
+            executor_connection_id = ?,
             updated_at = ?
         WHERE id = ?
           AND status NOT IN ('done','cancelled')
@@ -270,6 +294,8 @@ async def _claim_tx(
             now,
             expires_at,
             heartbeat_interval_s,
+            executor.attachment_id,
+            executor.connection_id,
             now,
             task_id,
             now,
@@ -308,6 +334,10 @@ async def _claim_tx(
             "expires_at": expires_at,
             "heartbeat_interval_s": heartbeat_interval_s,
             "lease_seconds": lease_seconds,
+            # Which runtime, not just which seat. A room reading only participant ids
+            # cannot tell a worker claiming from its human's chat window claiming.
+            "executor_attachment_id": executor.attachment_id,
+            "executor_connection_id": executor.connection_id,
         },
     )
     return [event]
@@ -318,7 +348,10 @@ async def claim(*, participant: Participant, command: ClaimTaskCommand) -> Task:
     authz.require_scope(participant, Scope.TASK_CLAIM)
     authz.require_writable(room)
 
-    runtime = await presence.runtime_policy_for(participant, room)
+    executor = await presence.resolve_executor(
+        participant=participant, connection_id=command.connection_id
+    )
+    runtime = await presence.runtime_policy_for(participant, room, executor=executor)
     _require_may_claim(runtime)
 
     lease_seconds = min(
@@ -340,6 +373,7 @@ async def claim(*, participant: Participant, command: ClaimTaskCommand) -> Task:
             task_id=command.task_id,
             lease_seconds=lease_seconds,
             heartbeat_interval_s=runtime.heartbeat_interval_s,
+            executor=executor,
         )
         return CommandOutcome(result={"task_id": command.task_id}, events=events)
 
@@ -461,6 +495,19 @@ async def release(*, participant: Participant, command: ReleaseClaimCommand) -> 
         if row is None:
             raise NotFound("Task does not exist.", task_id=command.task_id)
         _assert_fence(row, command.fence)
+        # D-035 reversed the earlier position that release is harmless. Giving work
+        # up while another runtime is still doing it frees a third party to start
+        # the same external action, which is the same end state as seizing it.
+        if command.force:
+            _require_may_force(participant, command.reason)
+        else:
+            await _require_executor_or_dead(
+                tx,
+                row,
+                participant=participant,
+                connection_id=command.connection_id,
+                action="release",
+            )
 
         affected = await tx.execute(
             """
@@ -468,6 +515,7 @@ async def release(*, participant: Participant, command: ReleaseClaimCommand) -> 
             SET status = 'open', claim_lease_id = NULL, claim_participant_id = NULL,
                 claim_fence = NULL, claim_claimed_at = NULL, claim_expires_at = NULL,
                 claim_heartbeat_interval_s = NULL, claim_renewed_at = NULL,
+                executor_attachment_id = NULL, executor_connection_id = NULL,
                 updated_at = ?
             WHERE id = ? AND claim_participant_id = ? AND claim_fence = ?
             """,
@@ -487,6 +535,10 @@ async def release(*, participant: Participant, command: ReleaseClaimCommand) -> 
                 "participant_id": participant.id,
                 "fence": command.fence,
                 "note": command.note,
+                # Stamped rather than merely permitted. An override with no trace is
+                # indistinguishable from a bug in the affinity rule it overrode.
+                "forced": command.force,
+                "reason": command.reason,
             },
             causation_id=command.command_id,
         )
@@ -523,6 +575,7 @@ async def release_all_claims_tx(
             SET status = 'open', claim_lease_id = NULL, claim_participant_id = NULL,
                 claim_fence = NULL, claim_claimed_at = NULL, claim_expires_at = NULL,
                 claim_heartbeat_interval_s = NULL, claim_renewed_at = NULL,
+                executor_attachment_id = NULL, executor_connection_id = NULL,
                 updated_at = ?
             WHERE id = ? AND claim_participant_id = ?
             """,
@@ -621,6 +674,186 @@ def _require_live_lease(row, participant: Participant) -> None:
         )
 
 
+def _require_may_force(participant: Participant, reason: str) -> None:
+    """Who may override executor affinity, and on what terms.
+
+    A human principal or a room admin, and never without a reason. The override
+    exists because a stuck runtime must not be able to hold work hostage — but the
+    thing being overridden is a safety rule about external effects, so it is not
+    something an agent may quietly grant itself on the strength of sharing a seat.
+    """
+    is_human = participant.identity.kind == PrincipalKind.HUMAN
+    if not (is_human or Scope.ROOM_ADMIN in participant.scopes):
+        raise ExecutorConflict(
+            "Only a human principal or a room admin may override executor affinity. "
+            "An agent that wants to take over live work should take it over "
+            "explicitly, which is visible in the room.",
+            participant_id=participant.id,
+        )
+    if not reason.strip():
+        raise InvalidCommand(
+            "Overriding executor affinity requires a reason, which is recorded in "
+            "the room. An override nobody can audit is worse than no override.",
+        )
+
+
+async def take_over_execution(
+    *, participant: Participant, command: TakeOverExecutionCommand
+) -> Task:
+    """Move execution of a lease from one runtime of a seat to another.
+
+    Deliberately its own command rather than a flag on claim. Becoming the executor
+    of work another runtime started is a real event in the room — the alternative is
+    that it happens as a side effect of an idempotent re-claim, where nothing in the
+    log distinguishes it from ordinary lease renewal.
+
+    The fence increments, which is what makes it safe: the displaced runtime's next
+    mutation fails as stale rather than landing late on work it no longer owns.
+    """
+    room = await store.load_room(participant.room_id)
+    authz.require_scope(participant, Scope.TASK_CLAIM)
+    authz.require_writable(room)
+
+    executor = await presence.resolve_executor(
+        participant=participant, connection_id=command.connection_id
+    )
+
+    async def body(tx: db.Tx) -> CommandOutcome:
+        row = await tx.fetch_one(
+            "SELECT * FROM tasks WHERE id = ? AND room_id = ?", (command.task_id, room.id)
+        )
+        if row is None:
+            raise NotFound("Task does not exist.", task_id=command.task_id)
+        _assert_fence(row, command.fence)
+        _require_live_lease(row, participant)
+
+        previous = await presence.executor_of(row, tx=tx)
+        if previous.ref == executor.ref:
+            # Already the executor. Idempotent rather than an error, so a retry after
+            # an ambiguous failure does not look like a second takeover.
+            return CommandOutcome(result={"task_id": command.task_id})
+
+        affected = await tx.execute(
+            """
+            UPDATE tasks
+            SET fence = fence + 1,
+                claim_fence = fence + 1,
+                executor_attachment_id = ?,
+                executor_connection_id = ?,
+                updated_at = ?
+            WHERE id = ? AND claim_participant_id = ? AND claim_fence = ?
+              AND claim_expires_at > ?
+            """,
+            (
+                executor.attachment_id,
+                executor.connection_id,
+                utcnow_iso(),
+                command.task_id,
+                participant.id,
+                command.fence,
+                utcnow_iso(),
+            ),
+        )
+        if affected == 0:
+            raise StaleFence(
+                "The lease moved while you were taking it over. Read the task again.",
+                task_id=command.task_id,
+                fence=command.fence,
+            )
+
+        fence = int(
+            await tx.fetch_value("SELECT fence FROM tasks WHERE id = ?", (command.task_id,))
+        )
+        event = await eventlog.append(
+            tx,
+            room_id=room.id,
+            type_=EventType.TASK_EXECUTOR_CHANGED,
+            actor=actor_for(participant),
+            payload={
+                "task_id": command.task_id,
+                "participant_id": participant.id,
+                "fence": fence,
+                "previous_executor_ref": previous.ref,
+                "previous_executor_live": previous.is_live,
+                "executor_attachment_id": executor.attachment_id,
+                "executor_connection_id": executor.connection_id,
+                "reason": command.reason,
+            },
+            causation_id=command.command_id,
+        )
+        return CommandOutcome(result={"task_id": command.task_id}, events=[event])
+
+    await execute_command(
+        command_id=command.command_id,
+        command_type="task.take_over_execution",
+        room_id=room.id,
+        participant_id=participant.id,
+        body=body,
+    )
+    return await store.load_task(command.task_id)
+
+
+async def _caller_executor(
+    participant: Participant, connection_id: str | None, *, tx: db.Tx | None = None
+) -> presence.Executor:
+    """The caller's runtime, or nothing if it has no open connection.
+
+    A caller with nothing open cannot be the runtime executing anything, so the
+    empty executor is the truthful answer rather than an error — and it will not
+    match a live one, which is exactly the outcome that case deserves.
+    """
+    try:
+        return await presence.resolve_executor(
+            participant=participant, connection_id=connection_id, tx=tx
+        )
+    except CapabilityUnsupported:
+        return presence.Executor(attachment_id=None, connection_id=None, connections=())
+
+
+async def _require_executor_or_dead(
+    tx: db.Tx,
+    row,
+    *,
+    participant: Participant,
+    connection_id: str | None = None,
+    executor: presence.Executor | None = None,
+    action: str,
+) -> None:
+    """Only the runtime that started the work may act on it while it is still alive.
+
+    Holding the lease is the seat's authority; executing is one runtime's. D-035
+    settled that these come apart, using release as the example: a chat surface
+    releasing a worker's lease is exactly as dangerous as seizing it, because both
+    end with two runtimes free to perform the same external action. Cottage fencing
+    protects Cottage state, never a deployment already half-done.
+
+    A recorded executor with nothing live behind it is not an obstacle: the work is
+    unattended by anyone, and refusing here would turn a crashed worker into a
+    permanently stuck task, which is the locks-not-leases failure we exist to avoid.
+
+    The caller's own runtime is resolved *only* when there is something to compare
+    against. A lease with no recorded executor imposes no affinity, so demanding
+    that the caller identify its runtime there would invent a requirement out of an
+    absence — and would fail every pre-existing lease in the database.
+    """
+    current = await presence.executor_of(row, tx=tx)
+    if current.ref is None or not current.is_live:
+        return
+    if executor is None:
+        executor = await _caller_executor(participant, connection_id, tx=tx)
+    if current.ref == executor.ref:
+        return
+    raise ExecutorConflict(
+        f"Another live runtime of your own participant is executing this task, so you "
+        f"may not {action} it. Take it over explicitly if that runtime is finished or "
+        f"wrong — a takeover is visible in the room, and silently becoming the executor "
+        f"is not.",
+        task_id=row["id"],
+        executor_ref=current.ref,
+        your_executor_ref=executor.ref,
+    )
+
+
 async def update(*, participant: Participant, command: UpdateTaskCommand) -> Task:
     room = await store.load_room(participant.room_id)
     authz.require_scope(participant, Scope.TASK_PROPOSE)
@@ -635,6 +868,13 @@ async def update(*, participant: Participant, command: UpdateTaskCommand) -> Tas
             raise NotFound("Task does not exist.", task_id=command.task_id)
         _assert_fence(row, command.fence)
         _assert_holder(row, participant)
+        await _require_executor_or_dead(
+            tx,
+            row,
+            participant=participant,
+            connection_id=command.connection_id,
+            action="update",
+        )
 
         title = command.title if command.title is not None else row["title"]
         description = command.description if command.description is not None else row["description"]
@@ -730,6 +970,13 @@ async def complete(*, participant: Participant, command: CompleteTaskCommand) ->
             return CommandOutcome(result={"task_id": command.task_id})
         _assert_fence(row, command.fence)
         _require_live_lease(row, participant)
+        await _require_executor_or_dead(
+            tx,
+            row,
+            participant=participant,
+            connection_id=command.connection_id,
+            action="complete",
+        )
 
         now = utcnow_iso()
         # See the note in `update`: the holder condition belongs in the WHERE clause
@@ -740,6 +987,7 @@ async def complete(*, participant: Participant, command: CompleteTaskCommand) ->
             SET status = 'done', result = ?, completed_at = ?, updated_at = ?,
                 claim_lease_id = NULL, claim_participant_id = NULL, claim_fence = NULL,
                 claim_claimed_at = NULL, claim_expires_at = NULL,
+                executor_attachment_id = NULL, executor_connection_id = NULL,
                 claim_heartbeat_interval_s = NULL, claim_renewed_at = NULL
             WHERE id = ? AND status NOT IN ('done','cancelled')
               AND claim_participant_id = ? AND claim_expires_at > ?
@@ -884,7 +1132,8 @@ async def reap_expired_leases() -> list[EventEnvelope]:
     now = utcnow_iso()
     rows = await db.fetch_all(
         """
-        SELECT id, room_id, claim_participant_id, claim_fence, claim_expires_at
+        SELECT id, room_id, claim_participant_id, claim_fence, claim_expires_at,
+               executor_attachment_id, executor_connection_id
         FROM tasks
         WHERE claim_lease_id IS NOT NULL AND claim_expires_at <= ?
         """,
@@ -899,6 +1148,7 @@ async def reap_expired_leases() -> list[EventEnvelope]:
                 SET status = 'open', claim_lease_id = NULL, claim_participant_id = NULL,
                     claim_fence = NULL, claim_claimed_at = NULL, claim_expires_at = NULL,
                     claim_heartbeat_interval_s = NULL, claim_renewed_at = NULL,
+                    executor_attachment_id = NULL, executor_connection_id = NULL,
                     updated_at = ?
                 WHERE id = ? AND claim_fence = ? AND claim_expires_at <= ?
                 """,
@@ -917,6 +1167,12 @@ async def reap_expired_leases() -> list[EventEnvelope]:
                         "participant_id": row["claim_participant_id"],
                         "fence": row["claim_fence"],
                         "expired_at": row["claim_expires_at"],
+                        # Carried into the log because the row loses it here. A
+                        # recovery claim has to say which runtime went quiet
+                        # mid-flight, and the event is the only place that survives
+                        # (D-036, D-039).
+                        "executor_attachment_id": row["executor_attachment_id"],
+                        "executor_connection_id": row["executor_connection_id"],
                         "reason": "lease_expired",
                     },
                 )

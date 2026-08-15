@@ -187,7 +187,10 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # before attachments existed belongs to no durable runtime, and treating it as
     # ephemeral is the honest reading rather than inventing continuity for it.
     ("connections", "attachment_id", "TEXT"),
+    # D-034. Exactly one of these is set while a lease is held, or neither. They are
+    # cleared wherever the claim is cleared, so an executor never outlives its lease.
     ("tasks", "executor_attachment_id", "TEXT"),
+    ("tasks", "executor_connection_id", "TEXT"),
 )
 
 

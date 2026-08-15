@@ -262,10 +262,40 @@ class Participant(BaseModel):
         return self.state == MembershipState.JOINED
 
 
+class Attachment(BaseModel):
+    """A durable runtime identity, between the seat and the transport (D-032).
+
+    The layering is: logical agent → participant (the seat, which holds leases) →
+    **attachment** (this: one runtime, addressable across transport loss) → many
+    connections over time. A row exists only when a client supplied a stable label;
+    a client that cannot is ephemeral and is identified by its connection instead.
+
+    `is_resumable` is a *separate declaration*, not an inference from the label
+    existing. It answers "will this label address the same runtime after transport
+    loss?" — nothing here attests that the runtime remembers what it did, which is
+    a different layer again (D-038).
+    """
+
+    id: str
+    room_id: str
+    participant_id: str
+    #: Stable and client-chosen. Unique per participant, which is what makes a
+    #: reattach land on this row rather than creating a second identity.
+    label: str
+    #: Descriptive; recorded for display and telemetry only.
+    host_class: HostClass
+    is_resumable: bool = False
+    created_at: str
+    last_seen_at: str
+
+
 class Connection(BaseModel):
     id: str
     room_id: str
     participant_id: str
+    #: The durable runtime this transport belongs to, when the client declared one.
+    #: NULL means no durable runtime — never "no executor" (D-034).
+    attachment_id: str | None = None
     #: Descriptive; recorded for display and telemetry only.
     host_class: HostClass
     profile: CapabilityProfile

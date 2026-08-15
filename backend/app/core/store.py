@@ -160,6 +160,7 @@ def to_connection(row: Any) -> Connection:
         id=row["id"],
         room_id=row["room_id"],
         participant_id=row["participant_id"],
+        attachment_id=row["attachment_id"],
         host_class=HostClass(row["host_class"]),
         profile=CapabilityProfile(**db.loads(row["profile"], {})),
         delivery_mode=DeliveryMode(row["delivery_mode"]),
@@ -191,6 +192,10 @@ def to_task(row: Any) -> Task:
             expires_at=row["claim_expires_at"],
             heartbeat_interval_s=int(row["claim_heartbeat_interval_s"] or 0),
             renewed_at=row["claim_renewed_at"],
+            # Read from the row only while the lease is live. An expired lease has
+            # no executor, which is the same sentence as having no claim.
+            executor_attachment_id=row["executor_attachment_id"],
+            executor_connection_id=row["executor_connection_id"],
         )
     elif row["claim_lease_id"] and status in {
         TaskStatus.CLAIMED,

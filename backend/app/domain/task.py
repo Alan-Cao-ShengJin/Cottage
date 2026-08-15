@@ -57,6 +57,16 @@ class TaskClaim(BaseModel):
     expires_at: str
     heartbeat_interval_s: int
     renewed_at: str | None = None
+    #: Which runtime of the holding seat is actually executing. Exactly one of
+    #: these is set, or neither for a lease taken with no identifiable runtime.
+    #: The holder decides *whether* the work happens; the executor is the one
+    #: doing it, and is the only one that may finish it while still live (D-035).
+    executor_attachment_id: str | None = None
+    executor_connection_id: str | None = None
+
+    @property
+    def executor_ref(self) -> str | None:
+        return self.executor_attachment_id or self.executor_connection_id
 
 
 class Task(BaseModel):

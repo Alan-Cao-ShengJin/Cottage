@@ -46,6 +46,7 @@ from ..domain.commands import (
     PostMessageCommand,
     ReleaseClaimCommand,
     RenewClaimCommand,
+    TakeOverExecutionCommand,
     UpdateTaskCommand,
     UpdateWorkCommand,
 )
@@ -498,6 +499,15 @@ async def release_claim(
 ) -> dict[str, Any]:
     _assert_room(participant, room_id)
     task = await tasks.release(participant=participant, command=command)
+    return {"ok": True, "task": task.model_dump(mode="json")}
+
+
+@router.post("/rooms/{room_id}/tasks/take-over")
+async def take_over_execution(
+    room_id: str, participant: ParticipantDep, command: TakeOverExecutionCommand
+) -> dict[str, Any]:
+    _assert_room(participant, room_id)
+    task = await tasks.take_over_execution(participant=participant, command=command)
     return {"ok": True, "task": task.model_dump(mode="json")}
 
 

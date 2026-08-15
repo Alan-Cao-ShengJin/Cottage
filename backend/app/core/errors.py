@@ -81,6 +81,33 @@ class LeaseRequired(RoomError):
     status_code = 409
 
 
+class AmbiguousExecutor(RoomError):
+    """Several runtimes of this seat are connected and none was named.
+
+    Refusing is the point. The alternative — picking the most recently active
+    connection — would silently record the wrong executor, and every later
+    affinity check would then be answered about a runtime that is not doing the
+    work. A wrong answer that looks authoritative is worse than a refusal that
+    says exactly what to send (D-034).
+    """
+
+    code = "executor_ambiguous"
+    status_code = 409
+
+
+class ExecutorConflict(RoomError):
+    """Another live runtime of the same seat is executing this lease.
+
+    Not a lease conflict: the caller *does* hold the lease. What it does not hold
+    is the work, which a sibling runtime started and may still be performing
+    outside this system. The fence protects room state; it cannot recall an
+    external action already in flight (D-035).
+    """
+
+    code = "executor_conflict"
+    status_code = 409
+
+
 class StaleFence(RoomError):
     """The caller's fence is behind the task's. It lost the lease and must re-read."""
 

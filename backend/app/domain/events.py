@@ -33,6 +33,11 @@ class EventType(str, Enum):
     PARTICIPANT_SCOPES_CHANGED = "participant.scopes_changed"
 
     PRESENCE_CHANGED = "presence.changed"
+    #: A durable runtime identified itself to the room for the first time. Rare —
+    #: once per runtime, not once per connection — but it is a state change, and
+    #: state changes are events (principle 1). It is also what lets a reader
+    #: distinguish "the worker restarted" from "a second worker appeared".
+    ATTACHMENT_REGISTERED = "presence.attachment_registered"
 
     MESSAGE_POSTED = "message.posted"
 
@@ -50,6 +55,9 @@ class EventType(str, Enum):
     TASK_CLAIMED = "task.claimed"
     TASK_CLAIM_RENEWED = "task.claim_renewed"
     TASK_CLAIM_RELEASED = "task.claim_released"
+    #: Execution moved between two runtimes of one participant. Distinct from
+    #: `task.claimed` because the holder did not change — only who is doing it.
+    TASK_EXECUTOR_CHANGED = "task.executor_changed"
     TASK_CLAIM_EXPIRED = "task.claim_expired"
     TASK_BLOCKED = "task.blocked"
     TASK_UNBLOCKED = "task.unblocked"

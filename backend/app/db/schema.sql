@@ -232,9 +232,14 @@ CREATE TABLE IF NOT EXISTS attachments (
     participant_id TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
     label          TEXT NOT NULL,
     host_class     TEXT NOT NULL DEFAULT 'unknown',
-    -- False when the client could not supply a stable label. Such an attachment is
-    -- never resumed and its executor affinity is cleared rather than pretended
-    -- (principle 5: never simulate a continuity the host has not declared).
+    -- A row exists only when the client supplied a stable label; a client that
+    -- cannot is ephemeral and gets no row at all (D-034). So this is not "did we
+    -- get a label" — it is the client's separate declaration that the label will
+    -- address the SAME runtime after a *process* restart, not merely a transport
+    -- one. It is recorded, never used to switch affinity: affinity already keys on
+    -- the attachment and lapses when nothing of it is live. Where the declaration
+    -- matters is recovery — "the same attachment came back" is evidence only if
+    -- the client promised the label would mean that (D-036, D-038).
     is_resumable   INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL,
     last_seen_at   TEXT NOT NULL,
@@ -367,6 +372,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     claim_expires_at            TEXT,
     claim_heartbeat_interval_s  INTEGER,
     claim_renewed_at            TEXT,
+    -- Who is *executing* under this lease, as opposed to who holds it. The seat
+    -- (claim_participant_id) may have several runtimes attached; only one of them
+    -- started the work, and only that one may finish it while it is still live
+    -- (D-034, D-035). Exactly one of these is set, or neither: a durable runtime
+    -- if the client supplied a resumable attachment, otherwise the connection it
+    -- claimed from — NULL means "no durable runtime", never "no executor".
+    executor_attachment_id      TEXT REFERENCES attachments(id) ON DELETE SET NULL,
+    executor_connection_id      TEXT REFERENCES connections(id) ON DELETE SET NULL,
     result                      TEXT NOT NULL DEFAULT '',
     privacy_class               TEXT NOT NULL DEFAULT 'room_public',
     created_at                  TEXT NOT NULL,
@@ -380,7 +393,18 @@ CREATE TABLE IF NOT EXISTS tasks (
              AND claim_fence IS NULL AND claim_expires_at IS NULL)
         OR (claim_lease_id IS NOT NULL AND claim_participant_id IS NOT NULL
              AND claim_fence IS NOT NULL AND claim_expires_at IS NOT NULL)
+    ),
+    -- An executor is a property *of a lease*, so it cannot outlive one, and it is
+    -- one runtime rather than two kinds of runtime at once.
+    CHECK (executor_attachment_id IS NULL OR executor_connection_id IS NULL),
+    CHECK (
+        claim_lease_id IS NOT NULL
+        OR (executor_attachment_id IS NULL AND executor_connection_id IS NULL)
     )
+    -- NOTE: SQLite cannot add a CHECK with ALTER TABLE, so a database file created
+    -- before these columns existed enforces the two above in code only (they are
+    -- written from one resolution point and cleared with the claim everywhere).
+    -- A fresh file and the eventual PostgreSQL schema get the real constraint.
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_room ON tasks(room_id, status);

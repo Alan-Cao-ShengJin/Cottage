@@ -41,6 +41,13 @@ class CommandMeta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     command_id: str | None = None
+    #: Which of the caller's runtimes is speaking. Cross-cutting rather than
+    #: per-command, for the same reason `command_id` is: it identifies the *sender*,
+    #: not the request. A participant with one open connection never needs it; one
+    #: with several needs it wherever executor affinity is decided, because a seat
+    #: shared by a chat surface and a background worker is two runtimes with one
+    #: name (D-032, D-034).
+    connection_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +96,18 @@ class ConnectCommand(CommandMeta):
     host_class: HostClass = HostClass.UNKNOWN
     capabilities: list[Capability] | None = None
     since_seq: int = Field(default=0, ge=0)
+    #: A stable, client-chosen name for the *runtime* behind this connection, so a
+    #: reconnect can be recognised as the same executor rather than a new one
+    #: (D-032). Omit it if you cannot guarantee stability: ephemeral is the honest
+    #: default, and a label that changes every connection is worse than none because it
+    #: accumulates dead identities that look resumable.
+    attachment_label: str | None = Field(default=None, min_length=1, max_length=128)
+    #: Whether that label will address the same runtime after a *process* restart,
+    #: not merely a transport one. Recorded rather than acted on: affinity already
+    #: keys on the attachment. It is what later lets a recovery claim tell "the
+    #: worker came back" from "something reused the name" (D-036, D-038). Declare
+    #: it false if you cannot promise it. Ignored when no label is given.
+    attachment_resumable: bool = True
 
 
 class HeartbeatCommand(CommandMeta):
@@ -172,6 +191,28 @@ class ReleaseClaimCommand(CommandMeta):
     task_id: str
     fence: int
     note: str = Field(default="", max_length=500)
+    #: Release work another live runtime of your own seat is executing. Permitted
+    #: only to a human principal or a room admin, and only with a reason, because
+    #: the thing being overridden is a safety rule about the *world* rather than a
+    #: database consistency rule (D-035). The reason is stamped on the event: an
+    #: override that leaves no trace is indistinguishable from a bug.
+    force: bool = False
+    reason: str = Field(default="", max_length=500)
+
+
+class TakeOverExecutionCommand(CommandMeta):
+    """Become the executor of a lease your own seat already holds.
+
+    The visible alternative to silently re-claiming. It moves execution between
+    runtimes of one participant, increments the fence so the displaced runtime's
+    next mutation fails as stale rather than succeeding late, and says why in the
+    room. Nothing about *who holds* the lease changes — this is not a seizure from
+    another participant, which is a different act with different rules (D-031).
+    """
+
+    task_id: str
+    fence: int
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class UpdateTaskCommand(CommandMeta):
