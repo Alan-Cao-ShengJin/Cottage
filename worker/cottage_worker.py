@@ -87,6 +87,51 @@ class Lease:
         return (self.expires_at - now) < max(lease_seconds * RENEW_AT_FRACTION, 15.0)
 
 
+def join_with_invitation(
+    base: str,
+    invitation_token: str,
+    *,
+    display_name: str,
+    description: str = "",
+) -> tuple[str, str]:
+    """Walk in with nothing but the key, and come back with a seat.
+
+    This is the product's own sentence completed for an unattended agent: someone
+    starts a room, hands over a key, and a process that has never seen this
+    organization joins on the strength of that key alone. Before this the worker
+    needed a participant token, which meant a human first joined by hand and then
+    passed a credential to a process — the same token-hunting the front door was
+    opened to remove.
+
+    Returns `(room_id, participant_token)`.
+    """
+    payload = {
+        "invitation_token": invitation_token,
+        "display_name": display_name,
+        "host_class": "persistent_local",
+        "capabilities": CAPABILITIES,
+        "description": description,
+    }
+    request = urllib.request.Request(
+        f"{base}/api/rooms/join",
+        data=json.dumps(payload).encode(),
+        # The invitation authenticates the request *and* is the thing being redeemed.
+        # A stranger holding it needs no account, which is the whole point of D-025.
+        headers={
+            "Authorization": f"Bearer {invitation_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        raise CottageError("join_failed", raw[:300], exc.code) from exc
+    return body["room"]["id"], body["participant_token"]
+
+
 @dataclass
 class Worker:
     base: str
@@ -590,6 +635,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--room", default=os.environ.get("COTTAGE_ROOM"))
     parser.add_argument("--token", default=os.environ.get("COTTAGE_PARTICIPANT_TOKEN"))
     parser.add_argument(
+        "--invitation",
+        default=os.environ.get("COTTAGE_INVITATION"),
+        help=(
+            "Join with a room key instead of a participant token. The room id comes "
+            "back with the seat, so --room is not needed either."
+        ),
+    )
+    parser.add_argument(
+        "--display-name",
+        default=os.environ.get("COTTAGE_DISPLAY_NAME", "Unattended worker"),
+        help="How this worker appears in the room when joining with --invitation.",
+    )
+    parser.add_argument(
         "--label", default=os.environ.get("COTTAGE_LABEL", "worker-main")
     )
     parser.add_argument("--poll-seconds", type=int, default=20)
@@ -622,15 +680,28 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(message)s",
     )
-    if not args.room or not args.token:
+    room_id, token = args.room, args.token
+    if args.invitation:
+        room_id, token = join_with_invitation(
+            args.base.rstrip("/"),
+            args.invitation,
+            display_name=args.display_name,
+            description=(
+                "Unattended executor. Polls, renews its own leases, and takes only "
+                "work proposed to it. It runs a fixed handler and does not reason."
+            ),
+        )
+        log.info("joined %s as %s", room_id, args.display_name)
+    if not room_id or not token:
         parser.error(
-            "--room and --token are required (or COTTAGE_ROOM / COTTAGE_PARTICIPANT_TOKEN)"
+            "give either --invitation (a room key) or both --room and --token "
+            "(COTTAGE_INVITATION / COTTAGE_ROOM + COTTAGE_PARTICIPANT_TOKEN)"
         )
 
     worker = Worker(
         base=args.base.rstrip("/"),
-        room_id=args.room,
-        token=args.token,
+        room_id=room_id,
+        token=token,
         label=args.label,
         poll_seconds=args.poll_seconds,
         max_cycles=args.max_cycles,
