@@ -213,7 +213,8 @@ DEFAULT_JOIN_TTL_SECONDS = 7 * 24 * 3600
 
 async def create_room(
     *,
-    user: User,
+    user: User | None = None,
+    principal: Principal | None = None,
     command: CreateRoomCommand,
     creator_display_name: str | None = None,
 ) -> CreatedRoom:
@@ -231,7 +232,50 @@ async def create_room(
     an exception to that rule so much as its origin: they are the authority the first
     invitation derives from, so their row is created by the same authenticated act that
     creates the room.
+
+    **An agent identity may create a room, and this is the front door** (D-046). It
+    used to require a user principal, on the reasoning that creating a room is an
+    org-level act. That reasoning held for *room-scoped* tokens and was wrongly
+    applied to agent identities, which are org-level too — and the consequence was
+    that the only host family we have actually verified could not perform step one
+    of the product's own core loop. "Ask your assistant to start a room, share the
+    key with a friend" was impossible for the assistant we had proved could connect;
+    a human had to go and find an organization credential first.
+
+    The gate that remains is the one that was always doing the real work:
+    **account provenance**. An identity a human with an account created or consented
+    to may open rooms in that org. An identity minted by redeeming someone's join
+    link may not — otherwise anyone handed a link to one room could create rooms in
+    the org that invited them, which is a tenancy hole rather than a convenience.
     """
+    if principal is None and user is not None:
+        principal = Principal(kind="user", org_id=user.org_id, user=user)
+    if principal is None:
+        raise InvalidCommand("Creating a room needs an authenticated principal.")
+
+    creator_identity: AgentIdentity | None = None
+    if principal.kind == "user":
+        assert principal.user is not None
+        user = principal.user
+        owner_user_id = user.id
+        org_id = user.org_id
+    else:
+        assert principal.identity is not None
+        creator_identity = principal.identity
+        if creator_identity.provenance is not IdentityProvenance.ACCOUNT:
+            raise Forbidden(
+                "This identity was created by redeeming an invitation, so it can join "
+                "rooms it is invited to but cannot open new ones in this organization.",
+                provenance=creator_identity.provenance.value,
+            )
+        if creator_identity.trust is TrustTier.UNTRUSTED:
+            raise Forbidden(
+                "An untrusted identity cannot create rooms.",
+                trust=creator_identity.trust.value,
+            )
+        owner_user_id = creator_identity.owner_user_id
+        org_id = creator_identity.org_id
+
     room_id = ids.new_id(ids.ROOM)
     participant_id = ids.new_id(ids.PARTICIPANT)
     invitation_id = ids.new_id(ids.INVITATION)
@@ -241,7 +285,14 @@ async def create_room(
     retention = command.retention or RetentionPolicy()
     expires_at = iso_in(retention.ttl_seconds) if retention.ttl_seconds else None
 
-    identity = await ensure_human_identity(user, display_name=creator_display_name)
+    # An agent creating its own room is already an identity; a human is represented
+    # by one created on demand. Either way the creator's participant row is built from
+    # a real identity rather than from the token that authenticated the call.
+    if creator_identity is not None:
+        identity = creator_identity
+    else:
+        assert user is not None  # the user branch above is the only way here
+        identity = await ensure_human_identity(user, display_name=creator_display_name)
     display_name = creator_display_name or identity.display_name
     owner_scopes = authz.effective_scopes(ParticipantRole.OWNER, None, TrustTier.MEMBER)
     join_scopes = authz.effective_scopes(ParticipantRole.COLLABORATOR, None, TrustTier.MEMBER)
@@ -270,14 +321,14 @@ async def create_room(
             """,
             (
                 room_id,
-                user.org_id,
+                org_id,
                 command.name,
                 command.purpose,
                 command.visibility.value,
                 db.dumps(policy.model_dump()),
                 db.dumps(retention.model_dump()),
                 now,
-                user.id,
+                owner_user_id,
                 expires_at,
             ),
         )

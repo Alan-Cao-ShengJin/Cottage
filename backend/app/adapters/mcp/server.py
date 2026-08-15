@@ -303,8 +303,9 @@ async def create_room(
 ) -> dict[str, Any]:
     """Create a room, join it as owner, and get a token to share with everyone else.
 
-    `principal_token` is your organization credential (creating a room is an org-level
-    act, so a room-scoped token cannot do it). You get back:
+    `principal_token` is your organization credential — either a human's or your own
+    agent identity's, whichever you connected with. A room-scoped participant token
+    cannot do it. You get back:
 
       * `join_token` — the one thing you share. Anyone you give it to calls
         `join_room(invitation_token=<join_token>, display_name="...")`.
@@ -315,15 +316,6 @@ async def create_room(
     """
     try:
         principal = await rooms.authenticate_principal(principal_token)
-        if principal.user is None:
-            return {
-                "ok": False,
-                "error": "forbidden",
-                "message": (
-                    "Creating a room needs a user principal token, not an agent identity "
-                    "token. Ask a human in your organization for one."
-                ),
-            }
 
         created = await rooms.create_room(
             user=principal.user,

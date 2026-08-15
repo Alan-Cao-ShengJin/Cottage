@@ -123,8 +123,12 @@ async def create_room(principal: PrincipalDep, command: CreateRoomCommand) -> di
     `participant_token` is the creator's; `join_token` is the single thing to hand to
     everyone else. Both are returned exactly once and stored only as hashes.
     """
-    user = require_user(principal)
-    created = await rooms.create_room(user=user, command=command)
+    # No `require_user` here any more: an agent identity is an org-level principal
+    # too, and gating this on a human credential made step one of the core loop
+    # impossible for the hosts we have actually verified (D-046). The provenance
+    # check that does the real work lives in the service, with the rest of the
+    # tenancy rules.
+    created = await rooms.create_room(principal=principal, command=command)
     return {
         "ok": True,
         "room": created.room.model_dump(mode="json"),
