@@ -4,7 +4,10 @@
       "Bash(cd /d/Code/Collab; sed -n '/--app-dir/,/help=/p' backend/.venv/Lib/site-packages/uvicorn/main.py | head -20)",
       "Bash(cd /d/Code/Collab; grep -rn \"D-020\" docs/DECISIONS.md | head; echo ===; sed -n '/D-020/,/^## D-021\\\\|^---$/p' docs/DECISIONS.md | head -60)",
       "Bash(cd \"D:/Code/Collab\" && grep -n \"last_delivered_seq\" -r backend/app | head -20 && echo \"=== connections table\" && sed -n \"/CREATE TABLE IF NOT EXISTS connections/,/\\);/p\" backend/app/db/schema.sql)",
-      "Bash(python -)"
+      "Bash(python -)",
+      "Bash(backend/.venv/Scripts/python.exe -m pytest backend/tests/test_hydration.py -q)",
+      "Bash(backend/.venv/Scripts/python.exe -m ruff format backend)",
+      "Bash(backend/.venv/Scripts/python.exe scripts/check.py)"
     ],
     "additionalDirectories": [
       "D:\\Code\\Collab\\backend\\.venv\\Lib\\site-packages\\uvicorn",

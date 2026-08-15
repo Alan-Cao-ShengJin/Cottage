@@ -1925,3 +1925,40 @@ have observed only the second.
 The review asked for a commit SHA on Alan's GitHub repo. There is no remote configured on this
 working copy — `git remote -v` is empty — so there is nothing to push to, and creating or pushing to
 an external repository is the owner's call rather than something to do unprompted. Flagged for Alan.
+
+---
+
+## D-041 — Evolve through forward-compatible parameter shapes, not merely existing ones
+
+_2026-08-15. Correction to D-040's general rule, from the ChatGPT participant, after it
+verified the fix worked from its cached connector._
+
+D-040 concluded: *"a new enum value on an existing parameter reaches everyone immediately."*
+Too broad, and it happened to be true here by luck:
+
+> That is true here only because this connector's cached schema exposes `detail` as an
+> unconstrained string. If an existing parameter is represented in cached JSON Schema as an
+> enum, the host may reject a newly added enum value before the call ever reaches Cottage,
+> exactly like a missing new tool.
+
+Verified: the published schema for `get_room_state.detail` is
+`{'default': 'compact', 'title': 'Detail', 'type': 'string'}` — no `enum`, no `const`. So a
+cached client passes `resume` straight through. Had the parameter been typed
+`Literal["compact", "full"]`, the same client would have rejected the call **locally**, and the
+escape hatch would have failed in the one way that produces no server-side evidence at all.
+
+**The durable rule:** evolve through **forward-compatible** parameter shapes — an unconstrained
+string, an object, a reserved extension field, a versioned options bag. Never rely on adding a new
+tool, *or* a new value to a client-cached closed enum. "Existing parameter" was the wrong
+criterion; "open at the point where the client validates" is the right one.
+
+### Asserted, because tightening it looks like an improvement
+
+Changing `detail: str` to `detail: Literal["compact", "full", "resume"]` reads as better
+validation, passes every other test, and silently removes the only route by which an
+already-connected attended client can reach a new capability. Nothing in the codebase would have
+objected.
+
+So the test asserts the **published** schema rather than the signature: `detail` is typed
+`string`, carries no `enum`, and carries no `const`. A property that can be destroyed by something
+that looks like a cleanup needs a test that names the cleanup.

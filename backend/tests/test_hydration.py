@@ -184,3 +184,29 @@ async def test_hydration_is_reachable_without_discovering_a_new_tool(room_with_t
     # And it is still the small payload, not the board wearing a different name.
     assert "participants" not in via_existing_tool
     assert "tasks" not in via_existing_tool
+
+
+async def test_the_escape_hatch_parameter_stays_forward_compatible():
+    """`detail` must stay an open string, or the D-040 fallback silently stops working.
+
+    D-040 claimed that "a new enum value on an existing parameter reaches everyone
+    immediately". The ChatGPT participant corrected it: that held only because this
+    connector's cached schema exposes `detail` as an *unconstrained string*. If it were
+    published as a closed enum, a cached client would reject `detail="resume"` locally,
+    before the call ever reached this server — failing exactly like a tool it cannot see.
+
+    The dangerous part is that tightening it looks like an improvement. Changing
+    `detail: str` to `detail: Literal["compact", "full", "resume"]` reads as better
+    validation, passes every other test, and quietly removes the only route by which an
+    already-connected attended client can reach a new capability. So the property is
+    asserted against the *published* schema rather than the signature (D-041).
+    """
+    from app.adapters.mcp.server import mcp
+
+    tools = await mcp.list_tools()
+    schema = next(t for t in tools if t.name == "get_room_state").inputSchema
+    detail = schema.get("properties", {}).get("detail", {})
+
+    assert detail.get("type") == "string"
+    assert "enum" not in detail, "a closed enum here is unreachable from a cached client"
+    assert "const" not in detail
