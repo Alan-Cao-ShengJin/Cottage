@@ -487,10 +487,24 @@ async def create_task(
     return {"ok": True, "task": task.model_dump(mode="json")}
 
 
+@router.post("/rooms/{room_id}/tasks/update")
 @router.patch("/rooms/{room_id}/tasks")
 async def update_task(
     room_id: str, participant: ParticipantDep, command: UpdateTaskCommand
 ) -> dict[str, Any]:
+    """Revise a task, or move it to `in_progress`.
+
+    Two paths for one operation, and the second is the one that matters. Every
+    sibling — claim, renew, release, complete, cancel, take-over, steer — is
+    `POST /tasks/<verb>`, and update alone was `PATCH /tasks`. A worker following
+    the pattern its neighbours set got `405 Method Not Allowed` while trying to
+    say it had started, so the board could not distinguish *held* from *being
+    worked* for any client that had not read the route table.
+
+    An API whose shape you cannot infer from its own siblings is a defect even
+    when every individual route is defensible. `PATCH` stays for callers already
+    using it; it is not the form to reach for.
+    """
     _assert_room(participant, room_id)
     task = await tasks.update(participant=participant, command=command)
     return {"ok": True, "task": task.model_dump(mode="json")}

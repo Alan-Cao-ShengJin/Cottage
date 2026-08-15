@@ -589,3 +589,114 @@ async def test_the_log_can_say_the_worker_was_told_and_when(make_room, join):
     issued_seq = rows[1]["seq"]
     ack_payload = db.loads(rows[2]["payload"], {})
     assert ack_payload["issued_at_seq"] == issued_seq == directive.created_seq
+
+
+# ---------------------------------------------------------------------------
+# Defects the first live stop test exposed (D-045)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_stopped_task_does_not_read_as_available(make_room, join):
+    """The compact board said `open`, which means "take me". It was refused.
+
+    Stop clears the claim, so `status` alone reads as available — and the compact
+    view omitted steering entirely. A human watching that board would have seen
+    the single most consequential state they can put a task into rendered as its
+    opposite.
+    """
+    from app.adapters.mcp import compact
+
+    room = await make_room()
+    admin = await _admin(room, join)
+    worker = await _worker(room, join)
+    claimed = await _claimed_task(worker)
+
+    await directives.issue(
+        participant=admin.participant,
+        command=IssueDirectiveCommand(
+            target_participant_id=worker.participant.id,
+            action=DirectiveAction.STOP,
+            task_id=claimed.id,
+            reason="prod freeze",
+        ),
+    )
+
+    snapshot = await projections.snapshot(room_id=room.room.id, recipient=admin.participant)
+    entry = next(t for t in compact.room_state(snapshot)["tasks"] if t["task_id"] == claimed.id)
+    assert entry["steering"] == "stopped"
+    assert entry["claimable"] is False
+    assert "prod freeze" in entry["steering_reason"]
+
+
+async def test_stopping_a_task_ends_its_work_declaration(make_room, join):
+    """A work card must not outlive the task it describes.
+
+    After the first live stop the board still read "Working: deploy the staging
+    environment" against a task nobody held and nobody could claim — asserting
+    activity that had been forbidden minutes earlier, which is worse than showing
+    nothing at all.
+    """
+    from app.core import work as work_service
+    from app.domain.commands import DeclareWorkCommand
+
+    room = await make_room()
+    admin = await _admin(room, join)
+    worker = await _worker(room, join)
+    claimed = await _claimed_task(worker)
+
+    declared = await work_service.declare(
+        participant=worker.participant,
+        command=DeclareWorkCommand(
+            headline="Working: deploy the staging environment", task_id=claimed.id
+        ),
+    )
+    assert declared.ended_at is None
+
+    await directives.issue(
+        participant=admin.participant,
+        command=IssueDirectiveCommand(
+            target_participant_id=worker.participant.id,
+            action=DirectiveAction.STOP,
+            task_id=claimed.id,
+            reason="prod freeze",
+        ),
+    )
+
+    row = await db.fetch_one("SELECT * FROM work_declarations WHERE id = ?", (declared.id,))
+    assert row["ended_at"] is not None
+    assert row["end_reason"] == "superseded"
+
+
+async def test_a_worker_can_say_it_has_started_over_http(make_room, join):
+    """A worker got 405 trying to report progress, and the route existed.
+
+    It was `PATCH /tasks` while every sibling — claim, renew, release, complete,
+    cancel, take-over, steer — is `POST /tasks/<verb>`. The worker followed the
+    pattern its neighbours set and was refused, so the board could not distinguish
+    *held* from *being worked* for any client that had not read the route table.
+
+    An API whose shape cannot be inferred from its own siblings is a defect even
+    when every individual route is defensible.
+    """
+    from app.api.routes import router
+
+    paths = {getattr(r, "path", "") for r in router.routes}
+    assert "/api/rooms/{room_id}/tasks/update" in paths
+
+    room = await make_room()
+    worker = await _worker(room, join)
+    claimed = await _claimed_task(worker)
+    assert claimed.claim is not None
+
+    from app.domain.commands import UpdateTaskCommand
+
+    updated = await tasks.update(
+        participant=worker.participant,
+        command=UpdateTaskCommand(
+            task_id=claimed.id,
+            fence=claimed.claim.fence,
+            in_progress=True,
+            connection_id=worker.connection_id,
+        ),
+    )
+    assert updated.status.value == "in_progress"

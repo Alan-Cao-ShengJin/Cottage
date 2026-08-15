@@ -35,6 +35,12 @@ class Scope(str, Enum):
     WORK_DECLARE = "work.declare"
     TASK_READ = "task.read"
     TASK_PROPOSE = "task.propose"
+    #: Report progress on work you hold: move it to `in_progress`, revise its
+    #: description or targets. Split out of `task.propose` because one scope was
+    #: doing two unrelated jobs — "may say how my own work is going" and "may
+    #: create tasks and hand them to other people" — which made the runtime
+    #: credential carry authority no unattended executor needs (D-048).
+    TASK_PROGRESS = "task.progress"
     TASK_CLAIM = "task.claim"
     STATE_READ = "state.read"
     STATE_WRITE = "state.write"
@@ -60,6 +66,7 @@ COLLABORATOR_SCOPES: tuple[Scope, ...] = (
     Scope.MESSAGE_POST,
     Scope.WORK_DECLARE,
     Scope.TASK_PROPOSE,
+    Scope.TASK_PROGRESS,
     Scope.TASK_CLAIM,
     Scope.STATE_WRITE,
     Scope.ARTIFACT_WRITE,
@@ -89,19 +96,17 @@ ROLE_RANK: dict[ParticipantRole, int] = {
 #: the room, invite anyone, or publish artifacts, so those stay with the human's
 #: own surface.
 #:
-#: `task.propose` is here for an uncomfortable reason worth stating rather than
-#: hiding: marking a task `in_progress` goes through `task.update`, which requires
-#: `task.propose` — so one scope currently means both "may report progress on my
-#: own work" and "may create tasks and hand them to other people". That is too
-#: coarse for this credential and the coupling should be split; until it is, the
-#: narrower need drags the broader grant along with it.
+#: `task.progress` rather than `task.propose`: reporting progress on work you hold
+#: and creating work for other people were one scope until this credential made the
+#: difference matter, and a least-privilege token that could hand out tasks would
+#: not have deserved the name.
 RUNTIME_SCOPES: frozenset[Scope] = frozenset(
     {
         Scope.ROOM_READ,
         Scope.EVENTS_SUBSCRIBE,
         Scope.TASK_READ,
         Scope.TASK_CLAIM,
-        Scope.TASK_PROPOSE,
+        Scope.TASK_PROGRESS,
         Scope.WORK_DECLARE,
         Scope.STATE_READ,
         Scope.MESSAGE_POST,

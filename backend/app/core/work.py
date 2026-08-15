@@ -282,6 +282,47 @@ async def end_all_open_tx(
     return events
 
 
+async def end_for_task_tx(
+    tx: db.Tx, *, room: Room, task_id: str, actor: Participant, reason: str
+) -> list[EventEnvelope]:
+    """End the declarations attached to a task that has just stopped or finished.
+
+    A work card outlives its task otherwise. The stop test left one reading
+    "Working: deploy the staging environment" against a task nobody held and
+    nobody could claim — the board asserting activity that had been forbidden
+    minutes earlier, which is worse than showing nothing.
+    """
+    rows = await tx.fetch_all(
+        "SELECT id, participant_id FROM work_declarations "
+        "WHERE room_id = ? AND task_id = ? AND ended_at IS NULL",
+        (room.id, task_id),
+    )
+    now = utcnow_iso()
+    events: list[EventEnvelope] = []
+    for row in rows:
+        await tx.execute(
+            "UPDATE work_declarations SET ended_at = ?, end_reason = ?, updated_at = ? "
+            "WHERE id = ? AND ended_at IS NULL",
+            (now, WorkEndReason.SUPERSEDED.value, now, row["id"]),
+        )
+        events.append(
+            await eventlog.append(
+                tx,
+                room_id=room.id,
+                type_=EventType.WORK_ENDED,
+                actor=actor_for(actor),
+                payload={
+                    "work_id": row["id"],
+                    "participant_id": row["participant_id"],
+                    "reason": WorkEndReason.SUPERSEDED.value,
+                    "detail": reason,
+                    "task_id": task_id,
+                },
+            )
+        )
+    return events
+
+
 async def mark_stale_declarations(room: Room) -> list[EventEnvelope]:
     """Emit `work.stale` for declarations whose owner stopped heartbeating.
 

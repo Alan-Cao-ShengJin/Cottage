@@ -903,6 +903,17 @@ async def apply_steering_tx(
         )
     ]
 
+    if steering in HALTED_STEERING:
+        # The work card outlives the task otherwise. After the first live stop the
+        # board still read "Working: deploy the staging environment" against a task
+        # nobody held and nobody could claim — asserting activity that had been
+        # forbidden minutes earlier.
+        from . import work as work_service
+
+        events += await work_service.end_for_task_tx(
+            tx, room=room, task_id=task_id, actor=participant, reason=f"steered {steering.value}"
+        )
+
     if steering is Steering.STOPPED and row["claim_lease_id"]:
         # `fence` is deliberately not reset, so the stopped worker's fence stays
         # permanently unusable and a late write from it cannot land.
@@ -1001,7 +1012,10 @@ async def _require_executor_or_dead(
 
 async def update(*, participant: Participant, command: UpdateTaskCommand) -> Task:
     room = await store.load_room(participant.room_id)
-    authz.require_scope(participant, Scope.TASK_PROPOSE)
+    # `task.progress`, not `task.propose`: revising work you hold is a different
+    # authority from creating work for someone else, and a runtime credential needs
+    # only the first (D-048).
+    authz.require_scope(participant, Scope.TASK_PROGRESS)
     authz.require_writable(room)
     privacy.inspect_content(command.title or "", command.description or "", command.targets or [])
 

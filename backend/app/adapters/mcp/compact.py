@@ -87,6 +87,15 @@ def task(row: dict[str, Any]) -> dict[str, Any]:
     }
     if row.get("priority"):
         out["priority"] = row["priority"]
+    # A stopped task has no claim, so `status` alone reads as `open` — available.
+    # It is not: claiming it is refused. Omitting this made the compact board say
+    # the opposite of the truth about the single most consequential state a human
+    # can put a task into (D-045).
+    steering = row.get("steering")
+    if steering and steering != "running":
+        out["steering"] = steering
+        out["steering_reason"] = row.get("steering_reason") or ""
+        out["claimable"] = False
     claim = row.get("claim")
     if claim:
         out["held_by"] = claim["participant_id"]
