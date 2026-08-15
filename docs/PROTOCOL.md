@@ -185,13 +185,6 @@ worker said anything about this specific work recently. A worker wedged mid-step
 busy for up to `work_progress_stale_after_seconds` — that value is the honest upper bound on how
 long the board can be wrong about it, and it is room policy so a room may demand to be told sooner.
 
-**The `stale` flag on a work card in the room snapshot is the same rule, not a second one**
-(D-061). The sweeper decides when `work.stale` fires; the projection decides what the board
-renders between sweeps; both call one function with the owner's presence in hand, so the two
-cutoffs cannot drift apart. A card that renders `stale` therefore always has a `work.stale`
-event behind it or is about to — the board never contradicts the log. Any future change to the
-window is made in that one place and both readers move together.
-
 ### Credentials that can join
 
 Four things authenticate a caller, and they are deliberately different in what else they can do:
