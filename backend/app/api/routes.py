@@ -259,7 +259,14 @@ async def connect(
     did not agree to.
     """
     _assert_room(participant, room_id)
-    negotiated = await presence.connect(participant=participant, command=command, transport="sse")
+    # The client's own declaration, defaulting to SSE for callers that predate the
+    # field. This route cannot observe which transport you will use, so asking is
+    # more honest than assuming (D-047).
+    negotiated = await presence.connect(
+        participant=participant,
+        command=command,
+        transport=command.transport or "sse",
+    )
     return {
         "ok": True,
         "connection_id": negotiated.connection.id,

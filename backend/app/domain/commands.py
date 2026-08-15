@@ -109,6 +109,20 @@ class ConnectCommand(CommandMeta):
     #: worker came back" from "something reused the name" (D-036, D-038). Declare
     #: it false if you cannot promise it. Ignored when no label is given.
     attachment_resumable: bool = True
+    #: How this client will actually receive events, so negotiation intersects
+    #: against the right transport (D-047).
+    #:
+    #: `POST /connect` cannot tell whether you are about to open the SSE stream or
+    #: poll `GET /events`, and it used to assume SSE for everyone. A polling worker
+    #: therefore lost `supports_poll` in the intersection, fell through to
+    #: `attended_pull`, and the room described a process with no human anywhere near
+    #: it as **attended** — the exact opposite of the truth, produced by a rule that
+    #: exists to keep declarations honest.
+    #:
+    #: Naming it is a promise like any other declaration here. A client that says
+    #: `sse` and never opens the stream simply stops being heard from, and heartbeat
+    #: grading takes it from there.
+    transport: str | None = None
 
 
 class HeartbeatCommand(CommandMeta):

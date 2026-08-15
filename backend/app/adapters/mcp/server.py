@@ -41,6 +41,7 @@ from ...core.errors import RoomError, Unauthenticated
 from ...db import database as db
 from ...domain.capabilities import Capability, HostClass
 from ...domain.commands import (
+    AcknowledgeDirectiveCommand,
     ClaimTaskCommand,
     CompleteTaskCommand,
     ConnectCommand,
@@ -48,6 +49,7 @@ from ...domain.commands import (
     CreateTaskCommand,
     DeclareWorkCommand,
     EndWorkCommand,
+    IssueDirectiveCommand,
     JoinRoomCommand,
     LeaveRoomCommand,
     PostMessageCommand,
@@ -55,6 +57,7 @@ from ...domain.commands import (
     RenewClaimCommand,
     UpdateWorkCommand,
 )
+from ...domain.directive import DirectiveAction
 from ...domain.disclosure import Audience, Disclosure
 from ...domain.room import Participant, PrivacyClass, RoomVisibility
 from ...domain.work import WorkStatus
@@ -1151,5 +1154,91 @@ async def post_message(
             ),
         )
         return {"ok": True, **result}
+    except RoomError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+async def steer_participant(
+    target_participant_id: str,
+    action: str,
+    reason: str,
+    task_id: str | None = None,
+    priority: int | None = None,
+    participant_token: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Direct another participant's work without taking it over.
+
+    `action` is `pause`, `stop`, `resume`, `reprioritize`, or `input`. Everything but
+    `input` needs a `task_id`, because pausing "in general" is not something the task
+    layer can enforce — and an unenforceable directive is a message wearing a uniform.
+
+    **The effect is already applied when this returns.** It does not wait for the
+    target to notice, because a stop that waited for acknowledgement would depend on
+    the cooperation of whatever you are trying to stop. The target discovers it at
+    its next read, cannot progress or re-claim in the meantime, and acknowledges
+    separately — so the room can say afterwards exactly when it was told and when it
+    complied.
+
+    You need `room.admin`. Being a human principal is not the same thing: the room
+    can attribute an action to your identity, but it cannot verify a person is
+    present when it happens, so authority is a grant rather than an inference.
+
+    `input` is the exception that waits: there is no room state to halt, so nothing
+    applies until the target consumes it.
+    """
+    try:
+        participant = await _participant(ctx, participant_token)
+        directive = await directives.issue(
+            participant=participant,
+            command=IssueDirectiveCommand(
+                target_participant_id=target_participant_id,
+                action=DirectiveAction(action),
+                task_id=task_id,
+                reason=reason,
+                priority=priority,
+            ),
+        )
+        return {"ok": True, "directive": directive.model_dump(mode="json")}
+    except ValueError:
+        return {
+            "ok": False,
+            "error": "invalid_command",
+            "message": (
+                f"Unknown action {action!r}. Use pause, stop, resume, reprioritize, or input."
+            ),
+        }
+    except RoomError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+async def acknowledge_directive(
+    directive_id: str,
+    note: str = "",
+    rejected: bool = False,
+    participant_token: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Record that you saw a directive — and, for `input`, that you consumed it.
+
+    Acknowledge *after* complying, not before: this is evidence that you noticed, so
+    sending it first makes it evidence of nothing. It never re-applies or undoes an
+    effect; acknowledging a stop does not re-stop anything.
+
+    `rejected` is available because an agent may decline. The room's job is to make
+    the refusal visible, not to argue with it — and for a control action the effect
+    has already landed regardless, so declining records an opinion rather than a veto.
+    """
+    try:
+        participant = await _participant(ctx, participant_token)
+        directive = await directives.acknowledge(
+            participant=participant,
+            command=AcknowledgeDirectiveCommand(
+                directive_id=directive_id, note=note, rejected=rejected
+            ),
+        )
+        return {"ok": True, "directive": directive.model_dump(mode="json")}
     except RoomError as exc:
         return _err(exc)

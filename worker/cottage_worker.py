@@ -167,6 +167,11 @@ class Worker:
             {
                 "host_class": "persistent_local",
                 "capabilities": CAPABILITIES,
+                # This loop pulls; it does not hold an SSE stream open. Saying so is
+                # what makes the room grade it `live_poll` and unattended instead of
+                # `attended_pull`, which would have been a lie about a process with
+                # no human anywhere near it.
+                "transport": "long_poll",
                 "attachment_label": self.label,
                 "attachment_resumable": True,
                 "since_seq": self.cursor,

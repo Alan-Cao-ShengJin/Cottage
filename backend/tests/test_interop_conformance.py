@@ -33,15 +33,17 @@ from app.adapters.mcp import server as mcp_tools
 from app.core import presence, projections, rooms, store, tasks
 from app.core import work as work_service
 from app.core.errors import RoomError
+from app.domain.capabilities import Capability, DeliveryMode, HostClass
 from app.domain.commands import (
     ClaimTaskCommand,
     CompleteTaskCommand,
+    ConnectCommand,
     CreateTaskCommand,
     DeclareWorkCommand,
     JoinRoomCommand,
     UpdateTaskCommand,
 )
-from app.domain.room import RoomPolicy
+from app.domain.room import Liveness, RoomPolicy
 from app.domain.task import TaskStatus
 
 
@@ -583,3 +585,44 @@ async def test_the_room_never_invents_liveness_a_host_did_not_declare(mixed_room
     )
     me = next(p for p in snapshot["participants"] if p["id"] == mixed_room.push.participant.id)
     assert me["presence"]["runtime"]["delivery_mode"] == "push"
+
+
+async def test_a_polling_worker_is_not_described_as_attended(make_room, join):
+    """The room must not call an unattended process attended (D-047).
+
+    `POST /connect` cannot observe whether a client will open the SSE stream or poll
+    `GET /events`, and it assumed SSE for everyone. A polling worker lost
+    `supports_poll` in the intersection, fell through to `attended_pull`, and the
+    board described a process with no human near it as attended — produced by the
+    very rule that exists to keep declarations honest.
+
+    Caught on the first cross-vendor proof, by the other participant being right to
+    ask for evidence.
+    """
+    room = await make_room()
+    worker = await join(room, display_name="Worker", connect=False)
+
+    negotiated = await presence.connect(
+        participant=worker.participant,
+        command=ConnectCommand(
+            capabilities=[
+                Capability.CAN_RECEIVE_EVENTS,
+                Capability.SUPPORTS_POLL,
+                Capability.CAN_INITIATE_FOLLOWUP,
+                Capability.CAN_EXECUTE_BACKGROUND,
+                Capability.SUPPORTS_TOOLS,
+            ],
+            host_class=HostClass.PERSISTENT_LOCAL,
+            transport="long_poll",
+            attachment_label="worker-main",
+        ),
+        transport="long_poll",
+    )
+
+    assert Capability.SUPPORTS_POLL in negotiated.connection.negotiated_capabilities
+    assert negotiated.runtime.delivery_mode is DeliveryMode.LONG_POLL
+    assert negotiated.runtime.lease_renewable_unattended, "nobody has to be watching"
+    assert negotiated.runtime.may_claim
+
+    view = (await presence.presence_for_room(room.room))[worker.participant.id]
+    assert view.liveness is Liveness.LIVE_POLL

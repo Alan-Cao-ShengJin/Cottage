@@ -222,7 +222,13 @@ async def connect(
     *, participant: Participant, command: ConnectCommand, transport: str
 ) -> NegotiatedConnection:
     """Open a connection. Reads survive a closed room, so this does not require
-    writability — a participant may still attach to a closed room to read history."""
+    writability — a participant may still attach to a closed room to read history.
+
+    `transport` is what the caller will genuinely use, and negotiation intersects
+    against it. An unknown transport name yields the empty capability set rather
+    than a permissive default: a typo must cost a client its capabilities, not
+    silently grant it someone else's.
+    """
     room = await store.load_room(participant.room_id)
     authz.require_active(participant)
 
