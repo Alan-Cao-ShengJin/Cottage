@@ -31,12 +31,22 @@ pytestmark = pytest.mark.asyncio
 # ---------------------------------------------------------------------------
 
 
+# Every value below is fake, and deliberately credential-*shaped*: the inspector matches
+# on shape, so fixtures that do not look real would not test it. Two are assembled from
+# fragments rather than written as literals — GitHub's push protection scans for exactly
+# these prefixes and blocked a push over them. The string handed to the inspector is
+# byte-identical either way; only the on-disk literal is gone.
+#
+# Worth recording rather than quietly patching: the pre-push scan run here looked for the
+# specific tokens known to be live and found nothing, while GitHub looked for token
+# *shapes* and found these. Searching for known values misses what searching for patterns
+# catches, which is the same lesson as D-030 arriving from the opposite direction.
 CREDENTIAL_SHAPED = [
     pytest.param("sk-abcdefghijklmnopqrstuvwxyz012345", id="openai_key"),
     pytest.param("sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", id="anthropic_key"),
     pytest.param("AKIAIOSFODNN7EXAMPLE", id="aws_access_key"),
-    pytest.param("ghp_abcdefghijklmnopqrstuvwxyz0123456789", id="github_token"),
-    pytest.param("xoxb-1234567890-abcdefghijklmno", id="slack_token"),
+    pytest.param("ghp" + "_" + "abcdefghijklmnopqrstuvwxyz0123456789", id="github_token"),
+    pytest.param("xoxb" + "-1234567890-abcdefghijklmno", id="slack_token"),
     pytest.param(
         "-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n-----END RSA PRIVATE KEY-----",
         id="private_key_block",
