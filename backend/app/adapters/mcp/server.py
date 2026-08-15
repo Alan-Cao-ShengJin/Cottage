@@ -645,6 +645,7 @@ async def leave_room(
 
 @mcp.tool()
 async def resume_here(
+    since_seq: int | None = None,
     participant_token: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
@@ -662,13 +663,17 @@ async def resume_here(
     could. If you need that, ask your human or read the room's messages.
 
     `needs_you` counts the things actually waiting on you, so zero means nothing is
-    waiting rather than nothing loaded.
+    waiting rather than nothing loaded. Pass `since_seq` — the last cursor you saw — to
+    have messages addressed to you counted too; without it they are returned but not
+    counted, because this server keeps no read state and will not pretend to.
     """
     try:
         participant = await _participant(ctx, participant_token)
         return {
             "ok": True,
-            **await projections.hydrate(room_id=participant.room_id, recipient=participant),
+            **await projections.hydrate(
+                room_id=participant.room_id, recipient=participant, since_seq=since_seq
+            ),
         }
     except RoomError as exc:
         return _err(exc)
@@ -678,6 +683,7 @@ async def resume_here(
 async def get_room_state(
     detail: str = "compact",
     max_messages: int = compact.DEFAULT_MAX_MESSAGES,
+    since_seq: int | None = None,
     participant_token: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
@@ -707,7 +713,9 @@ async def get_room_state(
         if detail == "resume":
             return {
                 "ok": True,
-                **await projections.hydrate(room_id=participant.room_id, recipient=participant),
+                **await projections.hydrate(
+                    room_id=participant.room_id, recipient=participant, since_seq=since_seq
+                ),
             }
         snapshot = await projections.snapshot(room_id=participant.room_id, recipient=participant)
         if detail == "full":

@@ -124,8 +124,28 @@ async def test_what_is_waiting_on_you_is_counted_not_inferred(room_with_two):
     state = await projections.hydrate(room_id=room.room.id, recipient=worker.participant)
 
     assert [p["task_id"] for p in state["proposed_to_you"]] == [proposed.id]
-    assert [m["body"] for m in state["addressed_to_you"]] == ["Only for you"]
-    assert state["needs_you"] == 2
+    assert [m["body"] for m in state["recent_addressed_to_you"]] == ["Only for you"]
+
+    # Without a cursor the message is returned but NOT counted: the room keeps no read
+    # state, so counting it would mean reporting the same message as waiting forever.
+    assert state["needs_you"] == 1
+    assert state["addressed_since_cursor"] is None
+
+    # With the cursor the caller last saw, the message counts — and once the caller has
+    # seen it, it stops counting. That is the whole difference between "recent" and
+    # "unread", and it is the caller's own cursor doing the work.
+    message_seq = state["recent_addressed_to_you"][0]["seq"]
+    before = await projections.hydrate(
+        room_id=room.room.id, recipient=worker.participant, since_seq=message_seq - 1
+    )
+    assert before["addressed_since_cursor"] == 1
+    assert before["needs_you"] == 2
+
+    after = await projections.hydrate(
+        room_id=room.room.id, recipient=worker.participant, since_seq=message_seq
+    )
+    assert after["addressed_since_cursor"] == 0
+    assert after["needs_you"] == 1
 
     # The peer who sent both is waiting on nothing.
     peer_state = await projections.hydrate(room_id=room.room.id, recipient=peer.participant)
@@ -151,7 +171,7 @@ async def test_hydration_does_not_claim_to_be_conversation_history(room_with_two
     assert state["is_conversation_history"] is False
     # Room-wide conversation is not in here. It is in the room, deliberately.
     assert "messages" not in state
-    assert state["addressed_to_you"] == []
+    assert state["recent_addressed_to_you"] == []
 
 
 async def test_hydration_is_reachable_without_discovering_a_new_tool(room_with_two):

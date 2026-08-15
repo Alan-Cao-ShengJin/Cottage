@@ -21,7 +21,7 @@ from app.domain.commands import (
 )
 from app.domain.disclosure import Audience, Disclosure
 from app.domain.identity import TrustTier
-from app.domain.room import PrivacyClass, RoomVisibility
+from app.domain.room import PrivacyClass, RoomPolicy, RoomVisibility
 
 pytestmark = pytest.mark.asyncio
 
@@ -375,3 +375,28 @@ async def test_a_misspelled_addressee_is_rejected_rather_than_published(make_roo
         (room.room.id,),
     )
     assert db.str_list(row["restricted_to_participant_ids"])
+
+
+async def test_a_misspelled_field_inside_a_nested_disclosure_is_rejected_too():
+    """`extra="forbid"` on CommandMeta does not reach nested models (D-042).
+
+    Pydantic config is per class, not per object graph, so the command-level fix left
+    the level below it untouched — and that level is the one that decides who may see
+    the content. Before this, `Disclosure(privacy_clas="org_internal")` produced
+    `room_public` and published to the whole room something the author had classified as
+    internal: the identical silent downgrade, one layer down, found by review rather
+    than by the suite that had just been written for the layer above.
+    """
+    with pytest.raises(ValidationError):
+        Disclosure(privacy_clas="org_internal")
+
+    with pytest.raises(ValidationError):
+        PostMessageCommand(
+            body="internal only",
+            disclosure={"audience": "participant", "to_participant_i": "par_typo"},
+        )
+
+    # RoomPolicy is inbound on CreateRoomCommand, where a dropped field silently
+    # selects a different policy than the one asked for.
+    with pytest.raises(ValidationError):
+        RoomPolicy(allow_attended_claim=True)

@@ -297,10 +297,14 @@ async def get_snapshot(room_id: str, participant: ParticipantDep) -> dict[str, A
 
 
 @router.get("/rooms/{room_id}/hydrate")
-async def get_hydration(room_id: str, participant: ParticipantDep) -> dict[str, Any]:
+async def get_hydration(
+    room_id: str,
+    participant: ParticipantDep,
+    since_seq: int | None = Query(default=None, ge=0),
+) -> dict[str, Any]:
     _assert_room(participant, room_id)
     authz.require_scope(participant, Scope.ROOM_READ)
-    return await projections.hydrate(room_id=room_id, recipient=participant)
+    return await projections.hydrate(room_id=room_id, recipient=participant, since_seq=since_seq)
 
 
 @router.get("/rooms/{room_id}/events")

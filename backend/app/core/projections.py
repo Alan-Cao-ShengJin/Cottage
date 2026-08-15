@@ -203,7 +203,9 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
     }
 
 
-async def hydrate(*, room_id: str, recipient: Participant) -> dict[str, Any]:
+async def hydrate(
+    *, room_id: str, recipient: Participant, since_seq: int | None = None
+) -> dict[str, Any]:
     """What *this* participant needs to resume, rather than everything about the room.
 
     A control surface arrives cold. `snapshot` answers "what is going on here" and
@@ -216,9 +218,21 @@ async def hydrate(*, room_id: str, recipient: Participant) -> dict[str, Any]:
     presented as though it could: that is what continuity notes are for, and shipping
     this first does not stand in for them (D-031).
 
+    Pass `since_seq` — the cursor you last saw — to have messages addressed to you
+    counted as waiting. Without it they are returned but not counted, because the room
+    stores no read state and inventing one here would be a claim the data cannot
+    support.
+
     Everything here is derived from the event log and filtered through the same
     visibility rules as every other projection, so it discloses nothing a snapshot
     would not.
+
+    On the cursor: `event_seq` is read before the content in the same read
+    transaction, so a consumer cannot *miss* an event — anything committed after the
+    cursor is replayed from it. Under an engine weaker than SQLite's snapshot reads a
+    later row may appear alongside an earlier cursor, so the guarantee is **no missed
+    event, with replay possible**; consumers must be idempotent, which the fence and
+    `command_id` receipts already require of them.
     """
     async with db.transaction(write=False) as tx:
         room = await store.load_room(room_id, tx=tx)
@@ -263,19 +277,24 @@ async def hydrate(*, room_id: str, recipient: Participant) -> dict[str, Any]:
             }
         )
 
+    # Fails *closed* on a dangling task reference. The earlier form admitted the
+    # proposal whenever its task was missing, which let a free-form `note` through with
+    # no visibility check at all — the wrong direction for a privacy projection, even
+    # though a foreign key should make the case unreachable. A privacy filter that
+    # cannot evaluate its subject must omit it, not wave it through.
     proposals = [
         {
             "proposal_id": row["id"],
             "task_id": row["task_id"],
-            "title": by_id[row["task_id"]].title if row["task_id"] in by_id else "",
+            "title": by_id[row["task_id"]].title,
             "proposed_by_participant_id": row["proposed_by_participant_id"],
             "note": row["note"],
             "created_at": row["created_at"],
             "expires_at": row["expires_at"],
         }
         for row in proposal_rows
-        if row["task_id"] not in by_id
-        or _visible_record(
+        if row["task_id"] in by_id
+        and _visible_record(
             recipient=recipient,
             room=room,
             privacy_class=by_id[row["task_id"]].privacy_class,
@@ -300,6 +319,14 @@ async def hydrate(*, room_id: str, recipient: Participant) -> dict[str, Any]:
         if c.status is ConflictStatus.OPEN and recipient.id in c.participant_ids
     ]
 
+    # Messages count toward `needs_you` only when the caller supplied the cursor it
+    # last saw. Without one there is no way to know what it has already read, and the
+    # earlier version counted every recent addressed message forever — so a single
+    # message from last week kept reporting work waiting until it aged out of the
+    # window. The room stores no read state and this does not invent any: the cursor
+    # is a fact the returning surface already holds (D-042).
+    unread = [m for m in addressed if since_seq is not None and m["seq"] > since_seq]
+
     return {
         "type": "hydration",
         "protocol": "arp/1",
@@ -321,11 +348,18 @@ async def hydrate(*, room_id: str, recipient: Participant) -> dict[str, Any]:
         "your_work": [store.to_work(r).model_dump(mode="json") for r in work_rows],
         "your_leases": leases,
         "proposed_to_you": proposals,
-        "addressed_to_you": addressed,
+        # Named for what it is. These are the most recent messages addressed to you,
+        # not your unread ones — the room keeps no read state, so calling them unread
+        # would be a claim the data cannot support.
+        "recent_addressed_to_you": addressed,
+        "addressed_since_cursor": len(unread) if since_seq is not None else None,
         "blocking_you": involving_me,
         # Said explicitly rather than left to be inferred from empty lists, because a
         # cold surface has no way to tell "nothing is waiting" from "nothing loaded".
-        "needs_you": len(proposals) + len(addressed) + len(involving_me),
+        # Counts only objectively unresolved state, plus messages newer than a cursor
+        # the caller supplied. An open proposal and an open conflict are waiting on you
+        # by their own status; a message is only waiting if you have not seen it.
+        "needs_you": len(proposals) + len(involving_me) + len(unread),
         "is_conversation_history": False,
     }
 

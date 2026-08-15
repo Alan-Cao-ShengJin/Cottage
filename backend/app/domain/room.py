@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .capabilities import (
     DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
@@ -163,12 +163,16 @@ STALE_AFTER_INTERVALS = 3
 
 
 class RetentionPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     ttl_seconds: int | None = None
     purge_on_close: bool = False
     max_event_age_days: int | None = None
 
 
 class RoomPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     #: May a participant that cannot act unattended hold an exclusive lease? Off by
     #: default: nobody can renew such a lease if its human walks away mid-task, so
     #: the room would stall until expiry. A room can opt in knowingly.

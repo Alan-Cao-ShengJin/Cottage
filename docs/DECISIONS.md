@@ -1962,3 +1962,65 @@ objected.
 So the test asserts the **published** schema rather than the signature: `detail` is typed
 `string`, carries no `enum`, and carries no `const`. A property that can be destroyed by something
 that looks like a cleanup needs a test that names the cleanup.
+
+---
+
+## D-042 — Three defects from the first outside code review
+
+_2026-08-15. The ChatGPT participant reviewed the relayed hydration commits and reported four
+findings. Three were real._
+
+### 1. `needs_you` counted messages it had no way to call unread
+
+`hydrate` selected the most recent messages addressed to the recipient and counted every one
+toward `needs_you`. There is no read state anywhere in the room, so a single direct message kept
+reporting work waiting on every future cold start until it aged out of the window — and the
+surrounding prose called them *"unread messages addressed to you"*, which the code could not
+support.
+
+Fixed without inventing server-side read semantics, which would be new state to store, replicate
+and get wrong. The field is renamed to `recent_addressed_to_you`, and `needs_you` counts only
+objectively unresolved things — open proposals, open conflicts — plus messages newer than a
+`since_seq` **the caller supplies**. A returning surface already holds that cursor; it is the one
+party that knows what it has seen. `addressed_since_cursor` is `null` when no cursor was given,
+which is honest about not knowing rather than guessing zero.
+
+### 2. Proposal visibility failed open
+
+`if row["task_id"] not in by_id or _visible_record(...)` admitted a proposal — including its
+free-form `note` — whenever the referenced task was missing, with no privacy check at all. A
+foreign key should make that unreachable, which is exactly why it survived reading. **A privacy
+filter that cannot evaluate its subject must omit it, not wave it through.** Now `and`.
+
+### 3. `extra="forbid"` did not reach nested models
+
+The command-level fix was described as covering "every command model". Pydantic config is per
+class, not per object graph, so it stopped at the top level — and the level below is the one that
+decides who may see the content:
+
+    Disclosure(privacy_clas="org_internal")  ->  privacy_class = room_public
+
+The identical silent downgrade, one layer down, in the model where it costs most. Now
+`extra="forbid"` on `Disclosure`, `Provenance`, `RoomPolicy` and `RetentionPolicy`, with a
+regression test for each shape.
+
+The lesson is about the fix rather than the bug: a correction applied at the layer where the
+defect was noticed is not the same as a correction applied wherever the defect exists, and this
+one was reported as if it were.
+
+### 4. Refuted: expired leases in `your_leases`
+
+The review expected `hydrate` to report an expired-but-unreaped claim as held, since it filters on
+ownership rather than expiry. It does not. `store.to_task` applies expiry on every read —
+`if row["claim_lease_id"] and not is_past(row["claim_expires_at"])` — so an expired claim is
+already `None` by the time the projection sees it, and a lapsed task reads as `open`. The
+reviewer's instinct about the hazard was right; the code happens to close it a layer earlier than
+it looked.
+
+### And a wording correction to the cursor guarantee
+
+The docstring implied one snapshot across engines. `event_seq` is read before the content in the
+same read transaction, so an event cannot be *missed* — but under an isolation level weaker than
+SQLite's snapshot reads, a later row may appear alongside an earlier cursor. The guarantee is now
+stated as **no missed event, with replay possible**, and consumers must be idempotent — which the
+fence and `command_id` receipts already require of them.

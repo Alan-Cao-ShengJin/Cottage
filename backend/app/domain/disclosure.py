@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .room import PrivacyClass
 
@@ -39,7 +39,18 @@ class Audience(str, Enum):
 
 
 class Disclosure(BaseModel):
-    """The author's explicit statement about content it is contributing."""
+    """The author's explicit statement about content it is contributing.
+
+    Unknown fields are rejected. `extra="forbid"` on `CommandMeta` does **not** reach
+    here — Pydantic config is per class, not per object graph — so before this line a
+    misspelling one level down was still silently dropped: `Disclosure(privacy_clas=
+    "org_internal")` produced `room_public` and published to the whole room content the
+    author had classified as internal. That is the same defect as the command-level one
+    (D-042), and this is the model where it costs the most, because every field on it is
+    a statement about who may see something.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     privacy_class: PrivacyClass = PrivacyClass.ROOM_PUBLIC
     audience: Audience = Audience.ROOM
@@ -72,6 +83,8 @@ class Provenance(BaseModel):
     such — attribution is the control here, not verification (`docs/SECURITY.md`
     §1).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     asserted_by_participant_id: str
     asserted_at: str

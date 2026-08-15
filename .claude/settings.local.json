@@ -7,7 +7,10 @@
       "Bash(python -)",
       "Bash(backend/.venv/Scripts/python.exe -m pytest backend/tests/test_hydration.py -q)",
       "Bash(backend/.venv/Scripts/python.exe -m ruff format backend)",
-      "Bash(backend/.venv/Scripts/python.exe scripts/check.py)"
+      "Bash(backend/.venv/Scripts/python.exe scripts/check.py)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)"
     ],
     "additionalDirectories": [
       "D:\\Code\\Collab\\backend\\.venv\\Lib\\site-packages\\uvicorn",
