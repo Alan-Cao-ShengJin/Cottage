@@ -21,7 +21,7 @@ from typing import Any
 from ..db import database as db
 from ..domain.identity import IdentityProvenance
 from ..domain.room import Participant, PrivacyClass, Room, Scope
-from ..domain.task import ConflictStatus
+from ..domain.task import ConflictStatus, Steering, TaskStatus
 from ..util import from_iso, utcnow
 from . import authz, eventlog, presence, privacy, store
 from . import directives as directives_svc
@@ -33,6 +33,9 @@ MAX_SNAPSHOT_MESSAGES = 200
 #: Smaller than the snapshot cap on purpose: hydration is a resume payload for one
 #: participant, and every line of it is spent context for the model reading it.
 MAX_HYDRATION_MESSAGES = 25
+
+#: Enough for a worker to choose from; not the board.
+MAX_CLAIMABLE = 25
 
 
 def _visible_record(
@@ -320,6 +323,26 @@ async def hydrate(
             }
         )
 
+    # What this participant could pick up right now. Without it a worker looking for
+    # work has to pull the whole board every cycle — which is the cost hydration
+    # exists to avoid, so omitting it would have made the cheap read useless to the
+    # one caller that reads most often. Steering-halted tasks are excluded because
+    # claiming them is refused anyway, and offering work that cannot be taken is a
+    # board that lies (D-045).
+    claimable = [
+        {
+            "task_id": task.id,
+            "title": task.title,
+            "priority": task.priority,
+            "targets": task.targets,
+            "created_at": task.created_at,
+        }
+        for task in sorted(tasks, key=lambda t: (-t.priority, t.created_at))
+        if task.claim is None
+        and task.status is TaskStatus.OPEN
+        and task.steering is Steering.RUNNING
+    ][:MAX_CLAIMABLE]
+
     # Fails *closed* on a dangling task reference. The earlier form admitted the
     # proposal whenever its task was missing, which let a free-form `note` through with
     # no visibility check at all — the wrong direction for a privacy projection, even
@@ -388,6 +411,7 @@ async def hydrate(
         "cursor": cursor,
         "your_work": [store.to_work(r).model_dump(mode="json") for r in work_rows],
         "your_leases": leases,
+        "claimable": claimable,
         "proposed_to_you": proposals,
         # Named for what it is. These are the most recent messages addressed to you,
         # not your unread ones — the room keeps no read state, so calling them unread

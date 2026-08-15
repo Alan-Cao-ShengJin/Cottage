@@ -15,7 +15,8 @@
       "Bash(cd \"D:/Code/Collab\" && sed -n '/async def _append_presence_changed/,/^async def presence_for_room/p' backend/app/core/presence.py | head -45)",
       "Bash(cd \"D:/Code/Collab\" && sed -n '/^async def renew/,/^async def release/p' backend/app/core/tasks.py | head -75 && echo \"=== TaskStatus ===\" && grep -n \"class TaskStatus\" -A 15 backend/app/domain/task.py)",
       "Bash(cd \"D:/Code/Collab\" && sed -n '/^    return {/,/^        \"your_work\"/p' backend/app/core/projections.py | tail -25)",
-      "Bash(cd \"D:/Code/Collab\" && sed -n '/^from ..domain.commands import/,/^\\)/p' backend/app/api/routes.py && grep -n \"SetParticipantRoleCommand\" backend/app/api/routes.py backend/app/core/rooms.py | head)"
+      "Bash(cd \"D:/Code/Collab\" && sed -n '/^from ..domain.commands import/,/^\\)/p' backend/app/api/routes.py && grep -n \"SetParticipantRoleCommand\" backend/app/api/routes.py backend/app/core/rooms.py | head)",
+      "Bash(cd \"D:/Code/Collab\" && grep -n \"your_leases\\\\|leases = \\\\|work_rows\" backend/app/core/projections.py | head -12 && sed -n '/^    async with db.transaction\\(write=False\\) as tx:/,/^        proposals/p' backend/app/core/projections.py | sed -n '1,60p' | tail -40)"
     ],
     "additionalDirectories": [
       "D:\\Code\\Collab\\backend\\.venv\\Lib\\site-packages\\uvicorn",
