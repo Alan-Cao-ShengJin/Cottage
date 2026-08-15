@@ -96,6 +96,19 @@ class Worker:
     poll_seconds: int = 20
     max_cycles: int | None = None
     handler_name: str = "notes"
+    #: Whether to take work nobody addressed to it.
+    #:
+    #: Defaults to **false**, and that default was earned the hard way: on its first
+    #: live run this worker took the highest-priority open task on the board — a
+    #: long-running architecture task another participant was steering — and closed
+    #: it with a canned result. Nothing malfunctioned. "Claim the best open task" is
+    #: simply the wrong policy for an unattended process, because `open` means
+    #: nobody holds it, never that it is anybody's to take.
+    #:
+    #: With this false the worker takes only work *proposed to it*, which is the
+    #: room's existing assignment mechanism and an explicit act by another
+    #: participant. Turning it on is a deliberate choice for a room that is a queue.
+    take_unassigned: bool = False
 
     cursor: int = 0
     connection_id: str = ""
@@ -292,10 +305,31 @@ class Worker:
             return
 
     def take_work(self, state: dict[str, Any]) -> None:
+        """Pick up work that is *for* this worker.
+
+        Proposals first, and by default only proposals: a proposal is another
+        participant deliberately handing this worker a job, where an open task is
+        merely one nobody currently holds. Treating the second as an invitation is
+        how an unattended process quietly empties a shared board.
+        """
+        offered = [
+            {
+                "task_id": p["task_id"],
+                "title": p.get("title", ""),
+                "priority": 0,
+                "targets": [],
+            }
+            for p in state.get("proposed_to_you", []) or []
+        ]
+        pool = (
+            offered
+            if not self.take_unassigned
+            else offered + list(state.get("claimable", []) or [])
+        )
         candidates = [
             task
             for task in sorted(
-                state.get("claimable", []) or [],
+                pool,
                 key=lambda t: (-int(t.get("priority") or 0), t.get("created_at", "")),
             )
             if task["task_id"] not in self.forbidden
@@ -316,7 +350,11 @@ class Worker:
                 # than rediscovering it every cycle.
                 self.forbidden.add(task["task_id"])
                 return
-            if exc.code == "not_found":
+            if exc.code in {"not_found", "invalid_command"}:
+                # Offered work that cannot be taken — already finished, or gone.
+                # Remembered rather than retried: a loop that re-attempts the same
+                # refusal every cycle is busy without being useful.
+                self.forbidden.add(task["task_id"])
                 return
             if exc.code in {"lease_conflict", "executor_conflict"}:
                 log.info("someone else has %s", task["task_id"])
@@ -504,6 +542,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--poll-seconds", type=int, default=20)
     parser.add_argument("--max-cycles", type=int, default=None)
     parser.add_argument("--handler", default="notes", choices=sorted(HANDLERS))
+    parser.add_argument(
+        "--take-unassigned",
+        action="store_true",
+        help=(
+            "Also claim open tasks nobody proposed to this worker. Off by default: "
+            "'open' means unheld, not unowned."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -524,6 +570,7 @@ def main(argv: list[str] | None = None) -> int:
         poll_seconds=args.poll_seconds,
         max_cycles=args.max_cycles,
         handler_name=args.handler,
+        take_unassigned=args.take_unassigned,
     )
 
     def stop(*_: Any) -> None:

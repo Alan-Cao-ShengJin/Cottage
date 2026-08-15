@@ -21,7 +21,7 @@ from typing import Any
 from ..db import database as db
 from ..domain.identity import IdentityProvenance
 from ..domain.room import Participant, PrivacyClass, Room, Scope
-from ..domain.task import ConflictStatus, Steering, TaskStatus
+from ..domain.task import TERMINAL_TASK_STATUSES, ConflictStatus, Steering, TaskStatus
 from ..util import from_iso, utcnow
 from . import authz, eventlog, presence, privacy, store
 from . import directives as directives_svc
@@ -360,6 +360,12 @@ async def hydrate(
         }
         for row in proposal_rows
         if row["task_id"] in by_id
+        # A proposal outlives its task: completing or cancelling a task does not
+        # resolve the offers pointing at it, so an unresolved proposal can name work
+        # that is already finished. Offering it is worse than useless — a worker that
+        # accepts is refused, retries, and makes no progress while looking busy.
+        # Found by an unattended worker doing exactly that, live.
+        and by_id[row["task_id"]].status not in TERMINAL_TASK_STATUSES
         and _visible_record(
             recipient=recipient,
             room=room,

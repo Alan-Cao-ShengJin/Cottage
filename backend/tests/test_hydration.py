@@ -17,6 +17,7 @@ from app.core import work as work_service
 from app.core.errors import RoomError
 from app.db import database as db
 from app.domain.commands import (
+    CancelTaskCommand,
     ClaimTaskCommand,
     CreateTaskCommand,
     DeclareWorkCommand,
@@ -310,3 +311,34 @@ async def test_a_cursor_below_the_retained_floor_admits_it_does_not_know(room_wi
     # Everything else still arrives: this is a resume payload, not a refusal.
     assert state["you"]["participant_id"] == worker.participant.id
     assert state["cursor"] == head
+
+
+async def test_a_proposal_whose_task_is_finished_is_not_offered(make_room, join):
+    """Proposals outlive their tasks, so an unresolved one can name finished work.
+
+    Found live: an unattended worker accepted such a proposal, was refused with
+    `invalid_command`, retried, and made no progress while looking busy. Offering
+    unacceptable work is worse than offering none — the board says there is
+    something to do and the room refuses every attempt to do it.
+    """
+    room = await make_room()
+    worker = await join(room, display_name="Worker")
+
+    task = await tasks.create(
+        participant=room.owner,
+        command=CreateTaskCommand(
+            title="Already handled",
+            propose_to_participant_id=worker.participant.id,
+        ),
+    )
+    hydrated = await projections.hydrate(room_id=room.room.id, recipient=worker.participant)
+    assert [p["task_id"] for p in hydrated["proposed_to_you"]] == [task.id]
+
+    await tasks.cancel(
+        participant=room.owner,
+        command=CancelTaskCommand(task_id=task.id, reason="handled elsewhere"),
+    )
+
+    after = await projections.hydrate(room_id=room.room.id, recipient=worker.participant)
+    assert after["proposed_to_you"] == []
+    assert after["needs_you"] == 0, "a dead proposal must not keep counting as waiting"
