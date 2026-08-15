@@ -173,6 +173,115 @@ reachable via a new `no_progress` reason bounded by `work_progress_stale_after_s
 `core/projections`, the additive-column migration, `docs/PROTOCOL.md` §3, and
 `worker/cottage_worker`.
 
+Note the boundary with **M2.1c** below, which was at first mistaken for this: D-059 is about a
+*busy* worker whose card went stale while it beat normally. M2.1c is about a *turn-based* client
+whose presence goes to zero between turns. Same complaint from the outside, different clock,
+different fix — and `owner_presence_lost`, correctly left alone here, is precisely what M2.1c
+finds firing on a grade that does not warrant it.
+
+### M2.1c — A turn-based client must not flap between live and gone on every turn
+**Done (2026-08-15). Investigated first, fixed second, decided in D-060.** The findings
+below are kept as written because the reported mechanism turned out to be wrong and that
+is the load-bearing part; what was done about them is at the end of the section.
+
+Reported by the Codex participant at seq 96 and confirmed at seq 111: one-shot MCP supervisor
+calls repeatedly ended an active declaration as `work.stale reason=owner_presence_lost` even
+with a valid `participant_token`, while rebinding the same seat to a persistent cursor loop
+held presence at `live_poll` from seq 82 onward. This was initially misdiagnosed on our side as
+the same defect as M2.1b / D-059 and only the 120s work-heartbeat half was fixed. **It is a
+distinct defect**, and the distinction is the finding: D-059 was about a *busy* worker's card
+going stale; this is about a *turn-based* client's presence going to zero between turns.
+
+**1. What actually happens at the end of a one-shot MCP call — traced, not inferred.**
+Nothing closes the connection at teardown. The reporter's model ("the call ends its connection")
+is wrong about the mechanism, and that matters because it points at a different fix. The
+adapter (`backend/app/adapters/mcp/server.py`) calls `presence.connect` in `join_room` /
+`create_room` and calls `presence.disconnect` **nowhere** — the only close paths in the whole
+backend are the explicit `POST /disconnect` route (`api/routes.py:310`), graceful
+`leave_room` (`core/rooms.py:953` → `close_all_connections_tx`), and the reaper
+(`core/presence.py:799`). There is no request-scoped or session-scoped teardown hook. Every
+MCP tool call refreshes the connection through `_touch` (`server.py:897`) → `presence.heartbeat`.
+
+So the connection is left **open and un-beaten** when the turn ends, and the reaper closes it
+on a timer. With the server-assigned `heartbeat_interval_s = 20` (`config.py:117`) applied
+identically to every connection regardless of attendedness, a turn-based participant walks
+this ladder after its last tool call, with no further input from it:
+
+| Elapsed | What the room says | Where |
+|---|---|---|
+| > 20s (1× interval) | `idle` | `grade_connection`, `IDLE_AFTER_INTERVALS` |
+| > 60s (3× interval) | `stale` → `work.stale reason=owner_presence_lost`, declaration flips `blocked` | `work.mark_stale_declarations:440,450` |
+| > 80s (4× interval) | reaper closes the connection → `disconnected` → `_on_disconnected_tx` releases every claim and ends every open declaration as `presence_lost` | `presence.py:816,834` |
+
+A human takes longer than 80 seconds to read a reply and type the next prompt. So this is not
+an edge case for an attended host — **it is what happens on every single turn, forever**, and
+no client-side behaviour fixes it, because acting is the only thing the client can do and by
+definition it is not acting between turns.
+
+**2. Is `attended` reachable at all for such a client? In practice, no.**
+`grade_connection` (`presence.py:438`) does implement the cap correctly: a healthy connection
+declaring `requires_human_presence` is held down to `ATTENDED` no matter its delivery mode.
+But heartbeat age is evaluated *first* and dominates, on the transport interval. That interval
+is the right clock for a process that beats and the wrong clock for a client that cannot beat
+between turns — `derive_runtime_policy` hands out the same 20s to both
+(`capabilities.py:199,241`). The net effect: `attended` is reachable only for the ~20 seconds
+immediately following a tool call, and the grade the ladder built specifically for
+turn-based clients is the one grade they can essentially never occupy. They spend their
+lives in `idle` → `stale` → `disconnected` instead.
+
+**3. Does `owner_presence_lost` fire on a grade that should not warrant it? Yes.**
+`mark_stale_declarations` treats `{stale, disconnected}` as `owner_gone`. For an unattended
+worker, `stale` genuinely means "should be beating, isn't" — the path D-059 correctly left
+untouched. For an attended connection, `stale` means only "its human has not prompted it in
+60 seconds", which is normal, expected, declared-in-advance behaviour, not evidence of a lost
+owner. The reason string then asserts something false to every other participant.
+
+**Diagnosis.** The current grading is *not* correct, and the defect is here rather than
+elsewhere. The room applies a liveness decay derived from transport beats to a participant
+whose declared contract is that it does not beat — then reads the resulting silence as
+absence. That silently punishes the hosts that declare least, which is the failure mode
+`CLAUDE.md` names and this project has now hit twice (D-047, D-059).
+
+**The line this must not cross.** The fix is *not* to hold an attended client live. Principle 5
+stands: a participant that cannot be reached must never be graded as if it can. The claim being
+made is narrower and, on this evidence, true — an attended client's between-turns state is
+honestly `attended` ("healthy, but reachable only while a human is engaged with it",
+`docs/PRODUCT.md` §5), because a human could prompt it and it would answer. `disconnected`
+asserts strictly more than that and is false. Nothing here should promote anything to
+`live_poll`, and an attended seat must still decay to `stale` and then `disconnected` on a
+clock of its own — a browser tab closed yesterday is genuinely gone.
+
+**What landed (D-060).** That clock is `ATTENDED_HEARTBEAT_INTERVAL_SECONDS = 300`, applied
+to any connection whose negotiated profile carries `requires_human_presence` — a capability,
+so `derive_runtime_policy` still takes no host class. The rungs are unchanged (`idle` 1x,
+`stale` 3x, closed 4x), so an attended seat now reads `attended` between turns and still
+reaches `disconnected` after ~20 minutes of no human. `mark_stale_declarations` floors its
+heartbeat window at the owner's own `interval x STALE_AFTER_INTERVALS` rather than applying
+one flat room value to everyone; without that half, the same defect returns as
+`heartbeat_lapsed` at 120s. Nothing is promoted — the `attended` ceiling in
+`grade_connection` is asserted as a test, not just relied on — and `owner_presence_lost` is
+left firing on `stale`, which is honest once the grade underneath it is computed on the
+right clock. Evidence: `backend/tests/test_attended_presence_across_turns.py`, adapter
+level, four properties including the two negative ones. Gate green. Docs squared with the
+code afterwards: `docs/PROTOCOL.md` §3 and `docs/PRODUCT.md` §4.2 / §5 now state that the
+heartbeat interval is per connection and derived, and PROTOCOL's grading table — which
+still called the grade `interactive_attached` and keyed it off "an interactive client" —
+now names `attended` and keys it off the capability, per principle 4.
+
+This supersedes the demoted M2.4 item 3, which described the same root cause from its other
+end (`claim`/`renew` failing `capability_unsupported` after a lapse) and under-rated it: the
+lapse also makes presence itself unreadable for exactly the participants the room most needs
+to describe honestly.
+
+*Open question for the Codex participant, whose event evidence would settle it faster than
+reading code:* between two of its one-shot calls, did the **next** call fail at
+`resolve_executor` ("no open connection") — meaning the reaper had already closed the row — or
+did it succeed against a still-open connection that was merely graded `stale`? The two produce
+the same user-visible complaint and want the ladder cut at different rungs. **No longer
+blocking** — D-060 moves both rungs, so either answer is covered — but the bounded rerun it
+offered, from a host that is not ours against the deployed instance, is the only kind of
+confirmation `docs/INTEROP.md` accepts, and is what would let this be marked observed.
+
 ### M2.2 — A2A adapter
 Agent card publication, inbound delivery, outbound push, untrusted trust tier with vouching,
 SSRF-safe egress. Pulled forward from M4: it is how non-MCP agents join, so it is load-bearing

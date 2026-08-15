@@ -361,7 +361,14 @@ def main() -> int:
                 # First pass: adopt the room's current position without reporting it.
                 snap = read_room(args.base, args.room, token)
                 cursor = int(snap.get("snapshot_seq") or 0)
-                me = str(snap.get("you") or "")
+                # `you` is a participant id over MCP and a participant object over
+                # REST. Reading it as a string worked, silently produced a value that
+                # could never match a participant id, and the self-filter did nothing.
+                you = snap.get("you")
+                if isinstance(you, dict):
+                    me = str(you.get("participant_id") or you.get("id") or "")
+                else:
+                    me = str(you or "")
             fresh = call(
                 args.base,
                 args.room,

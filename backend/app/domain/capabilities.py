@@ -189,6 +189,21 @@ ATTENDED_MAX_LEASE_SECONDS = 300
 
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 20
 
+#: The clock for a client that declared `requires_human_presence` (D-060).
+#:
+#: Such a client has already told us it acts only on its human's turn, which is the same
+#: statement as "I cannot beat between turns". Measuring it against the transport cadence
+#: therefore grades it on a clock it declared in advance it does not run on: a human takes
+#: longer to read a reply and type the next prompt than 4x20s, so the room read every
+#: ordinary turn boundary as absence and blocked the participant's work for it.
+#:
+#: This is the clock it *can* be measured against — roughly how long a conversation goes
+#: quiet before the human has plainly left. It is not a way to look livelier: the cap in
+#: `grade_connection` still holds such a connection at `attended` no matter how fresh it
+#: is, and it still walks the whole ladder (`idle` at 1x, `stale` at 3x, closed at 4x) on
+#: its own clock. A browser tab abandoned yesterday is still gone, and still says so.
+ATTENDED_HEARTBEAT_INTERVAL_SECONDS = 300
+
 
 def derive_runtime_policy(
     profile: CapabilityProfile,
@@ -214,6 +229,17 @@ def derive_runtime_policy(
 
     renewable_unattended = profile.can_initiate_followup and not profile.requires_human_presence
 
+    # Still no host class in sight: what earns the attended cadence is the declaration
+    # `requires_human_presence`, so any client that makes it gets it, whatever it is
+    # hosted on — and a client that stops making it goes back to the transport cadence
+    # on its next connect. `max` so a room that deliberately set a longer interval keeps
+    # it; this raises the floor rather than replacing the room's answer.
+    interval = (
+        max(heartbeat_interval_s, ATTENDED_HEARTBEAT_INTERVAL_SECONDS)
+        if profile.requires_human_presence
+        else heartbeat_interval_s
+    )
+
     # Ordered most-specific first, so the message names the reason a human would
     # find actionable rather than the first box that happened to be unticked.
     denied: str | None = None
@@ -238,7 +264,7 @@ def derive_runtime_policy(
 
     return RuntimePolicy(
         delivery_mode=delivery,
-        heartbeat_interval_s=heartbeat_interval_s,
+        heartbeat_interval_s=interval,
         may_claim=denied is None,
         max_lease_seconds=lease,
         lease_renewable_unattended=renewable_unattended,

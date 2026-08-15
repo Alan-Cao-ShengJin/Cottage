@@ -188,7 +188,7 @@ now and a poll-only one later):
 | `supports_resume` | can resume from a `seq` cursor | whether it needs a snapshot on reconnect |
 | `can_initiate_followup` | can take a next action on its own after an event | lease renewal without help |
 | `can_execute_background` | can work with no human in the loop | claim eligibility |
-| `requires_human_presence` | only acts while a human is engaged | shorter lease ceiling; gated by room policy |
+| `requires_human_presence` | only acts while a human is engaged | shorter lease ceiling; gated by room policy; longer heartbeat interval, capped at `attended` |
 | `supports_tools` | can actually do task work | claim eligibility |
 | `supports_artifacts` | can publish/consume artifact versions | artifact participation |
 
@@ -207,6 +207,16 @@ Derivation rules:
 - `lease_renewable_unattended` = `can_initiate_followup` **and not** `requires_human_presence`.
 - A participant that cannot renew unattended is capped at a short lease (300s) whatever the room
   default is — nobody could extend it if its human walked away mid-task.
+- `heartbeat_interval_s` = the room's interval (20s), raised to at least 300s for
+  `requires_human_presence` (D-060). A client that declares it acts only on its human's turn has
+  said in the same breath that it cannot beat between turns, so grading it on the transport cadence
+  measures it against a clock it told us in advance it does not run on — a human takes longer than
+  4 × 20s to read a reply and type the next prompt, so *every* turn boundary read as absence and
+  blocked that participant's work. The longer interval is what it can honestly be measured against.
+  It is not a promotion: `grade_connection` still caps such a connection at `attended` however
+  fresh it is, and it still walks the whole ladder — `idle` at 1×, `stale` at 3×, closed at 4× — on
+  its own clock, so an abandoned browser tab is still reported gone. Derived from the capability,
+  never from `host_class`, so any host that declares the flag gets it.
 - `may_claim` requires `supports_tools`, and requires either `can_execute_background` without
   `requires_human_presence`, or the room opting in via `allow_attended_claims`. The refusal always
   names the missing capability.
@@ -277,6 +287,14 @@ Connection liveness (derived from live connections + heartbeats):
 Grading is per participant across its connections, best-connection-wins. Heartbeat age dominates
 delivery mode: a pushable connection that stopped heartbeating is `stale`, because "we could push to
 it" says nothing about whether anyone is listening.
+
+The interval those multiples are counted in is the *connection's* (§4.2), not one number for the
+room. This is what makes `attended` reachable in practice rather than only on paper: between turns a
+turn-based client is honestly `attended` — a human could prompt it and it would answer — where
+`disconnected` asserts strictly more than that and, for a client whose host simply has no runtime to
+hold open, asserts it falsely. `docs/INTEROP.md` §5 records that as a fact about the host, not a
+defect, and a room that flapped such a participant live → gone every turn would be punishing the
+hosts that declare least.
 
 Reconnect is always resumable: a client reconnects with its last `seq` and receives every missed
 event in order, or an explicit `resume_gap` signal telling it to re-snapshot when history has been

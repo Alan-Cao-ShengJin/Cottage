@@ -28,7 +28,7 @@ from ..db import database as db
 from ..domain import ids
 from ..domain.commands import DeclareWorkCommand, EndWorkCommand, UpdateWorkCommand
 from ..domain.events import EventEnvelope, EventType
-from ..domain.room import Participant, Room, Scope
+from ..domain.room import STALE_AFTER_INTERVALS, Participant, PresenceView, Room, Scope
 from ..domain.work import WorkDeclaration, WorkEndReason, WorkStatus
 from ..util import from_iso, normalize_target, utcnow, utcnow_iso
 from . import authz, conflicts, eventlog, privacy, store
@@ -409,6 +409,29 @@ async def note_progress_tx(tx: db.Tx, *, room_id: str, task_id: str) -> None:
     )
 
 
+def _heartbeat_cutoff_for(room: Room, view: PresenceView | None) -> int:
+    """How long this owner's card may go unbeaten before it stops being evidence.
+
+    Never shorter than the owner's own presence clock (D-060). The room's flat window
+    was written for a runtime that beats every 20 seconds, and applying it to a
+    participant that declared it beats once per human turn asks that participant to
+    prove itself on a cadence it told us in advance it does not have — so its card went
+    `heartbeat_lapsed` at every turn boundary, which is the presence defect wearing a
+    different reason string.
+
+    Deriving the floor from the owner's negotiated interval rather than adding a second
+    policy value keeps one clock per participant: the card can now go stale no faster
+    than the participant itself does, and for a beating worker (20s x 3 = 60s) the room
+    policy is still the binding number, so nothing about D-059 moves.
+    """
+    interval = (
+        view.runtime.heartbeat_interval_s
+        if view is not None and view.runtime is not None
+        else room.policy.heartbeat_interval_s
+    )
+    return max(room.policy.work_stale_after_seconds, interval * STALE_AFTER_INTERVALS)
+
+
 async def mark_stale_declarations(room: Room) -> list[EventEnvelope]:
     """Emit `work.stale` for declarations that can no longer be trusted as current.
 
@@ -417,7 +440,9 @@ async def mark_stale_declarations(room: Room) -> list[EventEnvelope]:
     * `owner_presence_lost` — the owner is stale or gone. Untouched by the two-clock
       change and deliberately so; it is the path that was always right.
     * `heartbeat_lapsed` — nothing has beaten for this seat. Now a real transport
-      silence rather than "the worker was busy for two minutes".
+      silence rather than "the worker was busy for two minutes", and measured against
+      the owner's own cadence rather than one flat window, so it is also not "the human
+      took two minutes to reply" (D-060).
     * `no_progress` — beating steadily, but no declare, update, or checkpoint inside
       `work_progress_stale_after_seconds`. This is what a wedged worker looks like, and
       it is why the heartbeat refresh does not make staleness unreachable.
@@ -428,13 +453,13 @@ async def mark_stale_declarations(room: Room) -> list[EventEnvelope]:
     from . import presence
 
     presences = await presence.presence_for_room(room)
-    cutoff = room.policy.work_stale_after_seconds
     progress_cutoff = room.policy.work_progress_stale_after_seconds
     now = utcnow()
     events: list[EventEnvelope] = []
 
     for work in await store.list_open_work(room.id):
         view = presences.get(work.participant_id)
+        cutoff = _heartbeat_cutoff_for(room, view)
         heartbeat_age = (now - from_iso(work.heartbeat_at)).total_seconds()
         progress_age = (now - from_iso(work.progress_at)).total_seconds()
         owner_gone = view is None or view.liveness.value in {"stale", "disconnected"}

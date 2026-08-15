@@ -123,19 +123,29 @@ Presence is derived, never asserted.
 
 - A connection is created by `POST /rooms/{id}/connect` (or an adapter equivalent) and carries the
   negotiated capabilities and delivery mode.
-- **Heartbeat:** every connection sends a heartbeat at `heartbeat_interval_s` (server-assigned,
-  default 20s; SSE frames and long-poll returns count implicitly). Heartbeats are *not* logged as
+- **Heartbeat:** every connection sends a heartbeat at `heartbeat_interval_s` (server-assigned;
+  SSE frames and long-poll returns count implicitly). Heartbeats are *not* logged as
   events — only grade transitions emit `presence.changed`.
-- **Grading**, evaluated per participant across its connections, worst-to-best:
+- **The interval is per connection, derived from its capabilities** (D-060). Default 20s; a
+  connection whose negotiated profile carries `requires_human_presence` gets 300s instead, because
+  it has already told us it acts only on its human's turn and therefore cannot beat between turns.
+  See `docs/PRODUCT.md` §4.2. The interval is returned to the client at connect/join, so every
+  client knows the clock it is graded against.
+- **Grading**, evaluated per participant across its connections, worst-to-best. Every rung is a
+  multiple of *that connection's* interval, so the ladder is the same shape for everyone and only
+  its scale differs:
 
   | Grade | Condition |
   |---|---|
   | `disconnected` | no connections |
   | `stale` | last heartbeat > 3 × interval |
   | `idle` | last heartbeat > 1 × interval |
-  | `interactive_attached` | best connection is an interactive client within interval |
+  | `attended` | best connection requires human presence, within interval |
   | `live_poll` | ≥1 long-poll connection within interval |
   | `live_push` | ≥1 pushable connection within interval |
+
+  A connection requiring human presence is *capped* at `attended` however fresh it is — the
+  longer interval buys it an honest grade between turns, never a better one.
 
 - Transitions to `stale` mark that participant's work declarations stale. Transition to
   `disconnected` ends its open work declarations and expires its claims.
@@ -161,8 +171,13 @@ one of three reasons, in precedence order:
 | reason | means |
 |---|---|
 | `owner_presence_lost` | the owner is `stale` or `disconnected` |
-| `heartbeat_lapsed` | nothing has beaten for this seat within `work_stale_after_seconds` (120s) |
+| `heartbeat_lapsed` | nothing has beaten for this seat within `work_stale_after_seconds` (120s), floored at the owner's own `heartbeat_interval_s × 3` (D-060) |
 | `no_progress` | beating, but no declare/update/checkpoint within `work_progress_stale_after_seconds` (900s) |
+
+The `heartbeat_lapsed` floor exists because a flat room-wide window is a second, hidden presence
+clock: applied to a participant that beats once per human turn it re-created the D-060 defect under
+a different reason string. One clock per participant — a card may go stale no faster than its owner
+does. For a 20s beater the room policy is still the binding number, so nothing about D-059 moves.
 
 What a reader may conclude from a fresh card is correspondingly weaker: the owner's runtime is
 connected *and* something advanced within the progress window. It is no longer evidence that the

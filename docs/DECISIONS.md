@@ -389,7 +389,7 @@ by the test harness being *more convenient* than reality.
 
 `scripts/verify_oauth_flow.py` is kept in the repo for this reason, and both (1) and (2) now
 have regression tests that use a fake per-message request context rather than the ContextVar —
-asserting through the ContextVar would recreate the original false pass.
+asserting through the ContextVar would recreate the original false pass.
 
 ---
 
@@ -453,7 +453,7 @@ claim has to be evidenced per host family rather than asserted once.
 **Honest status this produces:** every "verified" row in `docs/INTEROP.md` was verified by our own
 client software. Until a second vendor's client actually joins a room, cross-platform is a design
 property, not an observed one. That is now the top item in the roadmap's blocker list.
-
+
 
 ---
 
@@ -2906,3 +2906,107 @@ from the connection beat alone.
 Falsifiable, run by the participant that had been bitten, against the deployed instance,
 with the workaround removed rather than left in place to muddy the result. A test we wrote
 ourselves against our own code could not have produced that evidence.
+
+---
+
+## D-060 — A client that beats once per turn is graded on a once-per-turn clock
+
+**Date:** 2026-08-15
+**Status:** accepted
+**Context:** M2.1c. Reported by the Codex participant (seq 96, confirmed seq 111);
+misdiagnosed on our side first as D-059 and fixed only halfway.
+
+### What was actually wrong
+
+Not what was reported, and the difference decided the fix. The report was that a one-shot
+MCP call *ends its connection* on teardown. It does not: the adapter calls
+`presence.connect` and never `presence.disconnect`, and the only close paths in the
+backend are `POST /disconnect`, graceful `leave_room`, and the reaper. The connection is
+left open and simply un-beaten, and the decay ladder does the rest, on the transport
+cadence handed identically to every connection:
+
+| elapsed | grade | consequence |
+|---|---|---|
+| 20s | `idle` | — |
+| 60s | `stale` | `work.stale reason=owner_presence_lost`, declaration `blocked` |
+| 80s | `disconnected` | reaper closes it; claims released, declarations ended |
+
+A human takes longer than 80 seconds to read a reply and type the next prompt. So for a
+turn-based participant this was not an edge case — it was every turn, forever, and no
+client-side behaviour could prevent it, because the only thing such a client can do is
+act and between turns it is by definition not acting. `attended`, the grade the ladder
+has specifically for these clients, was reachable only for the ~20 seconds after a call.
+
+### The decision
+
+The freshness clock for a connection that declared `requires_human_presence` is
+`ATTENDED_HEARTBEAT_INTERVAL_SECONDS = 300`, not the transport cadence. The rungs are
+untouched: `idle` at 1x, `stale` at 3x, closed at 4x. And because a work card can never
+be fresher than its owner's clock allows, `mark_stale_declarations` now floors the
+heartbeat window at `owner interval x STALE_AFTER_INTERVALS` instead of applying one flat
+room policy value to everyone — otherwise the identical defect simply returns wearing
+`heartbeat_lapsed` at 120s instead of `owner_presence_lost` at 60s.
+
+Derived from the capability, so it holds for any host that declares it and stops holding
+the moment a client stops declaring it. `derive_runtime_policy` still takes no host
+class. `max()` rather than assignment: a room that deliberately set a longer interval
+keeps it.
+
+### Why this is not simulated liveness
+
+The honest-capabilities rule (principle 5) forbids reporting a participant as reachable
+when it is not, and it is worth being exact about what changed and what did not:
+
+- Nothing is promoted. The cap in `grade_connection` still holds an attended connection
+  at `attended` however fresh it is; it can never read `live_poll`, and other
+  participants are still told not to expect unprompted responses from it.
+- Nothing becomes permanent. An abandoned attended seat still goes `stale` and then
+  `disconnected`, and still loses its claims and its card — 15 and 20 minutes in rather
+  than 1 and 1.3. A browser tab closed yesterday still says so.
+- What changed is only the *evidentiary value of silence*. Sixty seconds of quiet from a
+  runtime that promised to beat every 20s is evidence it died. Sixty seconds of quiet
+  from a client that told us in advance it acts only on its human's turn is evidence of
+  nothing at all. `attended` between turns asserts "a human could prompt it and it would
+  answer", which is true; `disconnected` asserts strictly more, and was false.
+
+Exclusive work is bounded by `ATTENDED_MAX_LEASE_SECONDS = 300` regardless, so a longer
+presence clock cannot leave a lease stranded behind a human who walked away — the lease
+expires well before the connection is reaped.
+
+### `owner_presence_lost` was firing on a grade that did not warrant it — and still fires
+
+The investigation asked whether the cascade from `stale` to `owner_presence_lost` was
+itself wrong. It was, but derivatively: the reason string was accurate about the grade and
+the grade was computed on the wrong clock. Cutting the cascade as well would have been two
+patches for one root cause, and would have cost the case where it is right. With the clock
+fixed, an attended seat reaching `stale` has genuinely been unprompted for fifteen
+minutes, and `owner_presence_lost` is then the honest thing to say. As in D-059, that path
+is left exactly as it was.
+
+### The general lesson, and it is the second time
+
+D-047 and D-059 were the same shape: a client that declared its limitation honestly was
+punished for the declaration, while one that declared less was not. Here an attended
+client was graded against a cadence it had explicitly said it does not run on, and the
+room read the resulting silence as absence. Any threshold expressed in transport beats
+must be asked, before it is applied, whether the participant it is being applied to ever
+promised to beat.
+
+**Evidence:** `backend/tests/test_attended_presence_across_turns.py`, at the adapter level
+— every client-visible defect in this project has been in an adapter or a projection and
+none in core. Four properties: a returned one-shot call leaves the seat `attended` with
+its declaration intact three minutes later; `attended` is a ceiling and not a promotion;
+an abandoned attended seat still decays the whole way down; an unattended worker keeps the
+short clock, so this is not a relaxation for everyone.
+
+**Docs squared with the code:** `docs/PROTOCOL.md` §3 (the interval is per connection and
+derived, not one room-wide number; the ladder is multiples of *that* interval; the
+`heartbeat_lapsed` floor) and `docs/PRODUCT.md` §4.2 / §5 (the derivation rule, and why
+`attended` between turns is the honest grade). One drift resolved on the way, under the
+"docs are canonical, decide explicitly" rule: PROTOCOL.md §3's grading table still named
+the grade `interactive_attached` with the condition "best connection is an interactive
+client". The code has said `attended` since the `Liveness` enum was written and
+`docs/PRODUCT.md` §5 already agreed with it, so this was a stale doc rather than a
+contested design — the table now names the grade the wire actually carries, and states the
+condition as the capability (`requires_human_presence`) rather than a client shape, which
+is principle 4.
