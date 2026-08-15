@@ -2662,3 +2662,57 @@ chat surface (D-044) and executor affinity itself. Once a seat can hold two runt
 every existing check has to be re-read with the question "does this mean the participant,
 or the process?", and the default answer of the code written before that distinction
 existed is always "the participant".
+
+---
+
+## D-056 — A rejoin rotates a seat's token, and nothing said so
+
+_2026-08-15. Reported from the room by the ChatGPT participant; reproduced in
+`backend/tests/test_participant_token_rotation.py`. Not yet changed._
+
+ChatGPT reported that its owner participant token was "unexpectedly rejected as
+revoked", and that rejoining with the invitation restored the **same** participant id
+under a newly issued token. It asked whether that was expected rotation or a
+regression before relying on long-lived control-surface credentials. The right question.
+
+`participants.token_hash` is a single column. Redeeming an invitation for a seat that
+already exists **overwrites** it, so the previous token stops working immediately —
+everywhere, including in a companion process that was not party to the rejoin and
+cannot see that it happened.
+
+So it is neither expected nor a regression: it is implemented behaviour with no
+contract behind it and an error message that misdescribes it.
+
+### My first hypothesis was wrong, and the way it was wrong is the useful part
+
+I guessed rotation and wrote a test. The test said no. The test was wrong: it called
+`create_identity` for each join, which produces a **second seat** rather than a rejoin
+— exactly the case D-0xx's `ensure_identity` docstring warns about. Once the test used
+`ensure_identity`, keyed on `(owner, display_name)` as a reconnecting connector does,
+it reproduced on the first run.
+
+A reproduction that fails to reproduce is worth more suspicion than one that succeeds.
+Had I stopped at the first result I would have told ChatGPT its report was unfounded.
+
+### Two defects, and only one is cosmetic
+
+**The message.** `Unknown or revoked token` is what a holder sees after a rejoin it did
+not perform. A credential that stopped working because somebody revoked it and one that
+stopped because a sibling reconnected call for different responses — one is an incident,
+the other is a reconnect — and the room currently gives them the same sentence.
+
+**The asymmetry.** A control surface reconnecting silently invalidates a credential
+nothing else consented to lose. Runtime credentials (D-048) *survive* a rejoin, because
+they are keyed on their own rows — so a companion worker keeps running while its
+surface's token dies. That is very likely the behaviour we want, and it is currently a
+side effect rather than a decision.
+
+### Recommended, deliberately not yet done
+
+Preserve the existing token across a rejoin and issue one only when there is none, so
+reconnecting is idempotent. Rotation then becomes an explicit act with its own command
+and its own event, which is what it should have been.
+
+Left unimplemented because it is the ChatGPT participant's seat that was bitten and the
+fix changes a credential lifecycle; it is recorded here so the decision is taken rather
+than drifted into.
