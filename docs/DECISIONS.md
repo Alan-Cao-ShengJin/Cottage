@@ -1659,3 +1659,73 @@ commit. The predicate must evaluate live-attachment state atomically enough that
 liveness defeats B's release. Both entry paths get their own test: graceful reconnect and
 reaper-driven staleness reach that predicate through different code, and testing one is how the
 other ships broken.
+
+---
+
+## D-037 — Three identity layers, named by what they attest
+
+_2026-08-15. Correction to D-036's refinement 3, plus a method note on why it was wrong._
+
+D-036 exempted recovery when the reclaiming executor matched the expired one. That is unsound when
+executor identity is `attachment_id`, because attachment identity was made durable across
+*transport* loss deliberately:
+
+> a persistent worker can crash, restart, reuse the same attachment label, and be the SAME
+> attachment while being a DIFFERENT process with lost volatile knowledge of what the pre-crash
+> process actually did externally.
+
+Exempting on attachment match equates **attachment continuity with execution-memory continuity**,
+which was asserted and never checked.
+
+### The layers
+
+| identity | attests |
+|---|---|
+| `connection_id` | this transport, right now |
+| `attachment_id` | addressable as the same runtime across transport loss |
+| `runtime_instance` (execution epoch) | retains what the last process knew |
+
+Minted at process start, stable across that process's reconnects, regenerated on restart. Ephemeral
+hosts use `connection_id` as their runtime instance and therefore never falsely inherit memory
+across turns. A host that cannot declare a stable runtime instance is treated conservatively as a
+new one on every reconnect — friction, but it never invents knowledge a runtime cannot prove it
+retained.
+
+**Recovery is exempt only when the *immediately preceding* expired lease was held by the same
+runtime instance, with no intervening claim episode.** The "immediately preceding" clause does real
+work: A expires, B claims and acts and releases, A returns — and A's last *historical* identity
+would otherwise waive a gate for a world that changed twice underneath it.
+
+Echo fields for a recovery claim: prior holder, prior executor identity and epoch, `expired_at`,
+prior fence, and `last_lease_event_seq`. The last one makes recovery a compare-and-swap on the
+lease history, so it is implemented as one — that seq belongs in the `WHERE` clause of the
+conditional `UPDATE`, not in a read-then-compare before it (ADR-009, and the same mistake made two
+entries earlier about release).
+
+### Never persist the epoch
+
+The failure mode is a well-meaning implementer saving `runtime_instance` to disk "for continuity
+across restarts", which recreates exactly the bug this entry fixes — and it is precisely the
+helpful thing an agent writing a worker would do unprompted. **Minted at process start, written
+nowhere.** This belongs in the tool description where implementers will read it, not only here.
+
+### Incentive check, run rather than assumed
+
+`runtime_instance` is self-declared, so a worker could reuse an old epoch and falsely waive its own
+recovery gate. Unlike `side_effect_mode` (D-036) the incentive is roughly aligned: an agent that
+lies about retaining memory eats its own double execution. Only roughly, though — the double-placed
+order lands on a third party and the owner bears it through reputation. Aligned enough to accept
+self-declaration; not aligned enough to call self-correcting.
+
+### Method note: three collapses in one day
+
+D-033 collapsed resumability into liveness. D-034 collapsed storage into enforcement. D-036
+collapsed attachment continuity into execution memory. Each time two adjacent identifiers behaved
+alike in the common case and were merged; each time the separation turned out to be load-bearing;
+each time an independent reviewer caught it rather than the test suite.
+
+The tell: **identity layers were being named by how long they live**, which makes adjacent ones look
+like one thing at different timescales. Named by *what they attest* they stop being confusable. So
+the rule, recorded for the next time: when two identifiers look like the same thing at different
+timescales, ask what fact each certifies. If the answer is the same fact, one is redundant — and if
+it is not, they cannot be merged however similar their lifetimes look.
