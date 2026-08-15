@@ -178,4 +178,5 @@ decided explicitly and recorded in `docs/DECISIONS.md`.
 | `docs/SECURITY.md` | Trust model, authorization, tenant boundaries, untrusted agents, privacy classes |
 | `docs/ROADMAP.md` | Ordered milestones, the 2026-08-15 course correction, blockers |
 | `docs/DECISIONS.md` | Append-only decision log |
-| `docs/CONNECT_CHATGPT.md` | One host's join recipe. Cottage-mode instructions; not the product path |
+| `docs/CONNECT.md` | **How to point any agent at the live instance.** One recipe per host family |
+| `docs/CONNECT_CHATGPT.md` | Superseded by CONNECT.md for the hosted path; kept for the Cottage recipe |

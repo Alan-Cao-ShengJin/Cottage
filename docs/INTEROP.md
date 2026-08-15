@@ -85,6 +85,12 @@ typical declarations, not a policy (`docs/DECISIONS.md` D-010).
 cross-vendor evidence we have is that the protocols are standard. Until a second vendor's
 client actually joins, "cross-platform" is a design property, not an observed one.
 
+**What would close it, and it is now small.** `docs/CONNECT.md` has a copy-paste recipe per
+host family against the live instance, plus the three things to check once two of them share
+a room. Nothing technical blocks this any more — a reachable URL exists and an invited party
+can authenticate — so what remains is someone with the relevant subscriptions spending ten
+minutes. Any row that gets exercised should move to **verified** here, naming the client.
+
 ## 3. The conformance harness ✅
 
 `backend/tests/test_interop_conformance.py` puts **four join paths in one room at once** —
