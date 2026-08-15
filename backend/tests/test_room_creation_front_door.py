@@ -152,3 +152,67 @@ async def test_the_room_is_attributed_to_the_human_behind_the_agent(fresh_db, or
     )
     row = await db.fetch_one("SELECT * FROM rooms WHERE id = ?", (created.room.id,))
     assert row["created_by_user_id"] == user_id
+
+
+async def test_an_oauth_caller_needs_no_credential_argument(fresh_db, org, monkeypatch):
+    """The last mile: asking for a token the caller already presented.
+
+    An assistant that authenticated with OAuth had to be handed an "organization
+    principal token" to create a room — a credential its human has to go and find,
+    which is the step the product exists to remove. It is also redundant: the server
+    resolved that caller's identity to let the call through in the first place.
+    """
+    from app.adapters.mcp import server as mcp_server
+    from app.core.oauth import TokenPrincipal
+
+    org_id, user_id = org
+    identity = await _identity(org_id, user_id)
+
+    async def fake_caller(ctx, audience):
+        return TokenPrincipal(
+            subject_kind="agent_identity",
+            org_id=org_id,
+            identity=identity,
+            user_id=None,
+            scope="agent",
+            client_id="cli_test",
+        )
+
+    monkeypatch.setattr(mcp_server, "principal_for_tool", fake_caller)
+
+    for supplied in (None, "", "   "):
+        principal = await mcp_server._creating_principal(None, supplied)
+        assert principal.kind == "agent_identity"
+        assert principal.identity is not None
+        assert principal.identity.id == identity.id
+
+
+async def test_a_supplied_token_that_is_wrong_is_refused_not_ignored(fresh_db, org, monkeypatch):
+    """Falling back to the session would succeed as somebody else.
+
+    That is the worst of the three outcomes: the caller believes it acted as the
+    principal it named, and it did not.
+    """
+    from app.adapters.mcp import server as mcp_server
+    from app.core.errors import Unauthenticated
+    from app.core.oauth import TokenPrincipal
+
+    org_id, user_id = org
+    identity = await _identity(org_id, user_id)
+
+    async def fake_caller(ctx, audience):
+        return TokenPrincipal(
+            subject_kind="agent_identity",
+            org_id=org_id,
+            identity=identity,
+            user_id=None,
+            scope="agent",
+            client_id="cli_test",
+        )
+
+    monkeypatch.setattr(mcp_server, "principal_for_tool", fake_caller)
+
+    with pytest.raises(Unauthenticated) as exc:
+        await mcp_server._creating_principal(None, "not-a-real-token")
+    # And the refusal has to tell a client with a cached schema what to send instead.
+    assert "empty string" in str(exc.value)

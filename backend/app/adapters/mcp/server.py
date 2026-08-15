@@ -38,6 +38,7 @@ from ...core import (
 )
 from ...core.bus import bus
 from ...core.errors import RoomError, Unauthenticated
+from ...db import database as db
 from ...domain.capabilities import Capability, HostClass
 from ...domain.commands import (
     ClaimTaskCommand,
@@ -292,10 +293,56 @@ did not declare a capability the action requires. None of these are crashes.
 # ---------------------------------------------------------------------------
 
 
+async def _creating_principal(ctx: Context | None, principal_token: str | None):
+    """Who is creating this room: the caller, unless they named someone else.
+
+    Asking an assistant for an "organization principal token" is asking its human to
+    go and find a credential, which is the step the product exists to remove — and
+    the request is redundant, because an OAuth caller already presented one to get
+    this far. So a blank or missing argument means *you*.
+
+    A token that was actually supplied is still authenticated, and a bad one is an
+    error rather than a silent fall back to the session. Quietly succeeding as
+    somebody else because the credential you passed was wrong is the worst of the
+    three outcomes.
+    """
+    from ...core.rooms import Principal
+
+    if principal_token and principal_token.strip():
+        try:
+            return await rooms.authenticate_principal(principal_token.strip())
+        except Unauthenticated:
+            # A cached tool schema may still mark this argument required, so a client
+            # that cannot omit it will send *something*. Say plainly what to send
+            # instead of repeating "unknown token" at a caller with no way to comply
+            # (D-041: a capability nobody can discover is a capability nobody has).
+            raise Unauthenticated(
+                "That principal_token is not valid. If you connected with OAuth you do "
+                "not need one at all — send principal_token as an empty string, or omit "
+                "it, and the room will be created as you."
+            ) from None
+
+    caller = await principal_for_tool(ctx, settings.mcp_resource_url)
+    if caller is None:
+        raise Unauthenticated(
+            "You are not authenticated to this server, so there is nobody to create a "
+            "room as. Connect with OAuth, or pass principal_token explicitly."
+        )
+    if caller.identity is not None:
+        return Principal(kind="agent_identity", org_id=caller.org_id, identity=caller.identity)
+
+    if caller.user_id is None:
+        raise Unauthenticated("This token has no subject that can own a room.")
+    user_row = await db.fetch_one("SELECT * FROM users WHERE id = ?", (caller.user_id,))
+    if user_row is None:
+        raise Unauthenticated("Token subject no longer exists.")
+    return Principal(kind="user", org_id=caller.org_id, user=store.to_user(user_row))
+
+
 @mcp.tool()
 async def create_room(
-    principal_token: str,
     name: str,
+    principal_token: str | None = None,
     purpose: str = "",
     display_name: str = "Room creator",
     cross_org: bool = False,
@@ -303,9 +350,11 @@ async def create_room(
 ) -> dict[str, Any]:
     """Create a room, join it as owner, and get a token to share with everyone else.
 
-    `principal_token` is your organization credential — either a human's or your own
-    agent identity's, whichever you connected with. A room-scoped participant token
-    cannot do it. You get back:
+    **You do not need to supply a credential.** If you connected with OAuth, the
+    server already knows who you are and uses that. `principal_token` is only for
+    callers that authenticated some other way, and passing your own is harmless.
+
+    You get back:
 
       * `join_token` — the one thing you share. Anyone you give it to calls
         `join_room(invitation_token=<join_token>, display_name="...")`.
@@ -315,7 +364,7 @@ async def create_room(
     Both tokens are shown once and stored only as hashes.
     """
     try:
-        principal = await rooms.authenticate_principal(principal_token)
+        principal = await _creating_principal(ctx, principal_token)
 
         created = await rooms.create_room(
             user=principal.user,
