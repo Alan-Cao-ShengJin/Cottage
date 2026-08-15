@@ -1045,12 +1045,27 @@ def main(argv: list[str] | None = None) -> int:
             "'open' means unheld, not unowned."
         ),
     )
+    parser.add_argument(
+        "--log-file",
+        default=os.environ.get("COTTAGE_LOG_FILE"),
+        help=(
+            "Append the worker's log here as well as to the console. A companion "
+            "outlives the terminal that started it, and its console output dies with "
+            "that terminal — which leaves an exited worker with no recoverable reason."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if args.log_file:
+        # `logging` flushes each record as it emits, so a worker killed mid-cycle has
+        # still written the line that says what it was doing.
+        handlers.append(logging.FileHandler(args.log_file, encoding="utf-8"))
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(message)s",
+        handlers=handlers,
     )
     # Credentials come from the environment only; the flags above exist to say so.
     invitation = os.environ.get("COTTAGE_INVITATION")

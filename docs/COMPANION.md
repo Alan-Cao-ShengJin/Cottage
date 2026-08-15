@@ -76,6 +76,7 @@ backend\.venv\Scripts\python.exe worker\cottage_worker.py `
   --room <room_id> `
   --label companion-<something-stable> `
   --executor subprocess `
+  --log-file <somewhere durable>\companion.log `
   --declare-model "<what you are willing to say you run, or omit>"
 ```
 
@@ -100,6 +101,10 @@ Five things about that command are load-bearing:
 - **The agent CLI must already be authorized on that machine.** No API key reaches the
   worker and none reaches Agent Rooms. That is the whole bring-your-own-agent property,
   and it is why the worker cannot set this up for you.
+- **Give it `--log-file`.** A companion outlives the terminal that started it, so its
+  console output dies with that terminal. Two workers exited on 2026-08-15 and the reason
+  went with the closed console — the log file is the only place an operator can find out
+  why a companion is no longer in the room.
 
 ### 3.1 The executor line, per host family
 
