@@ -239,8 +239,10 @@ async def _resolve_attachment_tx(
 async def connect(
     *, participant: Participant, command: ConnectCommand, transport: str
 ) -> NegotiatedConnection:
-    """Open a connection. Reads survive a closed room, so this does not require
-    writability — a participant may still attach to a closed room to read history.
+    """Open a connection only while the room remains writable.
+
+    Closed-room reads use snapshot, replay, or an existing stream; creating presence
+    after the wall-clock deadline is a mutation and is refused transactionally.
 
     `transport` is what the caller will genuinely use, and negotiation intersects
     against it. An unknown transport name yields the empty capability set rather
@@ -249,19 +251,6 @@ async def connect(
     """
     room = await store.load_room(participant.room_id)
     authz.require_active(participant)
-
-    open_count = int(
-        await db.fetch_value(
-            "SELECT COUNT(*) FROM connections WHERE participant_id = ? AND closed_at IS NULL",
-            (participant.id,),
-        )
-        or 0
-    )
-    if open_count >= settings.max_connections_per_participant:
-        raise RateLimited(
-            "Too many open connections for this participant.",
-            limit=settings.max_connections_per_participant,
-        )
 
     profile, runtime = negotiate(
         declared=command.capabilities,
@@ -273,9 +262,23 @@ async def connect(
     now = utcnow_iso()
 
     async def body(tx: db.Tx) -> CommandOutcome:
-        before = await _grade_participant(tx, participant.id, room)
+        live_room = await store.load_room(room.id, tx=tx)
+        authz.require_writable(live_room)
+        open_count = int(
+            await tx.fetch_value(
+                "SELECT COUNT(*) FROM connections WHERE participant_id = ? AND closed_at IS NULL",
+                (participant.id,),
+            )
+            or 0
+        )
+        if open_count >= settings.max_connections_per_participant:
+            raise RateLimited(
+                "Too many open connections for this participant.",
+                limit=settings.max_connections_per_participant,
+            )
+        before = await _grade_participant(tx, participant.id, live_room)
         attachment_id, attachment_event = await _resolve_attachment_tx(
-            tx, room=room, participant=participant, command=command
+            tx, room=live_room, participant=participant, command=command
         )
         await tx.execute(
             """
@@ -299,14 +302,18 @@ async def connect(
                 command.since_seq,
             ),
         )
-        after = await _grade_participant(tx, participant.id, room)
+        after = await _grade_participant(tx, participant.id, live_room)
         events: list[EventEnvelope] = []
         if attachment_event is not None:
             events.append(attachment_event)
         if after != before:
             events.append(
                 await _append_presence_changed(
-                    tx, room=room, participant=participant, liveness=after, runtime=runtime
+                    tx,
+                    room=live_room,
+                    participant=participant,
+                    liveness=after,
+                    runtime=runtime,
                 )
             )
         return CommandOutcome(
@@ -314,7 +321,7 @@ async def connect(
             events=events,
         )
 
-    await execute_command(
+    outcome = await execute_command(
         command_id=command.command_id,
         command_type="presence.connect",
         room_id=room.id,
@@ -322,8 +329,9 @@ async def connect(
         body=body,
     )
 
+    resolved_connection_id = str(outcome.result.get("connection_id", connection_id))
     return NegotiatedConnection(
-        connection=await store.load_connection(connection_id),
+        connection=await store.load_connection(resolved_connection_id),
         runtime=runtime,
         current_seq=await eventlog.current_seq(room.id),
         since_seq=command.since_seq,
@@ -344,31 +352,35 @@ async def heartbeat(
     calling its declared work `heartbeat_lapsed`. What the beat does *not* refresh is
     `progress_at` — a live socket is not evidence that anything is moving.
     """
-    from . import work
+    event: EventEnvelope | None = None
+    async with db.transaction() as tx:
+        room = await store.load_room(participant.room_id, tx=tx)
+        authz.require_writable(room)
+        before = await _grade_participant(tx, participant.id, room)
+        now = utcnow_iso()
+        beat = await tx.execute(
+            """
+            UPDATE connections
+            SET last_heartbeat_at = ?, last_delivered_seq = MAX(last_delivered_seq, ?)
+            WHERE id = ? AND participant_id = ? AND closed_at IS NULL
+            """,
+            (now, seq or 0, connection_id, participant.id),
+        )
+        if beat:
+            # One transaction: an expired room cannot accept the connection beat but
+            # still refresh the work card (or vice versa).
+            await tx.execute(
+                "UPDATE work_declarations SET heartbeat_at = ? WHERE participant_id = ? "
+                "AND ended_at IS NULL",
+                (now, participant.id),
+            )
 
-    room = await store.load_room(participant.room_id)
-    before = await _grade_participant(None, participant.id, room)
-
-    beat = await db.execute(
-        """
-        UPDATE connections
-        SET last_heartbeat_at = ?, last_delivered_seq = MAX(last_delivered_seq, ?)
-        WHERE id = ? AND participant_id = ? AND closed_at IS NULL
-        """,
-        (utcnow_iso(), seq or 0, connection_id, participant.id),
-    )
-    if beat:
-        # Only a beat that landed on a live connection counts. A heartbeat naming a
-        # closed connection refreshes nothing here either, or the work card would
-        # outlive the transport it claims to be evidence of.
-        await work.touch_owner_heartbeats(participant.id)
-
-    after = await _grade_participant(None, participant.id, room)
-    if after != before:
-        async with db.transaction() as tx:
+        after = await _grade_participant(tx, participant.id, room)
+        if after != before:
             event = await _append_presence_changed(
                 tx, room=room, participant=participant, liveness=after, runtime=None
             )
+    if event is not None:
         await publish_committed([event])
 
 

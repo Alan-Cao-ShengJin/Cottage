@@ -17,6 +17,8 @@ from .disclosure import Disclosure, Provenance
 from .identity import PrincipalKind
 from .question import MAX_ANSWER_CHARS, MAX_QUESTION_CHARS
 from .room import (
+    MAX_ROOM_EXTENSION_SECONDS,
+    MIN_ROOM_EXTENSION_SECONDS,
     InvitationTargetKind,
     ParticipantRole,
     RetentionPolicy,
@@ -65,6 +67,10 @@ class CreateRoomCommand(CommandMeta):
     visibility: RoomVisibility = RoomVisibility.INTERNAL
     policy: RoomPolicy | None = None
     retention: RetentionPolicy | None = None
+
+
+class ExtendRoomCommand(CommandMeta):
+    extend_seconds: int = Field(ge=MIN_ROOM_EXTENSION_SECONDS, le=MAX_ROOM_EXTENSION_SECONDS)
 
 
 class CreateInvitationCommand(CommandMeta):
@@ -454,6 +460,7 @@ __all__ = [
     "DeclareWorkCommand",
     "DisconnectCommand",
     "EndWorkCommand",
+    "ExtendRoomCommand",
     "HeartbeatCommand",
     "JoinRoomCommand",
     "LeaveRoomCommand",

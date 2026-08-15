@@ -174,6 +174,10 @@ class Settings:
         default_factory=lambda: os.getenv("OPERATOR_DISPLAY_NAME", "Dev Owner")
     )
 
+    def __post_init__(self) -> None:
+        if not 60 <= self.default_room_ttl_seconds <= 90 * 24 * 3600:
+            raise ValueError("DEFAULT_ROOM_TTL_SECONDS must be between 60 seconds and 90 days.")
+
     @property
     def operator_org_slug(self) -> str:
         """Derived, not configured: two sources for one identity is a way to disagree."""

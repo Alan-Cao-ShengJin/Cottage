@@ -24,7 +24,6 @@ from ..domain.room import (
     Participant,
     ParticipantRole,
     Room,
-    RoomStatus,
     Scope,
 )
 from .errors import Forbidden, RoomClosed
@@ -69,11 +68,12 @@ def require_scope(participant: Participant, scope: Scope) -> None:
 
 def require_writable(room: Room) -> None:
     """Reads survive closure; writes do not (`docs/PRODUCT.md` §6)."""
-    if room.status != RoomStatus.OPEN:
+    if not room.is_writable:
         raise RoomClosed(
             "This room is no longer accepting writes.",
             room_id=room.id,
             status=room.status.value,
+            expires_at=room.expires_at,
         )
 
 

@@ -21,6 +21,7 @@ PROTOCOL_VERSION = "arp/1"
 class EventType(str, Enum):
     ROOM_CREATED = "room.created"
     ROOM_CLOSED = "room.closed"
+    ROOM_EXPIRY_EXTENDED = "room.expiry_extended"
     ROOM_PURGED = "room.purged"
     ROOM_POLICY_CHANGED = "room.policy_changed"
 

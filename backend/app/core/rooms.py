@@ -14,14 +14,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
+from ..config import settings
 from ..db import database as db
 from ..domain import ids
 from ..domain.capabilities import Capability, HostClass
 from ..domain.commands import (
     CreateInvitationCommand,
     CreateRoomCommand,
+    ExtendRoomCommand,
     JoinRoomCommand,
     LeaveRoomCommand,
     MintCredentialCommand,
@@ -52,7 +55,7 @@ from ..domain.room import (
     RuntimeCredential,
     Scope,
 )
-from ..util import hash_token, is_past, iso_in, new_token, utcnow_iso
+from ..util import from_iso, hash_token, is_past, iso_in, new_token, to_iso, utcnow, utcnow_iso
 from . import authz, eventlog, store
 from .actors import SYSTEM_ACTOR, actor_for
 from .dispatch import CommandOutcome, execute_command, publish_committed
@@ -283,11 +286,16 @@ async def create_room(
     room_id = ids.new_id(ids.ROOM)
     participant_id = ids.new_id(ids.PARTICIPANT)
     invitation_id = ids.new_id(ids.INVITATION)
-    now = utcnow_iso()
+    now_dt = utcnow()
+    now = to_iso(now_dt)
 
     policy = command.policy or RoomPolicy()
     retention = command.retention or RetentionPolicy()
-    expires_at = iso_in(retention.ttl_seconds) if retention.ttl_seconds else None
+    ttl_seconds = retention.ttl_seconds
+    if ttl_seconds is None:
+        ttl_seconds = settings.default_room_ttl_seconds
+        retention = retention.model_copy(update={"ttl_seconds": ttl_seconds})
+    expires_at = iso_in(ttl_seconds, since=now_dt)
 
     # An agent creating its own room is already an identity; a human is represented
     # by one created on demand. Either way the creator's participant row is built from
@@ -303,9 +311,7 @@ async def create_room(
 
     participant_token = new_token()
     join_token = new_token()
-    join_expires_at = iso_in(
-        min(DEFAULT_JOIN_TTL_SECONDS, retention.ttl_seconds or DEFAULT_JOIN_TTL_SECONDS)
-    )
+    join_expires_at = iso_in(min(DEFAULT_JOIN_TTL_SECONDS, ttl_seconds), since=now_dt)
 
     actor = EventActor(
         participant_id=participant_id,
@@ -499,9 +505,12 @@ async def close_room(*, participant: Participant, reason: str = "") -> Room:
     authz.require_writable(room)
 
     async def body(tx: db.Tx) -> CommandOutcome:
+        now = utcnow_iso()
         affected = await tx.execute(
-            "UPDATE rooms SET status = 'closed', closed_at = ? WHERE id = ? AND status = 'open'",
-            (utcnow_iso(), room.id),
+            "UPDATE rooms SET status = 'closed', closed_at = ? "
+            "WHERE id = ? AND status = 'open' "
+            "AND (expires_at IS NULL OR expires_at > ?)",
+            (now, room.id, now),
         )
         if affected == 0:
             raise RoomClosed("Room is already closed.", room_id=room.id)
@@ -524,6 +533,52 @@ async def close_room(*, participant: Participant, reason: str = "") -> Room:
     return await store.load_room(room.id)
 
 
+async def extend_room(*, participant: Participant, command: ExtendRoomCommand) -> Room:
+    """Extend an open room's deadline without racing the expiry reaper."""
+    authz.require_admin(participant)
+
+    async def body(tx: db.Tx) -> CommandOutcome:
+        room = await store.load_room(participant.room_id, tx=tx)
+        authz.require_writable(room)
+        if room.expires_at is None:
+            raise InvalidCommand("This legacy room has no expiry to extend.")
+
+        expires_at = to_iso(from_iso(room.expires_at) + timedelta(seconds=command.extend_seconds))
+        affected = await tx.execute(
+            "UPDATE rooms SET expires_at = ? WHERE id = ? AND status = 'open' AND expires_at = ?",
+            (expires_at, room.id, room.expires_at),
+        )
+        if affected == 0:
+            raise RoomClosed("This room is no longer accepting writes.", room_id=room.id)
+        event = await eventlog.append(
+            tx,
+            room_id=room.id,
+            type_=EventType.ROOM_EXPIRY_EXTENDED,
+            actor=actor_for(participant),
+            payload={
+                "previous_expires_at": room.expires_at,
+                "expires_at": expires_at,
+                "extend_seconds": command.extend_seconds,
+            },
+            causation_id=command.command_id,
+        )
+        return CommandOutcome(result={"room_id": room.id, "expires_at": expires_at}, events=[event])
+
+    outcome = await execute_command(
+        command_id=command.command_id,
+        command_type="room.extend",
+        room_id=participant.room_id,
+        participant_id=participant.id,
+        body=body,
+    )
+    resolved_room_id = str(outcome.result.get("room_id", participant.room_id))
+    current = await store.load_room(resolved_room_id)
+    receipt_expires_at = outcome.result.get("expires_at")
+    if isinstance(receipt_expires_at, str):
+        return current.model_copy(update={"expires_at": receipt_expires_at})
+    return current
+
+
 async def expire_due_rooms() -> list[str]:
     """Close rooms whose TTL has elapsed.
 
@@ -540,10 +595,11 @@ async def expire_due_rooms() -> list[str]:
             continue
         room_id = row["id"]
         async with db.transaction() as tx:
+            now = utcnow_iso()
             affected = await tx.execute(
                 "UPDATE rooms SET status = 'closed', closed_at = ? "
-                "WHERE id = ? AND status = 'open'",
-                (utcnow_iso(), room_id),
+                "WHERE id = ? AND status = 'open' AND expires_at = ? AND expires_at <= ?",
+                (now, room_id, row["expires_at"], now),
             )
             if affected == 0:
                 continue
@@ -647,9 +703,17 @@ async def create_invitation(
     scopes = authz.effective_scopes(command.role, command.scopes, TrustTier.MEMBER)
     token = new_token()
     invitation_id = ids.new_id(ids.INVITATION)
-    expires_at = iso_in(command.ttl_seconds) if command.ttl_seconds else None
 
     async def body(tx: db.Tx) -> CommandOutcome:
+        live_room = await store.load_room(room.id, tx=tx)
+        authz.require_writable(live_room)
+        now = utcnow()
+        requested_expires_at = iso_in(command.ttl_seconds or DEFAULT_JOIN_TTL_SECONDS, since=now)
+        expires_at = (
+            min(requested_expires_at, live_room.expires_at)
+            if live_room.expires_at is not None
+            else requested_expires_at
+        )
         await _insert_invitation_tx(
             tx,
             invitation_id=invitation_id,
@@ -792,8 +856,7 @@ async def join_room(
     invitation = store.to_invitation(row)
 
     room = await store.load_room(invitation.room_id)
-    if room.status != RoomStatus.OPEN:
-        raise RoomClosed("This room is closed.", room_id=room.id)
+    authz.require_writable(room)
     _validate_redeemable(invitation, identity, owner_email)
 
     if room.visibility == RoomVisibility.INTERNAL and identity.org_id != room.org_id:
@@ -836,15 +899,28 @@ async def join_room(
     declared = [c.value for c in (command.capabilities or identity.declared_capabilities)]
 
     async def body(tx: db.Tx) -> CommandOutcome:
+        live_room = await store.load_room(room.id, tx=tx)
+        authz.require_writable(live_room)
+        live_invitation_row = await tx.fetch_one(
+            "SELECT * FROM invitations WHERE id = ? AND room_id = ?",
+            (invitation.id, room.id),
+        )
+        if live_invitation_row is None:
+            raise Forbidden("This invitation is no longer usable.")
+        live_invitation = store.to_invitation(live_invitation_row)
+        _validate_redeemable(live_invitation, identity, owner_email)
+
         # Consume a redemption with a guarded update. The CHECK on the table plus
         # this predicate mean two concurrent redemptions of a single-use invitation
         # cannot both succeed on any engine.
         affected = await tx.execute(
             """
             UPDATE invitations SET redemptions = redemptions + 1
-            WHERE id = ? AND revoked_at IS NULL AND redemptions < max_redemptions
+            WHERE id = ? AND room_id = ? AND revoked_at IS NULL
+              AND redemptions < max_redemptions
+              AND (expires_at IS NULL OR expires_at > ?)
             """,
-            (invitation.id,),
+            (invitation.id, room.id, utcnow_iso()),
         )
         if affected == 0:
             raise Forbidden("This invitation is no longer usable.")
@@ -1070,9 +1146,24 @@ async def create_identity(
     capabilities: list[Capability] | None = None,
     trust: TrustTier = TrustTier.MEMBER,
     provenance: IdentityProvenance = IdentityProvenance.ACCOUNT,
+    tx: db.Tx | None = None,
 ) -> AgentIdentity:
+    if tx is None:
+        async with db.transaction() as owned_tx:
+            return await create_identity(
+                org_id=org_id,
+                owner_user_id=owner_user_id,
+                display_name=display_name,
+                kind=kind,
+                host_class=host_class,
+                description=description,
+                capabilities=capabilities,
+                trust=trust,
+                provenance=provenance,
+                tx=owned_tx,
+            )
     identity_id = ids.new_id(ids.IDENTITY)
-    await db.execute(
+    await tx.execute(
         """
         INSERT INTO agent_identities (
             id, org_id, owner_user_id, display_name, kind, host_class,
@@ -1093,7 +1184,8 @@ async def create_identity(
             utcnow_iso(),
         ),
     )
-    row = await db.fetch_one("SELECT * FROM agent_identities WHERE id = ?", (identity_id,))
+    row = await tx.fetch_one("SELECT * FROM agent_identities WHERE id = ?", (identity_id,))
+    assert row is not None
     return store.to_identity(row)
 
 
@@ -1234,6 +1326,9 @@ async def authenticate_invitation(token: str) -> InvitationCredential:
 
     if invitation.revoked_at or is_past(invitation.expires_at) or invitation.is_exhausted:
         raise Unauthenticated("Unknown or revoked token.")
+    room = await store.load_room(invitation.room_id)
+    if room.status != RoomStatus.OPEN or is_past(room.expires_at):
+        raise Unauthenticated("Unknown or revoked token.")
 
     org_id, user_id = await provisioning_context_for_invitation(token)
     return InvitationCredential(
@@ -1270,34 +1365,49 @@ async def provision_guest_identity(
     is visible, since the room lists its participants by name. A room owner who needs one
     holder per link sets `max_redemptions=1`.
     """
-    existing = await db.fetch_one(
-        """
-        SELECT i.*
-          FROM participants p
-          JOIN agent_identities i ON i.id = p.agent_identity_id
-         WHERE p.room_id = ?
-           AND i.display_name = ?
-           AND i.provenance = ?
-         LIMIT 1
-        """,
-        (credential.room_id, display_name, IdentityProvenance.INVITATION.value),
-    )
-    if existing is not None:
-        return store.to_identity(existing)
+    async with db.transaction() as tx:
+        invitation_row = await tx.fetch_one(
+            "SELECT * FROM invitations WHERE id = ? AND room_id = ?",
+            (credential.invitation.id, credential.room_id),
+        )
+        if invitation_row is None:
+            raise Unauthenticated("Unknown or revoked token.")
+        invitation = store.to_invitation(invitation_row)
+        if invitation.revoked_at or is_past(invitation.expires_at) or invitation.is_exhausted:
+            raise Unauthenticated("Unknown or revoked token.")
+        room = await store.load_room(credential.room_id, tx=tx)
+        if not room.is_writable:
+            raise Unauthenticated("Unknown or revoked token.")
 
-    return await create_identity(
-        org_id=credential.org_id,
-        owner_user_id=credential.provisioning_user_id,
-        display_name=display_name,
-        host_class=host_class,
-        description=description,
-        capabilities=capabilities,
-        # Someone with authority in the room minted this link, so the guest may work —
-        # `vouched`, not `untrusted`. What nobody vouched for is the *name*, which is what
-        # `provenance` records and what the room shows.
-        trust=TrustTier.VOUCHED,
-        provenance=IdentityProvenance.INVITATION,
-    )
+        existing = await tx.fetch_one(
+            """
+            SELECT i.*
+              FROM participants p
+              JOIN agent_identities i ON i.id = p.agent_identity_id
+             WHERE p.room_id = ?
+               AND i.display_name = ?
+               AND i.provenance = ?
+             LIMIT 1
+            """,
+            (credential.room_id, display_name, IdentityProvenance.INVITATION.value),
+        )
+        if existing is not None:
+            return store.to_identity(existing)
+
+        return await create_identity(
+            org_id=credential.org_id,
+            owner_user_id=credential.provisioning_user_id,
+            display_name=display_name,
+            host_class=host_class,
+            description=description,
+            capabilities=capabilities,
+            # Someone with authority in the room minted this link, so the guest may work —
+            # `vouched`, not `untrusted`. What nobody vouched for is the *name*, which is what
+            # `provenance` records and what the room shows.
+            trust=TrustTier.VOUCHED,
+            provenance=IdentityProvenance.INVITATION,
+            tx=tx,
+        )
 
 
 async def authenticate_principal(token: str) -> Principal:
@@ -1359,6 +1469,7 @@ __all__ = [
     "create_room",
     "ensure_org_and_user",
     "expire_due_rooms",
+    "extend_room",
     "issue_principal_token",
     "join_room",
     "leave_room",

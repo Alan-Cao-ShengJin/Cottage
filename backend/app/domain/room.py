@@ -15,6 +15,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..util import is_past
 from .capabilities import (
     DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     Capability,
@@ -24,6 +25,13 @@ from .capabilities import (
     RuntimePolicy,
 )
 from .identity import IdentitySummary, TrustTier
+
+MIN_ROOM_TTL_SECONDS = 60
+MAX_ROOM_TTL_SECONDS = 90 * 24 * 3600
+MIN_EVENT_AGE_DAYS = 1
+MAX_EVENT_AGE_DAYS = 365
+MIN_ROOM_EXTENSION_SECONDS = 60
+MAX_ROOM_EXTENSION_SECONDS = 30 * 24 * 3600
 
 
 class Scope(str, Enum):
@@ -196,9 +204,11 @@ STALE_AFTER_INTERVALS = 3
 class RetentionPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    ttl_seconds: int | None = None
+    ttl_seconds: int | None = Field(default=None, ge=MIN_ROOM_TTL_SECONDS, le=MAX_ROOM_TTL_SECONDS)
     purge_on_close: bool = False
-    max_event_age_days: int | None = None
+    max_event_age_days: int | None = Field(
+        default=None, ge=MIN_EVENT_AGE_DAYS, le=MAX_EVENT_AGE_DAYS
+    )
 
 
 class RoomPolicy(BaseModel):
@@ -247,7 +257,7 @@ class Room(BaseModel):
 
     @property
     def is_writable(self) -> bool:
-        return self.status == RoomStatus.OPEN
+        return self.status == RoomStatus.OPEN and not is_past(self.expires_at)
 
 
 class InvitationTargetKind(str, Enum):

@@ -7,6 +7,7 @@ translation.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from typing import Any
@@ -31,7 +32,7 @@ from ..core import (
     work,
 )
 from ..core.bus import bus
-from ..core.errors import Forbidden, ResumeGap
+from ..core.errors import Forbidden, ResumeGap, RoomClosed
 from ..domain.capabilities import SUGGESTED_CAPABILITIES, Capability
 from ..domain.commands import (
     AcknowledgeDirectiveCommand,
@@ -47,6 +48,7 @@ from ..domain.commands import (
     CreateTaskCommand,
     DeclareWorkCommand,
     EndWorkCommand,
+    ExtendRoomCommand,
     HeartbeatCommand,
     IssueDirectiveCommand,
     JoinRoomCommand,
@@ -250,6 +252,15 @@ async def close_room(room_id: str, participant: ParticipantDep) -> dict[str, Any
     return {"ok": True, "room": room.model_dump(mode="json")}
 
 
+@router.post("/rooms/{room_id}/extend")
+async def extend_room(
+    room_id: str, participant: ParticipantDep, command: ExtendRoomCommand
+) -> dict[str, Any]:
+    _assert_room(participant, room_id)
+    room = await rooms.extend_room(participant=participant, command=command)
+    return {"ok": True, "room": room.model_dump(mode="json")}
+
+
 # ---------------------------------------------------------------------------
 # Presence
 # ---------------------------------------------------------------------------
@@ -422,9 +433,12 @@ async def stream(
                     continue
 
             if connection_id:
-                await presence.heartbeat(
-                    connection_id=connection_id, participant=participant, seq=cursor
-                )
+                # Closed-room history remains readable. The implicit beat is a
+                # best-effort liveness write, not a condition of replay access.
+                with contextlib.suppress(RoomClosed):
+                    await presence.heartbeat(
+                        connection_id=connection_id, participant=participant, seq=cursor
+                    )
 
             reached = await bus.wait_for(
                 room_id, cursor, timeout=float(settings.sse_keepalive_seconds)

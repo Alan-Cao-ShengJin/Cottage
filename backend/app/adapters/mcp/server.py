@@ -15,6 +15,7 @@ decisions correct rather than optimistic.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections import OrderedDict
 from typing import Any
@@ -39,7 +40,7 @@ from ...core import (
     work,
 )
 from ...core.bus import bus
-from ...core.errors import RoomError, Unauthenticated
+from ...core.errors import RoomClosed, RoomError, Unauthenticated
 from ...db import database as db
 from ...domain.capabilities import Capability, HostClass
 from ...domain.checkpoint import ResumeState
@@ -55,6 +56,7 @@ from ...domain.commands import (
     CreateTaskCommand,
     DeclareWorkCommand,
     EndWorkCommand,
+    ExtendRoomCommand,
     IssueDirectiveCommand,
     JoinRoomCommand,
     LeaveRoomCommand,
@@ -608,6 +610,29 @@ async def join_room(
         return _err(exc)
 
 
+@mcp.tool()
+async def extend_room(
+    extend_seconds: int,
+    command_id: str | None = None,
+    participant_token: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Extend this room's expiry. Requires the room.admin scope."""
+    try:
+        participant = await _participant(ctx, participant_token)
+        extended = await rooms.extend_room(
+            participant=participant,
+            command=ExtendRoomCommand(command_id=command_id, extend_seconds=extend_seconds),
+        )
+        return {
+            "ok": True,
+            "room_id": extended.id,
+            "expires_at": extended.expires_at,
+        }
+    except RoomError as exc:
+        return _err(exc)
+
+
 def _glance(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Counts, not content: enough to decide whether to spend a read on the full board."""
     tasks_by_status: dict[str, int] = {}
@@ -902,7 +927,10 @@ async def _touch(participant: Participant, seq: int) -> None:
         (participant.id,),
     )
     if rows:
-        await presence.heartbeat(connection_id=rows[0]["id"], participant=participant, seq=seq)
+        # Poll/replay is still available after closure; only its implicit liveness
+        # mutation is refused at the core boundary.
+        with contextlib.suppress(RoomClosed):
+            await presence.heartbeat(connection_id=rows[0]["id"], participant=participant, seq=seq)
 
 
 # ---------------------------------------------------------------------------
