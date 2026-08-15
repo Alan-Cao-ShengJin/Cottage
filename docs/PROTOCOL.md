@@ -298,6 +298,75 @@ directive (§2, D-045). It is orthogonal to the lease and to the claim:
   wrong.** Stop clears the claim, so `status` alone reads `open`, which means *take me* — the
   opposite of what happened (D-049). Projections carry `steering`, its reason, and `claimable`.
 
+### 4.3 Checkpoints — durable progress on a task (D-050)
+
+Append-only progress records, fenced like every other claim about work in flight. There
+is no update path and no delete path: a checkpoint that could be edited would be a claim
+about the past the past does not support, and the sequence being evidence is the value.
+
+- **Two audiences means two events.** `task.checkpointed` is room-visible and carries the
+  summary; `task.resume_state_recorded` carries the seat's private bookmark and is
+  restricted to the writing participant. An event has exactly one audience, so a record
+  with two is two frames appended in one transaction — never one frame that projections
+  are trusted to redact.
+- The public frame states `has_resume_state`. That private state exists is not a secret;
+  hiding it would leave the room's account of a worker's progress quietly incomplete.
+- **Room admins can read the private half**, as they can any directed payload in a room
+  they administer (`docs/SECURITY.md` §6). Stated rather than quietly true, because a
+  projection stricter than the event filter would make admin visibility depend on which
+  of two answers a reader happened to check.
+- The resume payload is a **closed schema**: `phase`, `completed_step_ids`,
+  `artifact_refs`, `pending_tool_calls`, `next_action`. No scratchpads, no reasoning, no
+  transcripts — and unknown keys are rejected rather than ignored.
+- Appending requires `task.progress`, an active lease held by the caller at the current
+  fence, and live-executor affinity. Steering does **not** block it: `pause` forbids
+  progress, and recording where you got to is the opposite of progressing.
+- Retry is safe via `command_id`, because the moment a worker checkpoints is the moment
+  it is most likely to be interrupted.
+- Projections return the **latest N, oldest-first**, with a total so truncation is
+  visible (D-043).
+
+### 4.4 Questions and answers — worker → human (D-051)
+
+Directives run one way, and that asymmetry is a security property rather than an
+oversight: issuing one requires `room.admin` *precisely so a worker cannot manufacture
+instructions*. A question is therefore a separate primitive, not a directive with the
+ends swapped, and an answer is separate too — routing replies through the control plane
+would mean only admins could ever unblock a worker.
+
+- Asking requires `message.post`. Asking commands nobody, so it needs no more than the
+  authority to speak.
+- A question is `room_public` even when addressed. Addressing narrows who is *expected*
+  to reply, never who may — a question only one participant could answer, hidden from
+  them, is how questions go stale.
+- `blocking=true` requires a `task_id` and the current `fence`, and does three things in
+  one transaction: **checkpoint, move the task to `waiting_input`, release the claim.**
+  All three or none. The fence is not reset, so the parked runtime's fence stays unusable.
+- A task in `waiting_input` with an unanswered blocking question is **not claimable** —
+  the next claimant would hit the same wall. Answering returns it to `open`, not to its
+  former holder, which may no longer exist.
+- **A participant may not answer its own question.** Otherwise it has not asked anything;
+  it has taken a pause it can end whenever it likes.
+- Hydration carries `answers_for_you`, because a restarted runtime starts at the current
+  cursor and the one event it most needs is already behind it.
+
+### 4.5 Runtime provenance — which runtime, and who said so (D-054)
+
+`presence.runtimes[]` describes each runtime of a seat separately. "This participant is
+live" answers the wrong question once a seat is a chat window plus a background worker.
+
+Each entry separates what the room **derived** — `liveness`, `connection_count`,
+`delivery_modes`, computed from open connections on every read — from what the client
+**declared**, under a nested `declared` object: `role`
+(`control_surface` | `companion` | `unspecified`), `executor_kind`, `model`, `host_class`,
+`is_resumable`. The room records the declaration and verifies none of it.
+
+**No behaviour derives from a declaration.** Runtime policy is a function of negotiated
+capabilities and room policy only (ADR-010); a room that routed work by declared role
+would let a worker widen its own treatment by editing one string. Connections with no
+attachment appear as their own runtime — NULL means *no durable runtime*, never *no
+runtime*.
+
 ## 5. Reconnect & replay
 
 - Client reconnects with `since_seq = <last seq it fully processed>`.

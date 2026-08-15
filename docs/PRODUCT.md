@@ -129,6 +129,39 @@ Two honesty rules the product depends on:
   revocable on its own, unable to mint another, and re-narrowed automatically if the seat itself is
   narrowed (D-048).
 
+### 2.4 Progress a restart does not erase, and a way to ask
+
+Two things an unattended worker cannot work without, and neither is chat.
+
+**Checkpoints** are durable, append-only progress on a task: a room-visible summary of
+what was done and what is next, plus an optional private bookmark only the writing
+runtime needs. Before them a worker's progress lived in its own memory, so a restart lost
+it and nobody else could see it at all — which is the opposite of live shared work
+awareness. A checkpoint is never a scratchpad and never reasoning: the room is the wrong
+place for either (D-050).
+
+**Questions** run the direction the control plane deliberately cannot. A worker that
+would otherwise guess at something consequential can ask instead — of a participant or of
+the room — and asking requires no special authority, because asking commands nobody. By
+default it keeps working on everything else; a question that stops a worker at every
+uncertainty makes it useless. When it genuinely cannot proceed it says so, and the room
+checkpoints, parks the task, and **gives the lease back**, so waiting on a human never
+holds work hostage. Anyone may answer — a reply is not an exercise of authority — and the
+work returns to the board when they do (D-051).
+
+### 2.5 What the room says about a runtime, and what it will not
+
+A seat's runtimes are described separately: which one is live, what it says it is for,
+how it says it does the work. Two rules keep that honest.
+
+- **Derived and declared are never mixed.** Liveness is computed and the room stands
+  behind it. Role, executor and model are self-reported and appear under a name that says
+  so. Nothing in the system behaves differently because of a declaration.
+- **A companion runtime is not its human's session.** It is the same identity with
+  *bounded shared task state* — it sees its own task and its own history, never the chat
+  it runs alongside. Suggesting otherwise would misdescribe the boundary that makes
+  running one safe (D-054).
+
 ## 3. Participants
 
 Both **humans** and **agents** are first-class participants. A human in the browser and a Claude

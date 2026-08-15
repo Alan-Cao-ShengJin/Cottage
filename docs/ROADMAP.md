@@ -226,24 +226,37 @@ testing against proxy and connector idle timeouts, not just a config change.
   executor boundary (`worker/executors.py`) separates *what work means* from *how work is
   coordinated*; no vendor SDK on either side of it.
 
-**Still open in this milestone**, and now the critical path, agreed with the ChatGPT participant:
+**The critical path agreed with the ChatGPT participant — five of six done the same day:**
 
-1. **Checkpoints** — per-task, append-only, a room-visible progress summary plus an optional
-   same-seat-only structured resume payload. Never a scratchpad, never chain-of-thought.
-2. **Questions and answers** — a worker→human primitive that is *not* a reversed directive, since
-   issuing a directive requires `room.admin` precisely so a worker cannot manufacture instructions.
-   Non-blocking by default; `blocking=true` checkpoints, moves the task to `waiting_input`, and
-   **releases the lease**, so a blocked worker cannot hold work hostage while it waits.
-3. **Resume hydration** exposing both, with privacy filtering and a latest-N projection.
-4. **Per-attachment visibility** — the room must show *which runtime*, honestly: interactive
-   control surface versus companion worker, executor kind, and provider/model where known. It must
-   never imply a companion process is the chat session or shares its context.
-5. **An intelligent unattended run.** The subprocess executor delegating to an agent CLI its owner
-   already authorized is the shortest honest path, and it is bring-your-own-agent one layer below
-   where the server holds the same line: no API key reaches the worker and none reaches us. A
-   direct vendor SDK adapter is a third case, not a privileged one, and comes after.
+1. **Checkpoints** ✅ D-050 — per-task, append-only, fenced. A room-visible summary plus an
+   optional private bookmark, delivered as *two events*, because an event carries exactly one
+   audience and a projection trusted to redact is a projection that eventually forgets.
+2. **Questions and answers** ✅ D-051 — a worker→human primitive that is deliberately *not* a
+   reversed directive, since issuing a directive requires `room.admin` precisely so a worker
+   cannot manufacture instructions. Non-blocking by default; `blocking=true` checkpoints,
+   parks the task as `waiting_input` and releases the lease, all in one transaction.
+3. **Resume hydration** ✅ — checkpoints for held tasks, open questions in both directions,
+   and `answers_for_you`, which the E2E proved necessary: a restarted runtime starts at the
+   current cursor, so the one event it most needs is already behind it.
+4. **Per-runtime visibility** ✅ D-054 — presence describes each runtime separately and keeps
+   *derived* facts apart from *declared* ones. Nothing in the server branches on a declaration.
+5. **Executor hardening** ✅ D-052 — prompt over stdin rather than argv, no shell, an
+   environment allowlist, bounded output, a given cwd, and `cancel()` that kills the process
+   tree. The loop can now interrupt a step in flight, and renews the lease during one.
+6. **An intelligent unattended run** — the remaining gate, and the one the whole milestone is
+   for. The subprocess executor delegating to an agent CLI its owner already authorized is the
+   shortest honest path: bring-your-own-agent one layer below where the server holds the same
+   line, with no API key reaching the worker and none reaching us. **Blocked only on an
+   authorized agent CLI being present on the machine that runs the worker.** A direct vendor
+   SDK adapter is a third case, not a privileged one, and comes after.
 
-**The distinction that governs items 1–5** (D-049): the stop proof establishes that the
+Verified against the deployed instance rather than the suite:
+`scripts/verify_runtime_credential.py`, 17 checks each written as an attempt that *must* fail,
+including revoking a credential **while it holds a live lease**. It found D-053 — splitting a
+scope had silently removed a permission from every participant stored before the change, which
+no unit test could construct because every unit test builds a fresh one.
+
+**The distinction that governs items 1–6** (D-049): the stop proof establishes that the
 *coordination mechanism* works, with a fixed handler as the executor. It establishes nothing about
 a worker that thinks. Deterministic orchestration proof and intelligent-worker proof are separate
 claims needing separate evidence, and the deterministic one must be re-run **through the executor
