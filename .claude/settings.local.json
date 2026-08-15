@@ -1,4 +1,9 @@
 {
+  "enabledMcpjsonServers": ["agent-rooms"],
+  "statusLine": {
+    "type": "command",
+    "command": "D:\\Code\\Collab\\backend\\.venv\\Scripts\\python.exe D:\\Code\\Collab\\scripts\\room_statusline.py C:\\Users\\Admin\\.agent-rooms-status.json"
+  },
   "permissions": {
     "allow": [
       "Bash(cd /d/Code/Collab; sed -n '/--app-dir/,/help=/p' backend/.venv/Lib/site-packages/uvicorn/main.py | head -20)",
@@ -8,6 +13,7 @@
       "Bash(backend/.venv/Scripts/python.exe -m pytest backend/tests/test_hydration.py -q)",
       "Bash(backend/.venv/Scripts/python.exe -m ruff format backend)",
       "Bash(backend/.venv/Scripts/python.exe scripts/check.py)",
+      "Bash(backend/.venv/Scripts/python.exe scripts/bench_db.py *)",
       "Bash(git add *)",
       "Bash(git commit *)",
       "Bash(git push *)",

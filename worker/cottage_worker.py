@@ -757,6 +757,13 @@ class Worker:
                 self.executor.cancel()
                 thread.join(30)
                 return None
+            # Both, and the heartbeat is the one that was missing. Renewal keeps the
+            # *lease* alive; presence is graded on heartbeat age, and a step that
+            # thinks for longer than a few heartbeat intervals had its seat graded
+            # stale and its own claim reaped out from under it — after which `halted`
+            # correctly saw no claim and abandoned the step. A worker that is plainly
+            # working must not read as absent.
+            self.beat()
             self.renew_if_needed()
 
         if "error" in failure:
@@ -847,6 +854,22 @@ class Worker:
             self.progress.pop(task_id, None)
             self.lease = None
 
+    def beat(self) -> None:
+        """Say we are still here.
+
+        Separate from `wait` because the two callers have opposite shapes: the idle
+        loop beats between polls, and a *working* loop has to beat from inside a step
+        that may run for many minutes. Only the first existed, so a companion doing
+        long work went stale precisely because it was busy.
+
+        Never fatal. A missed beat costs presence grading, which recovers on the next
+        one; raising here would cost the step.
+        """
+        try:
+            self.call("POST", "/heartbeat", {"connection_id": self.connection_id})
+        except (CottageError, urllib.error.URLError) as exc:
+            log.debug("heartbeat failed, continuing: %s", exc)
+
     def wait(self) -> None:
         """Stay reachable, then wait an interval.
 
@@ -860,12 +883,8 @@ class Worker:
         gap and it is recorded rather than papered over: this loop polls on an
         interval, which is what `supports_poll` claims and all it claims.
         """
+        self.beat()
         try:
-            self.call(
-                "POST",
-                "/heartbeat",
-                {"connection_id": self.connection_id},
-            )
             result = self.call("GET", f"/events?since_seq={self.cursor}&limit=50")
             self.cursor = max(self.cursor, int(result.get("cursor") or self.cursor))
         except CottageError as exc:

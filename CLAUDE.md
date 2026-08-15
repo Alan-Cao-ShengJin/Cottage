@@ -102,6 +102,14 @@ already cost time — do not write commands that hit them:
 - **Bare `uvicorn` / `pytest` / `ruff` resolve to the *global* Python**, which lacks this
   project's dependencies, so they fail with `ModuleNotFoundError` rather than doing nothing
   obvious. Always invoke through the venv interpreter: `backend\.venv\Scripts\python.exe -m …`.
+- **Piping a file into a native command prepends a UTF-8 BOM.** `Get-Content x | flyctl …`
+  arrives as `﻿OPERATOR_TOKEN=…`, and the receiver rejects a name it cannot parse.
+  The file itself is clean — PS 5.1 adds the preamble on the way out. Use the Bash tool
+  (`cat x | …`) for anything piped into an external program.
+- **`Start-Process -ArgumentList` splits on spaces without quoting.** Any argument with a
+  space silently becomes two, so a long `--declare-model "a b"` reaches argparse as an
+  unrecognised extra and the process dies at parse time — before logging is configured, so
+  it leaves no log at all. Pass such values through `COTTAGE_*` environment variables.
 
 ```powershell
 # one-time setup (from repo root)
