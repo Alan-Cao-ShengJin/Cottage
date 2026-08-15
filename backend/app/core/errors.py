@@ -67,6 +67,20 @@ class LeaseConflict(RoomError):
     status_code = 409
 
 
+class LeaseRequired(RoomError):
+    """The caller holds no lease on work that may only be finished by its holder.
+
+    Distinct from `lease_conflict` on purpose. "Someone else holds this" and "you
+    hold nothing" call for different responses — wait versus claim — and collapsing
+    them into one code would leave an agent retrying against a lease that does not
+    exist. Absence of a holder is an authorization failure, not a vacuous success
+    (D-027).
+    """
+
+    code = "lease_required"
+    status_code = 409
+
+
 class StaleFence(RoomError):
     """The caller's fence is behind the task's. It lost the lease and must re-read."""
 

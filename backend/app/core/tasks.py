@@ -58,6 +58,7 @@ from .errors import (
     CapabilityUnsupported,
     InvalidCommand,
     LeaseConflict,
+    LeaseRequired,
     NotFound,
     StaleFence,
 )
@@ -599,6 +600,27 @@ def _assert_holder(row, participant: Participant) -> None:
     )
 
 
+def _require_live_lease(row, participant: Participant) -> None:
+    """The full precondition for an operation that only a holder may perform.
+
+    Three parts, and the third is the one D-026 left out: an *active* lease, held by
+    *this* caller, at the current fence. `_assert_holder` alone is satisfied by a task
+    nobody holds — and "nobody holds it" is not the same as "you hold it". Completing
+    work you never claimed leaves the board asserting a job was done with no lease
+    trail showing anyone did it (D-027).
+    """
+    _assert_holder(row, participant)
+    holder = row["claim_participant_id"]
+    expired = is_past(row["claim_expires_at"]) if row["claim_expires_at"] else True
+    if holder is None or expired:
+        raise LeaseRequired(
+            "You hold no lease on this task, so you cannot finish it. Claim it first — "
+            "the claim is what records that you were the one doing the work.",
+            task_id=row["id"],
+            status=row["status"],
+        )
+
+
 async def update(*, participant: Participant, command: UpdateTaskCommand) -> Task:
     room = await store.load_room(participant.room_id)
     authz.require_scope(participant, Scope.TASK_PROPOSE)
@@ -707,7 +729,7 @@ async def complete(*, participant: Participant, command: CompleteTaskCommand) ->
         if row["status"] == "done":
             return CommandOutcome(result={"task_id": command.task_id})
         _assert_fence(row, command.fence)
-        _assert_holder(row, participant)
+        _require_live_lease(row, participant)
 
         now = utcnow_iso()
         # See the note in `update`: the holder condition belongs in the WHERE clause
@@ -720,21 +742,17 @@ async def complete(*, participant: Participant, command: CompleteTaskCommand) ->
                 claim_claimed_at = NULL, claim_expires_at = NULL,
                 claim_heartbeat_interval_s = NULL, claim_renewed_at = NULL
             WHERE id = ? AND status NOT IN ('done','cancelled')
-              AND (claim_participant_id IS NULL OR claim_participant_id = ?
-                   OR claim_expires_at <= ?)
+              AND claim_participant_id = ? AND claim_expires_at > ?
             """,
             (command.result, now, now, command.task_id, participant.id, now),
         )
         if affected == 0:
             current = await tx.fetch_one("SELECT * FROM tasks WHERE id = ?", (command.task_id,))
-            if current is not None and current["claim_participant_id"] not in (
-                None,
-                participant.id,
-            ):
-                raise LeaseConflict(
-                    "Another participant claimed this task while you were completing it.",
-                    task_id=command.task_id,
-                )
+            if current is not None and current["status"] not in ("done", "cancelled"):
+                # The lease went away between the read and the write — expiry, or a
+                # reclaim by someone else. Re-deriving the reason from the row keeps
+                # the message true rather than merely convenient.
+                _require_live_lease(current, participant)
             raise InvalidCommand("That task is already finished.", task_id=command.task_id)
 
         event = await eventlog.append(

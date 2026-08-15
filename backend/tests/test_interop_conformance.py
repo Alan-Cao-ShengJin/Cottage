@@ -282,6 +282,73 @@ async def test_a_held_task_cannot_be_finished_or_edited_by_a_non_holder(mixed_ro
     assert finished.status is TaskStatus.DONE
 
 
+async def test_completion_requires_a_live_lease_in_every_task_state(mixed_room):
+    """The state axis of the matrix, which D-026 fixed only one cell of.
+
+    Reviewing D-026, the ChatGPT participant pointed out that "held by another" and
+    "held by nobody" are different states and only the first had been closed: an
+    unclaimed task still accepted `complete` from anyone who presented its public
+    `fence: 0`, because there was no holder to compare the caller against. Absence of
+    a lease read as a vacuous ownership success.
+
+    So the property is stated over states, not over one example: completion requires
+    an *active* lease, held by *this* caller, at the current fence (D-027).
+    """
+    owner = mixed_room.fixture.owner
+    stranger = mixed_room.guest_participant
+
+    async def fresh(title: str):
+        return await tasks.create(participant=owner, command=CreateTaskCommand(title=title))
+
+    # unclaimed → nobody may complete it, including the participant that created it
+    never_claimed = await fresh("Nobody has claimed this")
+    for actor, who in ((stranger, "a stranger"), (owner, "its own creator")):
+        with pytest.raises(RoomError) as refused:
+            await tasks.complete(
+                participant=actor,
+                command=CompleteTaskCommand(task_id=never_claimed.id, fence=0, result="x"),
+            )
+        assert refused.value.code == "lease_required", f"{who} completed an unclaimed task"
+    assert (await store.load_task(never_claimed.id)).status is not TaskStatus.DONE
+
+    # held by another → lease_conflict, a different answer calling for a different move
+    held = await fresh("Held by the pushable participant")
+    claimed = await tasks.claim(
+        participant=mixed_room.push.participant, command=ClaimTaskCommand(task_id=held.id)
+    )
+    assert claimed.claim is not None
+    with pytest.raises(RoomError) as conflicted:
+        await tasks.complete(
+            participant=stranger,
+            command=CompleteTaskCommand(task_id=held.id, fence=claimed.claim.fence, result="x"),
+        )
+    assert conflicted.value.code == "lease_conflict"
+
+    # held by self → the only state in which completion is authorized
+    finished = await tasks.complete(
+        participant=mixed_room.push.participant,
+        command=CompleteTaskCommand(task_id=held.id, fence=claimed.claim.fence, result="done"),
+    )
+    assert finished.status is TaskStatus.DONE
+
+    # lease expired → the holder itself loses the right, which is what expiry means
+    lapsed = await fresh("Claimed, then left to lapse")
+    lease = await tasks.claim(
+        participant=mixed_room.push.participant, command=ClaimTaskCommand(task_id=lapsed.id)
+    )
+    assert lease.claim is not None
+    await store.db.execute(
+        "UPDATE tasks SET claim_expires_at = ? WHERE id = ?",
+        ("2000-01-01T00:00:00.000Z", lapsed.id),
+    )
+    with pytest.raises(RoomError) as stale:
+        await tasks.complete(
+            participant=mixed_room.push.participant,
+            command=CompleteTaskCommand(task_id=lapsed.id, fence=lease.claim.fence, result="x"),
+        )
+    assert stale.value.code == "lease_required"
+
+
 # ---------------------------------------------------------------------------
 # 3. A stale fence is refused, whichever path presents it
 # ---------------------------------------------------------------------------

@@ -216,6 +216,14 @@ The exclusivity primitive. Rules:
 3. Every mutation of a claimed task (`update`, `complete`, `release`, `renew`, `block`) must present
    the current `fence`. A lower fence → `stale_fence` error. This is what stops a revived claimant
    that lost its lease from corrupting state.
+   **The fence is necessary and never sufficient.** It is published in the room projection and in
+   `task.claimed`, because every participant needs it to reason about staleness — so it can only
+   ever establish *which lease generation* a caller is acting against, never *who* the caller is.
+   A lease-gated operation requires all three of: an active unexpired lease, held by the caller,
+   at the current fence. Held by someone else → `lease_conflict` (wait). Held by nobody →
+   `lease_required` (claim it first); absence of a holder is a failure, not a vacuous pass.
+   `complete` is lease-gated: **a task cannot be finished by a participant that never claimed
+   it**, because the claim is the record that they were the one doing the work (D-026, D-027).
 4. `task.claim_renew` extends `expires_at` and keeps the same `fence`. Renewal is only valid before
    expiry; after expiry the participant must re-claim and gets a new fence.
 5. Expiry is enforced **on read** (any load of the task returns the effective state) and by a
@@ -292,7 +300,8 @@ Detection is advisory and always surfaces as a `conflict` record — the room wa
 | `not_found` | unknown or not visible to this participant |
 | `room_closed` | room is not `open` |
 | `invalid_command` | schema/semantic validation failure |
-| `lease_conflict` | task already validly claimed |
+| `lease_conflict` | task already validly claimed by another participant — wait |
+| `lease_required` | caller holds no active lease on a lease-gated operation — claim first |
 | `stale_fence` | fence lower than current |
 | `revision_conflict` | state CAS mismatch |
 | `artifact_divergence` | publish diverged from head |

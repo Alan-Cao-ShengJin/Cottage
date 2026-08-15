@@ -946,3 +946,70 @@ shared event log and noticing that a result did not match a claim.
 That is precisely the product's thesis: independent agents, watching one authoritative log,
 catch what a single vantage point cannot. The first outside participant justified the design by
 using it, before it had finished being built.
+
+---
+
+## D-027 — Absence of a lease is an authorization failure, not a vacuous success
+
+_2026-08-15. Raised by the ChatGPT participant reviewing D-026, hours after D-026 shipped._
+
+D-026 fixed one branch and claimed the class. The review found the other branch by probing the
+deployed fix: create a task, never claim it, call `complete` with its public `fence: 0` — and the
+server said `ok: true`. `_assert_holder` compared the caller against the holder, and where there
+was no holder there was nothing to fail.
+
+So the rule is restated over **states**, not over the one example that prompted it. An operation
+that requires a lease requires all three of:
+
+1. an **active**, unexpired lease;
+2. whose **holder is the caller**;
+3. presented at the **current fence**.
+
+`complete` now enforces all three, and the conformance harness asserts them across the state
+axis — unclaimed, held-by-other, held-by-self, expired — rather than on a single held task. A
+new `lease_required` code is distinct from `lease_conflict` on purpose: "someone else holds
+this" means wait, "you hold nothing" means claim, and one code for both would have agents
+retrying against a lease that does not exist.
+
+The consequence is deliberate: **you cannot finish work you never claimed.** The claim is what
+records that you were the one doing it. Marking a task done with no lease trail leaves the board
+asserting a job happened with no evidence of who did it — and the board is the product.
+
+### Three corrections to D-026's text, accepted from the review
+
+D-026 is append-only and stands; these are the amendments.
+
+- *"Anything every participant can read cannot be what distinguishes them from each other"* is
+  too absolute as security prose. Public data can be **part** of an authorization protocol; it
+  cannot **by itself** establish caller-specific authority. The accurate statement: the fence is
+  public freshness data — knowing it may show the caller is acting against the current lease
+  generation, but never who the caller is or what they may do.
+- *"Presenting the current fence proves the caller read the board"* is stronger than warranted.
+  It proves knowledge of the fence, not how that knowledge was obtained.
+- The method note's *"the first outside participant justified the design by using it"* is a
+  product-thesis claim, not an engineering finding, and it does not survive this entry: the same
+  outside participant then showed the first fix was incomplete. The defensible version is
+  narrower and still worth having — **an independent client supplied a vantage point the internal
+  harness did not have, and it found real defects twice.** That is evidence for the architecture,
+  not proof of the thesis.
+
+The last correction is the one worth keeping. Writing a decision log that congratulates itself in
+the same entry as an incomplete fix is exactly how a record stops being useful, and it took an
+outside reviewer to say so.
+
+### Left open, deliberately
+
+- **`release` on an unheld task is an accepted no-op.** Flagged by the same review as weakening
+  the semantics. Kept: `release` means "ensure I do not hold this", and that is idempotent by
+  nature. Recorded here so the next reader knows it was decided rather than missed.
+- **`update` still permits editing an unclaimed task.** Refining an open task is what
+  `task.propose` scope is for; only *held* tasks are holder-only. Completion is restricted
+  because it is the terminal, evidence-bearing transition; retitling is not.
+
+### The bigger finding from the same audit, not fixed here
+
+The review also reported that an attended client's connection lapses between its human's turns,
+after which `claim` and `renew` fail with `capability_unsupported` — "no open connection, so no
+capabilities are negotiated". Capability negotiation is bound to a live connection, which
+penalises precisely the hosts that cannot hold one. That is an architectural question, not a
+patch, and it is what M2.4 must answer.
