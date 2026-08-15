@@ -11,6 +11,13 @@ Two design points carry weight:
   stopped heartbeating is shown but marked stale, because the alternative — quietly
   keeping it as current — is how a room ends up coordinating around work that
   stopped an hour ago.
+* **Two clocks, because being alive and making progress are two claims** (D-059).
+  `heartbeat_at` answers "is the owner's runtime still here" and is refreshed by the
+  connection heartbeat, so a worker inside a single long step stops being reported as
+  stuck. `progress_at` answers "did the work itself move" and is refreshed only by
+  declare, update, or a checkpoint on the task — never by a transport beat. Collapsing
+  them would make staleness unreachable for anything with a live socket, which is a
+  status that means nothing.
 """
 
 from __future__ import annotations
@@ -56,8 +63,8 @@ async def declare(*, participant: Participant, command: DeclareWorkCommand) -> W
             INSERT INTO work_declarations (
                 id, room_id, participant_id, headline, status, targets, task_id,
                 note, privacy_class, started_at, updated_at, heartbeat_at,
-                expected_done_by
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                progress_at, expected_done_by
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 work_id,
@@ -69,6 +76,7 @@ async def declare(*, participant: Participant, command: DeclareWorkCommand) -> W
                 command.task_id,
                 command.note,
                 decision.privacy_class.value,
+                now,
                 now,
                 now,
                 now,
@@ -147,10 +155,23 @@ async def update(*, participant: Participant, command: UpdateWorkCommand) -> Wor
             """
             UPDATE work_declarations
             SET headline = ?, status = ?, targets = ?, note = ?,
-                expected_done_by = ?, updated_at = ?, heartbeat_at = ?
+                expected_done_by = ?, updated_at = ?, heartbeat_at = ?, progress_at = ?
             WHERE id = ? AND ended_at IS NULL
             """,
-            (headline, status.value, db.dumps(targets), note, expected, now, now, command.work_id),
+            (
+                headline,
+                status.value,
+                db.dumps(targets),
+                note,
+                expected,
+                now,
+                now,
+                # An explicit update is the owner speaking about *this* work, so it
+                # counts as progress — this is the one call a client can still make to
+                # say "yes, really, still moving" when a step is unusually long.
+                now,
+                command.work_id,
+            ),
         )
         event = await eventlog.append(
             tx,
@@ -342,27 +363,95 @@ async def end_for_task_tx(
     return events
 
 
+async def touch_owner_heartbeats(participant_id: str) -> None:
+    """The owner's connection beat, so its open declarations are still current.
+
+    One beat means "I am here and so is my work" (D-059). Before this, a participant
+    could be graded `live_poll` while the room called its declared work
+    `heartbeat_lapsed` — the same silence read two contradictory ways, and the board
+    reported working agents as stuck. Two independent participants hit it in one room,
+    and the second had already written the client-side workaround and *still* lost the
+    race against a 120s threshold. A liveness signal a client must send twice, on two
+    clocks, for two subsystems, will be sent once.
+
+    Deliberately not an event, for the same reason heartbeats themselves are not:
+    heartbeats at 20s x N participants would drown the log (`docs/PROTOCOL.md` §3).
+    This writes a liveness timestamp, which is derived-state maintenance, not a state
+    change the room needs to replay — nothing about *what is being worked on* moves.
+
+    Declarations already flipped to `blocked` are refreshed too but stay blocked: the
+    heartbeat is evidence about the runtime, not a retraction of the stale finding, and
+    only the owner can say the work is live again.
+    """
+    await db.execute(
+        "UPDATE work_declarations SET heartbeat_at = ? WHERE participant_id = ? "
+        "AND ended_at IS NULL",
+        (utcnow_iso(), participant_id),
+    )
+
+
+async def note_progress_tx(tx: db.Tx, *, room_id: str, task_id: str) -> None:
+    """A checkpoint landed on this task, so the work attached to it demonstrably moved.
+
+    This is the clock a transport beat cannot forge. A checkpoint is a worker saying
+    what it just finished, which is evidence of progress in a way "my socket is open"
+    is not — so it, not the heartbeat, is what holds off `no_progress`.
+
+    Inside the caller's transaction: the checkpoint and the freshness it implies are
+    one fact, and a crash between them would leave the room believing a worker that
+    just reported a completed step had stopped moving.
+    """
+    now = utcnow_iso()
+    await tx.execute(
+        "UPDATE work_declarations SET heartbeat_at = ?, progress_at = ? "
+        "WHERE room_id = ? AND task_id = ? AND ended_at IS NULL",
+        (now, now, room_id, task_id),
+    )
+
+
 async def mark_stale_declarations(room: Room) -> list[EventEnvelope]:
-    """Emit `work.stale` for declarations whose owner stopped heartbeating.
+    """Emit `work.stale` for declarations that can no longer be trusted as current.
+
+    Three ways to get here, and they say different things (D-059):
+
+    * `owner_presence_lost` — the owner is stale or gone. Untouched by the two-clock
+      change and deliberately so; it is the path that was always right.
+    * `heartbeat_lapsed` — nothing has beaten for this seat. Now a real transport
+      silence rather than "the worker was busy for two minutes".
+    * `no_progress` — beating steadily, but no declare, update, or checkpoint inside
+      `work_progress_stale_after_seconds`. This is what a wedged worker looks like, and
+      it is why the heartbeat refresh does not make staleness unreachable.
 
     Emitted once per declaration — the guard is `status != 'blocked'` plus the
-    heartbeat check, and the status flip to `blocked` is what makes it non-repeating.
+    freshness checks, and the status flip to `blocked` is what makes it non-repeating.
     """
     from . import presence
 
     presences = await presence.presence_for_room(room)
     cutoff = room.policy.work_stale_after_seconds
+    progress_cutoff = room.policy.work_progress_stale_after_seconds
     now = utcnow()
     events: list[EventEnvelope] = []
 
     for work in await store.list_open_work(room.id):
         view = presences.get(work.participant_id)
         heartbeat_age = (now - from_iso(work.heartbeat_at)).total_seconds()
+        progress_age = (now - from_iso(work.progress_at)).total_seconds()
         owner_gone = view is None or view.liveness.value in {"stale", "disconnected"}
-        if not (owner_gone or heartbeat_age > cutoff):
+        stalled = progress_age > progress_cutoff
+        if not (owner_gone or heartbeat_age > cutoff or stalled):
             continue
         if work.status == WorkStatus.BLOCKED:
             continue
+        # Ordered by what a reader should act on. A vanished owner explains the
+        # silence, so it outranks both timers; a dead transport explains missing
+        # progress, so it outranks that.
+        if owner_gone:
+            reason = "owner_presence_lost"
+        elif heartbeat_age > cutoff:
+            reason = "heartbeat_lapsed"
+        else:
+            reason = "no_progress"
         async with db.transaction() as tx:
             affected = await tx.execute(
                 "UPDATE work_declarations SET status = 'blocked', updated_at = ? "
@@ -381,7 +470,8 @@ async def mark_stale_declarations(room: Room) -> list[EventEnvelope]:
                         "work_id": work.id,
                         "participant_id": work.participant_id,
                         "last_heartbeat_at": work.heartbeat_at,
-                        "reason": "owner_presence_lost" if owner_gone else "heartbeat_lapsed",
+                        "last_progress_at": work.progress_at,
+                        "reason": reason,
                     },
                 )
             )
@@ -389,8 +479,14 @@ async def mark_stale_declarations(room: Room) -> list[EventEnvelope]:
 
 
 async def is_stale(work: WorkDeclaration, room: Room, *, now=None) -> bool:
-    age = ((now or utcnow()) - from_iso(work.heartbeat_at)).total_seconds()
-    return age > room.policy.work_stale_after_seconds
+    """Both clocks, since either one lapsing makes the card untrustworthy."""
+    at = now or utcnow()
+    heartbeat_age = (at - from_iso(work.heartbeat_at)).total_seconds()
+    progress_age = (at - from_iso(work.progress_at)).total_seconds()
+    return (
+        heartbeat_age > room.policy.work_stale_after_seconds
+        or progress_age > room.policy.work_progress_stale_after_seconds
+    )
 
 
 def _normalized_targets(targets: list[str]) -> list[str]:

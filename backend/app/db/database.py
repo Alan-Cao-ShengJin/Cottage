@@ -342,6 +342,11 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # is not evidence of self-answering.
     ("questions", "asked_by_attachment_id", "TEXT"),
     ("questions", "answered_by_attachment_id", "TEXT"),
+    # D-059. NULL on every declaration written before the two clocks were separated,
+    # and readers coalesce it to `heartbeat_at`. That is the honest reading rather than
+    # a convenience: back then `heartbeat_at` was refreshed *only* by declare/update,
+    # which is exactly the progress evidence this column now carries.
+    ("work_declarations", "progress_at", "TEXT"),
 )
 
 

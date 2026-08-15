@@ -382,7 +382,13 @@ CREATE TABLE IF NOT EXISTS work_declarations (
     privacy_class     TEXT NOT NULL DEFAULT 'room_public',
     started_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
+    -- "The owner's runtime is still here." Refreshed by the connection heartbeat as
+    -- well as by declare/update, so a worker inside a long step does not read as gone.
     heartbeat_at      TEXT NOT NULL,
+    -- "The work itself moved." Refreshed only by declare/update/checkpoint — never by
+    -- a transport beat, which is why staleness stays reachable for a wedged worker
+    -- whose connection is perfectly healthy (D-059).
+    progress_at       TEXT,
     expected_done_by  TEXT,
     ended_at          TEXT,
     end_reason        TEXT

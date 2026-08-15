@@ -33,7 +33,7 @@ from ..domain.disclosure import Audience, Disclosure, DisclosureDecision
 from ..domain.events import EventEnvelope, EventType
 from ..domain.room import Participant, PrivacyClass, Scope
 from ..util import utcnow_iso
-from . import authz, eventlog, presence, privacy, store, tasks
+from . import authz, eventlog, presence, privacy, store, tasks, work
 from .actors import actor_for
 from .dispatch import CommandOutcome, execute_command
 from .errors import NotFound
@@ -147,6 +147,12 @@ async def append(*, participant: Participant, command: AppendCheckpointCommand) 
                 now,
             ),
         )
+
+        # The work card attached to this task demonstrably moved (D-059). Same
+        # transaction: a checkpoint that survived while the freshness it implies did
+        # not would leave the room believing a worker that just reported a finished
+        # step had stopped.
+        await work.note_progress_tx(tx, room_id=room.id, task_id=command.task_id)
 
         if resume is not None:
             events.append(

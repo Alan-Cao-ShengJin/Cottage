@@ -111,8 +111,16 @@ scripts/         check.py gate, dev utilities
 ### Work awareness
 - **WorkDeclaration** — "what I am doing right now": headline, `status`
   (`active` | `paused` | `blocked` | `done`), `targets` (opaque scoped identifiers such as a repo
-  path or artifact id), optional linked task, `started_at`, `heartbeat_at`, `expected_done_by`.
-  Goes stale when the owning participant's presence goes stale.
+  path or artifact id), optional linked task, `started_at`, `expected_done_by`, and **two clocks**
+  (D-059): `heartbeat_at` — "the owner's runtime is here", refreshed by the connection heartbeat as
+  well as by declare/update — and `progress_at` — "the work itself moved", refreshed only by
+  declare, update, or a checkpoint on the linked task, never by a transport beat.
+  Goes stale three ways, in this precedence: the owning participant's presence goes stale
+  (`owner_presence_lost`), nothing beats for the seat inside `work_stale_after_seconds`
+  (`heartbeat_lapsed`), or the seat beats steadily while nothing advances inside
+  `work_progress_stale_after_seconds` (`no_progress`). Splitting the clocks is what stopped a worker
+  inside one long model step from being reported as stuck; keeping them separate is what keeps
+  staleness reachable for a worker whose socket is healthy and whose work is wedged.
 
 ### Task graph
 - **Task** — node. `status` = `proposed` | `open` | `claimed` | `in_progress` | `blocked` | `done` |

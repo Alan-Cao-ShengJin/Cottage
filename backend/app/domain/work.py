@@ -47,8 +47,14 @@ class WorkDeclaration(BaseModel):
     privacy_class: PrivacyClass = PrivacyClass.ROOM_PUBLIC
     started_at: str
     updated_at: str
-    #: Last time the owner affirmed this is still happening.
+    #: Last time the owner's runtime was known to be here — refreshed by the connection
+    #: heartbeat as well as by declare/update, because a step that outlives the stale
+    #: window is normal work, not absence (D-059).
     heartbeat_at: str
+    #: Last time the work itself moved: declare, update, or a checkpoint on its task.
+    #: A transport beat never touches this, which is what keeps staleness reachable for
+    #: a worker that is connected but wedged.
+    progress_at: str
     expected_done_by: str | None = None
     ended_at: str | None = None
     end_reason: WorkEndReason | None = None

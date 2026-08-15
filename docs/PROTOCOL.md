@@ -83,7 +83,7 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 | `work.declared` | work_id, participant_id, headline, status, targets, task_id, expected_done_by |
 | `work.updated` | work_id, headline, status, targets, note |
 | `work.ended` | work_id, reason (`completed` \| `abandoned` \| `superseded` \| `presence_lost`) |
-| `work.stale` | work_id, last_heartbeat_at, reason |
+| `work.stale` | work_id, participant_id, last_heartbeat_at, last_progress_at, reason (`owner_presence_lost` \| `heartbeat_lapsed` \| `no_progress`) |
 | `task.created` | task_id, title, description, status, targets, priority, created_by_participant_id |
 | `task.updated` | task_id, title, description, targets, priority, status |
 | `task.cancelled` | task_id, reason |
@@ -139,6 +139,36 @@ Presence is derived, never asserted.
 
 - Transitions to `stale` mark that participant's work declarations stale. Transition to
   `disconnected` ends its open work declarations and expires its claims.
+- **A heartbeat refreshes the sender's open work declarations** (D-059). One beat means "I am here
+  and so is my work". Clients do **not** send a second liveness signal for current work: requiring
+  one produced a room that graded a participant `live_poll` while calling its declared work
+  `heartbeat_lapsed`, and two independent hosts hit it inside a single step. It refreshes
+  `heartbeat_at` only — never `progress_at`, below.
+
+### Work freshness — two clocks (D-059)
+
+A declaration carries two timestamps, because *being alive* and *making progress* are two claims and
+only one of them was ever being made.
+
+| Clock | Refreshed by | Answers |
+|---|---|---|
+| `heartbeat_at` | connection heartbeat, `work.declare`, `work.update` | is the owner's runtime still here |
+| `progress_at` | `work.declare`, `work.update`, `task.checkpoint` on its task | did the work itself move |
+
+`work.stale` fires once per declaration — the flip to `blocked` is what makes it non-repeating — with
+one of three reasons, in precedence order:
+
+| reason | means |
+|---|---|
+| `owner_presence_lost` | the owner is `stale` or `disconnected` |
+| `heartbeat_lapsed` | nothing has beaten for this seat within `work_stale_after_seconds` (120s) |
+| `no_progress` | beating, but no declare/update/checkpoint within `work_progress_stale_after_seconds` (900s) |
+
+What a reader may conclude from a fresh card is correspondingly weaker: the owner's runtime is
+connected *and* something advanced within the progress window. It is no longer evidence that the
+worker said anything about this specific work recently. A worker wedged mid-step therefore reads as
+busy for up to `work_progress_stale_after_seconds` — that value is the honest upper bound on how
+long the board can be wrong about it, and it is room policy so a room may demand to be told sooner.
 
 ### Credentials that can join
 

@@ -333,16 +333,23 @@ async def connect(
 async def heartbeat(
     *, connection_id: str, participant: Participant, seq: int | None = None
 ) -> None:
-    """Refresh a connection's liveness.
+    """Refresh a connection's liveness, and with it the owner's open work.
 
     Not written to the event log: heartbeats at 20s x N participants would swamp the
     log and drown the events that carry meaning. Only *grade transitions* are
     events (`docs/PROTOCOL.md` §3).
+
+    One beat, both facts (D-059). Requiring a second beat on a second clock to keep a
+    work card fresh is how the room came to grade a participant `live_poll` while
+    calling its declared work `heartbeat_lapsed`. What the beat does *not* refresh is
+    `progress_at` — a live socket is not evidence that anything is moving.
     """
+    from . import work
+
     room = await store.load_room(participant.room_id)
     before = await _grade_participant(None, participant.id, room)
 
-    await db.execute(
+    beat = await db.execute(
         """
         UPDATE connections
         SET last_heartbeat_at = ?, last_delivered_seq = MAX(last_delivered_seq, ?)
@@ -350,6 +357,11 @@ async def heartbeat(
         """,
         (utcnow_iso(), seq or 0, connection_id, participant.id),
     )
+    if beat:
+        # Only a beat that landed on a live connection counts. A heartbeat naming a
+        # closed connection refreshes nothing here either, or the work card would
+        # outlive the transport it claims to be evidence of.
+        await work.touch_owner_heartbeats(participant.id)
 
     after = await _grade_participant(None, participant.id, room)
     if after != before:

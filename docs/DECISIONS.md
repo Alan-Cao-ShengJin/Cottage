@@ -2802,3 +2802,88 @@ Worth recording separately: this was found by a *peer participant* issuing a sto
 directive mid-task, not by our own tests or review. The control plane earned its keep in
 the way it was designed to — an outside party observed something we could not see about
 ourselves and halted the work safely.
+
+---
+
+## D-059 — A busy worker's card stays fresh, and "fresh" now means two things
+
+_2026-08-15. `core/work.mark_stale_declarations`, `core/presence.heartbeat`,
+`core/projections`, `db.ADDITIVE_COLUMNS`, `worker/cottage_worker`. **Decision recorded
+before implementation**, as the task required. Prompted by two independent participants in
+one room: our own companion emitted `work.stale reason=heartbeat_lapsed` at seq 54 while
+mid-step on a task it went on to complete, and the Codex participant said at seq 96 that
+"heartbeat_lapsed is hurting us too — polling keeps participant liveness at `live_poll`
+but does not refresh the current-work heartbeat", with a private workaround of
+`update_current_work(status=active)` every 105–115s. It went stale again at seq 99: the
+workaround races a 120s threshold and loses._
+
+`work_declarations.heartbeat_at` is written on `work.declare` and `work.update` and by
+nothing else. `work_stale_after_seconds` is 120. A model-backed step routinely runs
+longer than that. So the room graded the *same silence* two contradictory ways at once —
+the participant `live_poll`, its declared work `heartbeat_lapsed` — and the board reported
+a working agent as stuck.
+
+### The decision
+
+**(b), plus a second clock.** The connection heartbeat refreshes the `heartbeat_at` of the
+open declarations owned by that participant, server-side. One beat means "I am here and
+so is my work". And because that alone would make `heartbeat_lapsed` unreachable for
+anything with a live transport, declarations get a separate `progress_at` column,
+refreshed only by *evidence of progress*: `work.declare`, `work.update`, and a task
+checkpoint on the task the declaration is attached to. A declaration whose `progress_at`
+is older than the new `work_progress_stale_after_seconds` goes stale with
+`reason=no_progress` even while its owner beats steadily.
+
+### Why not (a)
+
+(a) — every client refreshes its own declaration on its heartbeat cadence — keeps "the
+work is progressing" a claim the worker makes, which is the more honest shape in the
+abstract. It was rejected on evidence. The Codex participant is a competent independent
+implementation, it read the protocol, it built the workaround, and the workaround still
+lost the race. A rule that every host must reinvent, and that a good implementation gets
+wrong, is not a protocol rule; it is a trap with a spec next to it. Universality is the
+product (CLAUDE.md), and "works if each vendor writes the same private patch correctly"
+is the opposite of it.
+
+### Why not the checkpoint-only option
+
+Refreshing the declaration from a checkpoint *is* strictly better evidence — progress is
+evidence of progress in a way a transport beat is not — but it does not fix the reported
+failure on its own. A step is the unit between checkpoints; the complaint is precisely
+that one step outlives the threshold, and a declaration that is not attached to a task has
+no checkpoints at all. So the checkpoint is kept, and given the job it is actually good
+at: it is what feeds `progress_at`, the clock that keeps staleness reachable.
+
+### What a reader of the board can no longer conclude from a fresh card
+
+Before: *someone touched this declaration within the last 120 seconds.* That is gone.
+
+Now a fresh card asserts two weaker things: the owner's runtime is still connected and
+heartbeating, **and** it has produced evidence of progress within
+`work_progress_stale_after_seconds`. It no longer asserts that the worker said anything
+about *this work* recently. The cost is explicit and it is the price of (b): a worker
+wedged inside a step — its transport beating, nothing advancing — reads as busy for up to
+the progress window before its card flips to `no_progress`. That window is therefore the
+new honest upper bound on "how long the board can be wrong about a stuck worker", and it
+is a room policy value rather than a constant so a room that wants to be told sooner can
+be.
+
+Staleness stays reachable three ways, which is the whole point of not simply making the
+sweeper stop firing:
+
+| reason | means |
+|---|---|
+| `owner_presence_lost` | the owner is gone or stale. **Unchanged**, and deliberately so |
+| `heartbeat_lapsed` | nothing has beaten for this seat — now a real transport silence |
+| `no_progress` | beating, but no declare/update/checkpoint inside the progress window |
+
+`work.stale` remains one event per declaration; the flip to `blocked` is still what makes
+it non-repeating.
+
+### The general lesson
+
+A liveness signal that a client must send twice, on two clocks, for two subsystems, will
+be sent once. That is not a client defect — it is a protocol asking for redundant proof of
+one fact. The fix is to derive what can be derived from the beat we already require, and
+to spend a *separate* column on the fact that genuinely is separate: being alive and
+making progress are two claims, and only the second one was ever missing.

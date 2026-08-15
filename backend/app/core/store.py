@@ -335,6 +335,9 @@ def to_work(row: Any, *, stale: bool = False) -> WorkDeclaration:
         started_at=row["started_at"],
         updated_at=row["updated_at"],
         heartbeat_at=row["heartbeat_at"],
+        # Coalesced for rows written before the two clocks were separated: back then
+        # `heartbeat_at` moved only on declare/update, which is progress evidence.
+        progress_at=row["progress_at"] or row["heartbeat_at"],
         expected_done_by=row["expected_done_by"],
         ended_at=row["ended_at"],
         end_reason=WorkEndReason(row["end_reason"]) if row["end_reason"] else None,

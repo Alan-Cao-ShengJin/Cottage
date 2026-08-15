@@ -214,6 +214,13 @@ class RoomPolicy(BaseModel):
     require_approval_for_cross_org_state_write: bool = False
     #: Bounds how long a work declaration survives with no heartbeat at all.
     work_stale_after_seconds: int = 120
+    #: Bounds how long a declaration survives with a live heartbeat but no evidence of
+    #: progress — no declare, update, or checkpoint. Necessarily longer than the
+    #: heartbeat window, because a single model-backed step is expected to fit inside
+    #: it; it is the honest upper bound on how long the board can be wrong about a
+    #: wedged worker (D-059). Matched to `default_lease_seconds` so a stuck worker's
+    #: card and its lease come up for question on the same timescale.
+    work_progress_stale_after_seconds: int = 900
     #: Hard caps that bound disclosure volume as well as storage.
     max_message_chars: int = 8000
     max_state_value_bytes: int = 64_000

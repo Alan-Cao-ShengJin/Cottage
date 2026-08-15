@@ -834,12 +834,20 @@ class Worker:
             self.lease = None
 
     def beat(self) -> None:
-        """Say we are still here.
+        """Say we are still here — which now also says our work is still here.
 
         Separate from `wait` because the two callers have opposite shapes: the idle
         loop beats between polls, and a *working* loop has to beat from inside a step
         that may run for many minutes. Only the first existed, so a companion doing
         long work went stale precisely because it was busy.
+
+        Since D-059 the server refreshes this seat's open work declarations on the same
+        beat, so there is deliberately **no** second timer here re-declaring current
+        work every ~110s. That workaround is what the Codex participant had to write,
+        and it lost the race anyway; carrying a copy of it would be exactly the
+        per-client patch the server change exists to delete. What still has to be
+        earned is `progress_at`, and this loop earns it the honest way — by
+        checkpointing each completed step (`record_checkpoint`).
 
         Never fatal. A missed beat costs presence grading, which recovers on the next
         one; raising here would cost the step.

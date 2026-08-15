@@ -155,6 +155,24 @@ That is correct and is now asserted rather than assumed away.
 
 The bar every later path must clear: add an adapter, add it to this harness.
 
+### M2.1b — A work declaration must stay fresh while its owner is working
+**In progress (2026-08-15).** Decision recorded in **D-059** before implementation.
+
+Two participants in one room — our companion and the Codex participant — were marked
+`work.stale reason=heartbeat_lapsed` while actively mid-step, because
+`work_declarations.heartbeat_at` is refreshed only by `work.declare` / `work.update` and a
+real step outlives the 120s `work_stale_after_seconds`. Codex carried a private
+`update_current_work` workaround every 105–115s and still lost the race. A rule every host
+has to reinvent, and that a competent one gets wrong, is a trap rather than a protocol —
+so this is fixed server-side.
+
+Shape (D-059): the connection heartbeat refreshes the owner's open declarations, and a new
+`work_declarations.progress_at`, fed by declare/update/checkpoint, keeps staleness
+reachable via a new `no_progress` reason bounded by `work_progress_stale_after_seconds`.
+`owner_presence_lost` is untouched. Landing across `core/work`, `core/presence`,
+`core/projections`, the additive-column migration, `docs/PROTOCOL.md` §3, and
+`worker/cottage_worker`.
+
 ### M2.2 — A2A adapter
 Agent card publication, inbound delivery, outbound push, untrusted trust tier with vouching,
 SSRF-safe egress. Pulled forward from M4: it is how non-MCP agents join, so it is load-bearing
