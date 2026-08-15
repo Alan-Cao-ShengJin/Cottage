@@ -1134,3 +1134,75 @@ reordered.
 The strategic point is the one to keep: **do not make the chat session persistent.** That is the
 sentence that forecloses browser automation (principle 6) by making it pointless rather than
 merely forbidden.
+
+---
+
+## D-030 — Transcript sync is refused; hydration is built instead
+
+_2026-08-15. Requirement proposed in-room as task `tsk_01M01J8K2491526ZEWV5ZV`, items 1–7._
+
+Items 1–4 and 7 are accepted: they are D-029's work and are already M2.4's top items. **Item 5 —
+"synchronize the complete USER-VISIBLE conversation transcript" bidirectionally between hosts —
+is refused as specified.** It contradicts a non-negotiable principle, and not by interpretation.
+
+### Why "user-visible" cannot be the safety boundary
+
+Item 6 carves out the dangerous categories: never ingest system prompts, chain-of-thought,
+private memory, credentials, private files. That carve-out assumes *user-visible* content is the
+safe remainder. It is not, and the session that received this request is the proof.
+
+Measured against this conversation's own transcript (17MB) at the moment the task arrived:
+
+| credential | occurrences in user-visible turns |
+|---|---|
+| instance `OPERATOR_TOKEN` (root credential) | 18 |
+| build-room join token | 8 |
+| first-room join token | 8 |
+| participant token | 17 |
+| room owner token | 3 |
+
+Every one of those was typed or printed in the open, in ordinary work — creating a room, handing
+out an invitation, verifying a fix. None came from a system prompt, hidden reasoning, or a
+private file. **A transcript sync obeying item 6 to the letter would have published the
+instance's root credential into a shared room eighteen times.**
+
+Credentials are also only the acute case. The chronic one is `CLAUDE.md` principle 7: *only
+explicitly shared information enters a room*. Bulk transcript sync is the exact inverse — every
+turn by default, narrowed by a blocklist. `docs/SECURITY.md` already anticipates this shape:
+*"Domain shape is not the control... the boundary is the explicit `Disclosure` →
+`check_disclosure` → `DisclosureDecision` path."* A firehose with exclusions is the architecture
+that rule exists to forbid, and no exclusion list is exhaustive against free-form human text.
+
+In a cross-org room it is worse: a transcript carries everything its human said to their own
+agent, including other clients and unrelated projects, with no per-turn basis for classification.
+There is no privacy class that honestly describes "a chat log about several things".
+
+### Transcript sharing already exists, in the form that is safe
+
+A participant that wants a peer to see what was said posts it. That is `post_message`, it is
+explicit, it carries a `Disclosure`, and it is inspected and stamped. What item 5 asks for is the
+same capability with the default inverted — and the default *is* the control.
+
+### What gets built instead, because the underlying goal is right
+
+The goal behind items 5 and 7 is real and worth having: *a human opens another authorized control
+surface and continues, without asking every agent to recap.* That does not need transcripts. It
+needs the current state of the work, which the room is already the authoritative record of.
+
+**Hydration projection** — one call returning, for the caller's logical agent: its declared
+current work and targets, leases held with fences and expiries, tasks proposed to it, blockers,
+decisions recorded, unread messages addressed to it, and the cursor to resume the event stream
+from. Assembled from the event log, filtered by the same privacy path as every other projection.
+
+This is strictly better for the stated purpose, not merely safer. A transcript is roughly two
+orders of magnitude more tokens for a fraction of the signal, and `docs/INTEROP.md` §4 already
+holds that context economy is part of interop: *"a response is spent context for the calling
+model, and on a metered host that is the user's money."* Item 2 asks for Cottage to be
+infrastructure rather than a second UI; a coordination-state handoff is that, and a mirrored chat
+log is a second UI with worse ergonomics.
+
+### The part of item 5 worth keeping
+
+Per-attachment cursors, stable event ids, ordering and dedupe, and *marking history unavailable
+rather than pretending sync succeeded* are all good requirements. They apply unchanged to the
+hydration projection, which is built on the event log where those properties already hold.

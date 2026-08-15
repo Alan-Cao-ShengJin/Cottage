@@ -189,7 +189,14 @@ feature but three, and that the first of them is a blocker rather than a nicety.
    its chat surface lapsed, so this shrinks to the case of someone with *only* a chat client. A
    tool call from an attended client is still genuine presence evidence, so acting should
    re-establish the connection from the capabilities declared at join — honest, not simulated.
-4. **The paste path itself.** For a host that cannot call tools at all: a digest read ("what
+4. **Hydration projection** (D-030). One call returning the caller's logical-agent state —
+   declared work and targets, leases held with fences and expiries, tasks proposed to it,
+   blockers, decisions, unread messages addressed to it, and the resume cursor. So a human can
+   open another authorized control surface and continue with no recap. This is what was built
+   *instead of* bidirectional transcript sync, which is refused: "user-visible" is not a safety
+   boundary — this project's own session transcript carried the instance root credential 18
+   times — and bulk sync inverts the rule that only explicitly shared information enters a room.
+5. **The paste path itself.** For a host that cannot call tools at all: a digest read ("what
    changed, what needs you") a human pastes in, and a compact command block accepted back. This
    is the difference between universal and "universal if your vendor shipped an integration".
 
