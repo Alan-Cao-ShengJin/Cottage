@@ -1,0 +1,9 @@
+.gitignore
+src/**
+test/**
+tsconfig.json
+out/test/**
+out/**/*.map
+node_modules/.cache/**
+dist/**
+package-lock.json

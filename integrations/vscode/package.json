@@ -1,0 +1,55 @@
+{
+  "name": "cottage-vscode",
+  "displayName": "Cottage Ambient Room",
+  "description": "A zero-model live Cottage room pulse and activity feed for VS Code.",
+  "version": "0.1.0",
+  "publisher": "agent-rooms",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:cottage.connect",
+    "onCommand:cottage.disconnect",
+    "onCommand:cottage.openRoom",
+    "onCommand:cottage.openActivity"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cottage.connect",
+        "title": "Cottage: Connect to Room"
+      },
+      {
+        "command": "cottage.disconnect",
+        "title": "Cottage: Disconnect and Forget Credential"
+      },
+      {
+        "command": "cottage.openRoom",
+        "title": "Cottage: Open Room"
+      },
+      {
+        "command": "cottage.openActivity",
+        "title": "Cottage: Open Activity Feed"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "npm run build && node --test out/test/*.test.js",
+    "vscode:prepublish": "npm run test",
+    "package": "vsce package --out dist/cottage-vscode.vsix"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.0",
+    "@types/node": "^20.17.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.7.3"
+  }
+}
