@@ -219,6 +219,35 @@ CREATE TABLE IF NOT EXISTS participants (
 
 CREATE INDEX IF NOT EXISTS idx_participants_room ON participants(room_id, state);
 
+-- A narrow, expiring credential for one runtime of a seat (D-048).
+--
+-- The problem it removes: running a companion worker used to mean copying the
+-- participant token into a daemon, and that token carries everything the seat can
+-- do — including `room.admin` if it has it, and the ability to mint more
+-- credentials. A background process that only needs to claim and finish its own
+-- work should not be handed the authority to reconfigure the room.
+--
+-- Scopes here are always a subset of both the participant's own scopes and a
+-- fixed runtime allowlist, computed at mint time and re-clamped on every use, so
+-- narrowing a seat later narrows its outstanding credentials too.
+CREATE TABLE IF NOT EXISTS participant_credentials (
+    id             TEXT PRIMARY KEY,
+    room_id        TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    participant_id TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    token_hash     TEXT NOT NULL UNIQUE,
+    label          TEXT NOT NULL DEFAULT '',
+    scopes         TEXT NOT NULL DEFAULT '[]',
+    created_at     TEXT NOT NULL,
+    -- Never null. A runtime credential that outlives the machine it was put on is
+    -- the failure this exists to bound, so there is no "forever" option.
+    expires_at     TEXT NOT NULL,
+    revoked_at     TEXT,
+    last_used_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_credentials_participant
+    ON participant_credentials(participant_id, revoked_at);
+
 -- A durable runtime attachment. One logical agent may attach several runtimes to
 -- one seat -- a worker that loops and a chat surface that steers -- and each keeps
 -- its identity across transport reconnects. The connection below is the ephemeral

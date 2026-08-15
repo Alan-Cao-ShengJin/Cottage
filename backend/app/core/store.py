@@ -30,6 +30,7 @@ from ..domain.identity import (
     User,
 )
 from ..domain.room import (
+    RUNTIME_SCOPES,
     Connection,
     Invitation,
     InvitationTargetKind,
@@ -41,6 +42,7 @@ from ..domain.room import (
     RoomPolicy,
     RoomStatus,
     RoomVisibility,
+    RuntimeCredential,
     Scope,
 )
 from ..domain.task import (
@@ -193,6 +195,20 @@ def to_directive(row: Any) -> Directive:
     )
 
 
+def to_credential(row: Any) -> RuntimeCredential:
+    return RuntimeCredential(
+        id=row["id"],
+        room_id=row["room_id"],
+        participant_id=row["participant_id"],
+        label=row["label"],
+        scopes=[Scope(s) for s in db.str_list(row["scopes"])],
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+        revoked_at=row["revoked_at"],
+        last_used_at=row["last_used_at"],
+    )
+
+
 def to_task(row: Any) -> Task:
     """Map a task row, applying lease expiry as seen by any reader.
 
@@ -337,12 +353,50 @@ async def load_participant(participant_id: str, *, tx: db.Tx | None = None) -> P
 
 
 async def load_participant_by_token(token: str, *, tx: db.Tx | None = None) -> Participant:
-    """Resolve a participant bearer token. Room-scoped and revocable by design."""
-    row = await _one("SELECT * FROM participants WHERE token_hash = ?", (hash_token(token),), tx)
-    if row is None:
+    """Resolve a participant bearer token. Room-scoped and revocable by design.
+
+    Two kinds of token land here and both resolve to the *same seat*: the
+    participant's own, and a runtime credential minted for one of its attachments
+    (D-048). The difference is carried in `scopes` and `credential_id` rather than
+    in a separate identity, which is what keeps every downstream authorization
+    check unchanged — a narrow caller is the same participant with less authority,
+    not a different participant.
+    """
+    digest = hash_token(token)
+    row = await _one("SELECT * FROM participants WHERE token_hash = ?", (digest,), tx)
+    if row is not None:
+        identity = await load_identity_summary(row["agent_identity_id"], tx=tx)
+        return to_participant(row, identity)
+
+    credential = await _one(
+        "SELECT * FROM participant_credentials WHERE token_hash = ?", (digest,), tx
+    )
+    if credential is None:
         raise Unauthenticated("Unknown or revoked participant token.")
+    if credential["revoked_at"]:
+        raise Unauthenticated("This runtime credential has been revoked.")
+    if is_past(credential["expires_at"]):
+        raise Unauthenticated(
+            "This runtime credential has expired. Mint a new one from the seat it belongs to."
+        )
+
+    row = await _one("SELECT * FROM participants WHERE id = ?", (credential["participant_id"],), tx)
+    if row is None:
+        raise Unauthenticated("Token subject no longer exists.")
     identity = await load_identity_summary(row["agent_identity_id"], tx=tx)
-    return to_participant(row, identity)
+    participant = to_participant(row, identity)
+
+    # Re-clamped on every use, not trusted from mint time. Narrowing a seat later
+    # must narrow its outstanding credentials too, or revoking authority would mean
+    # hunting down every daemon that was issued one while it was broader.
+    granted = {Scope(s) for s in db.str_list(credential["scopes"])}
+    allowed = granted & set(participant.scopes) & RUNTIME_SCOPES
+    return participant.model_copy(
+        update={
+            "scopes": [s for s in participant.scopes if s in allowed],
+            "credential_id": credential["id"],
+        }
+    )
 
 
 async def find_participant_by_identity(

@@ -82,6 +82,32 @@ ROLE_RANK: dict[ParticipantRole, int] = {
     ParticipantRole.OWNER: 2,
 }
 
+#: What a runtime credential may ever carry, however broad the seat is (D-048).
+#:
+#: An unattended executor needs to see the room, follow the stream, take and finish
+#: work assigned to it, and say what it is doing. It does not need to reconfigure
+#: the room, invite anyone, or publish artifacts, so those stay with the human's
+#: own surface.
+#:
+#: `task.propose` is here for an uncomfortable reason worth stating rather than
+#: hiding: marking a task `in_progress` goes through `task.update`, which requires
+#: `task.propose` — so one scope currently means both "may report progress on my
+#: own work" and "may create tasks and hand them to other people". That is too
+#: coarse for this credential and the coupling should be split; until it is, the
+#: narrower need drags the broader grant along with it.
+RUNTIME_SCOPES: frozenset[Scope] = frozenset(
+    {
+        Scope.ROOM_READ,
+        Scope.EVENTS_SUBSCRIBE,
+        Scope.TASK_READ,
+        Scope.TASK_CLAIM,
+        Scope.TASK_PROPOSE,
+        Scope.WORK_DECLARE,
+        Scope.STATE_READ,
+        Scope.MESSAGE_POST,
+    }
+)
+
 #: Scopes an untrusted identity may never hold, whatever its role says
 #: (`docs/SECURITY.md` §5).
 UNTRUSTED_DENIED_SCOPES: frozenset[Scope] = frozenset(
@@ -247,12 +273,19 @@ class Participant(BaseModel):
     agent_identity_id: str
     org_id: str
     role: ParticipantRole
+    #: What this *caller* may do, which is not always what the seat may do: a
+    #: runtime credential resolves to the same participant with a narrower set.
     scopes: list[Scope]
     trust: TrustTier
     state: MembershipState
     identity: IdentitySummary
     joined_at: str | None = None
     left_at: str | None = None
+    #: Set when this caller authenticated with a runtime credential rather than the
+    #: seat's own token. Recorded rather than inferred, because two things depend on
+    #: knowing: a credential may never mint another one, and an audit reading
+    #: "the participant did X" deserves to know which runtime of it actually did.
+    credential_id: str | None = None
 
     def has(self, scope: Scope) -> bool:
         return scope in self.scopes
@@ -260,6 +293,25 @@ class Participant(BaseModel):
     @property
     def is_active(self) -> bool:
         return self.state == MembershipState.JOINED
+
+
+class RuntimeCredential(BaseModel):
+    """A narrow, expiring token for one runtime of a seat (D-048).
+
+    Never carries the token itself. It exists once, at mint time, and is stored
+    only as a hash — so this model is what the room can safely show, and what a
+    human uses to decide which of their runtimes to revoke.
+    """
+
+    id: str
+    room_id: str
+    participant_id: str
+    label: str = ""
+    scopes: list[Scope] = Field(default_factory=list)
+    created_at: str
+    expires_at: str
+    revoked_at: str | None = None
+    last_used_at: str | None = None
 
 
 class Attachment(BaseModel):

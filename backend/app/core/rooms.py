@@ -24,6 +24,8 @@ from ..domain.commands import (
     CreateRoomCommand,
     JoinRoomCommand,
     LeaveRoomCommand,
+    MintCredentialCommand,
+    RevokeCredentialCommand,
     SetParticipantRoleCommand,
 )
 from ..domain.events import EventActor, EventType
@@ -36,6 +38,7 @@ from ..domain.identity import (
 )
 from ..domain.room import (
     ROLE_RANK,
+    RUNTIME_SCOPES,
     Invitation,
     InvitationTargetKind,
     LeaveReason,
@@ -46,6 +49,7 @@ from ..domain.room import (
     RoomPolicy,
     RoomStatus,
     RoomVisibility,
+    RuntimeCredential,
     Scope,
 )
 from ..util import hash_token, is_past, iso_in, new_token, utcnow_iso
@@ -1331,3 +1335,185 @@ __all__ = [
     "room_summary",
     "set_principal_token",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Runtime credentials (D-048)
+# ---------------------------------------------------------------------------
+
+
+DEFAULT_CREDENTIAL_TTL_SECONDS = 7 * 24 * 3600
+MAX_CREDENTIAL_TTL_SECONDS = 90 * 24 * 3600
+
+
+@dataclass(frozen=True)
+class IssuedCredential:
+    credential: RuntimeCredential
+    #: Shown once. Stored only as a hash, like every other credential here.
+    token: str
+
+
+async def mint_runtime_credential(
+    *, participant: Participant, command: MintCredentialCommand
+) -> IssuedCredential:
+    """Mint a narrow, expiring token for one of this seat's runtimes.
+
+    The problem being removed: running a companion worker meant copying the
+    participant token into a daemon, and that token carries everything the seat can
+    do — including `room.admin`, and including the ability to mint more credentials.
+    A process that only needs to take and finish its own work should not hold the
+    authority to reconfigure the room.
+
+    Two rules make it narrow and keep it that way:
+
+    * scopes are the intersection of what was asked for, what the seat holds, and
+      `RUNTIME_SCOPES` — so a credential can never exceed its seat, and never reach
+      administrative authority however the seat is later promoted;
+    * a credential may not mint another. Otherwise the narrowing is decorative: any
+      holder could issue itself a sibling and the chain would be as strong as its
+      weakest link rather than as its first.
+
+    Expiry is mandatory. A runtime credential that outlives the machine it was
+    installed on is the failure this exists to bound, so there is no forever option.
+    """
+    room = await store.load_room(participant.room_id)
+    authz.require_active(participant)
+    authz.require_writable(room)
+
+    if participant.credential_id is not None:
+        raise Forbidden(
+            "A runtime credential cannot mint another one. Mint from the seat's own "
+            "token, which is the authority this credential was narrowed from.",
+            credential_id=participant.credential_id,
+        )
+
+    requested = set(command.scopes) if command.scopes else set(participant.scopes)
+    granted = [s for s in participant.scopes if s in requested and s in RUNTIME_SCOPES]
+    if not granted:
+        raise InvalidCommand(
+            "That would mint a credential that can do nothing. Ask for scopes this "
+            "seat holds and that a runtime is allowed to carry.",
+            runtime_scopes=[s.value for s in sorted(RUNTIME_SCOPES, key=lambda x: x.value)],
+            your_scopes=[s.value for s in participant.scopes],
+        )
+
+    ttl = min(command.ttl_seconds or DEFAULT_CREDENTIAL_TTL_SECONDS, MAX_CREDENTIAL_TTL_SECONDS)
+    credential_id = ids.new_id(ids.CREDENTIAL)
+    token = new_token()
+    now = utcnow_iso()
+    expires_at = iso_in(ttl)
+
+    async def body(tx: db.Tx) -> CommandOutcome:
+        await tx.execute(
+            """
+            INSERT INTO participant_credentials (
+                id, room_id, participant_id, token_hash, label, scopes,
+                created_at, expires_at
+            ) VALUES (?,?,?,?,?,?,?,?)
+            """,
+            (
+                credential_id,
+                room.id,
+                participant.id,
+                hash_token(token),
+                command.label,
+                db.dumps([s.value for s in granted]),
+                now,
+                expires_at,
+            ),
+        )
+        event = await eventlog.append(
+            tx,
+            room_id=room.id,
+            type_=EventType.CREDENTIAL_MINTED,
+            actor=actor_for(participant),
+            payload={
+                "credential_id": credential_id,
+                "participant_id": participant.id,
+                "label": command.label,
+                # The grant, never the token. A credential in the log would be a
+                # credential in every replay, projection and export of that log.
+                "scopes": [s.value for s in granted],
+                "expires_at": expires_at,
+            },
+        )
+        return CommandOutcome(result={"credential_id": credential_id}, events=[event])
+
+    await execute_command(
+        command_id=command.command_id,
+        command_type="credential.mint",
+        room_id=room.id,
+        participant_id=participant.id,
+        body=body,
+    )
+    row = await db.fetch_one("SELECT * FROM participant_credentials WHERE id = ?", (credential_id,))
+    return IssuedCredential(credential=store.to_credential(row), token=token)
+
+
+async def revoke_runtime_credential(
+    *, participant: Participant, command: RevokeCredentialCommand
+) -> RuntimeCredential:
+    """Kill a runtime credential now, without touching the seat it came from.
+
+    The point of minting narrow tokens is being able to do this: a machine is lost
+    or a worker misbehaves, and the answer is one revocation rather than rotating
+    the participant token and re-attaching everything else that was using it.
+    """
+    room = await store.load_room(participant.room_id)
+
+    async def body(tx: db.Tx) -> CommandOutcome:
+        row = await tx.fetch_one(
+            "SELECT * FROM participant_credentials WHERE id = ? AND room_id = ?",
+            (command.credential_id, room.id),
+        )
+        if row is None:
+            raise NotFound("No such credential.", credential_id=command.credential_id)
+        # Its own seat, or a room admin. A participant revoking another's runtime is
+        # an administrative act, not a peer one.
+        if row["participant_id"] != participant.id and Scope.ROOM_ADMIN not in participant.scopes:
+            raise Forbidden(
+                "Only the seat a credential belongs to, or a room admin, may revoke it.",
+                credential_id=command.credential_id,
+            )
+        if row["revoked_at"]:
+            return CommandOutcome(result={"credential_id": command.credential_id})
+
+        await tx.execute(
+            "UPDATE participant_credentials SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+            (utcnow_iso(), command.credential_id),
+        )
+        event = await eventlog.append(
+            tx,
+            room_id=room.id,
+            type_=EventType.CREDENTIAL_REVOKED,
+            actor=actor_for(participant),
+            payload={
+                "credential_id": command.credential_id,
+                "participant_id": row["participant_id"],
+                "revoked_by_participant_id": participant.id,
+                "reason": command.reason,
+            },
+            causation_id=command.command_id,
+        )
+        return CommandOutcome(result={"credential_id": command.credential_id}, events=[event])
+
+    await execute_command(
+        command_id=command.command_id,
+        command_type="credential.revoke",
+        room_id=room.id,
+        participant_id=participant.id,
+        body=body,
+    )
+    row = await db.fetch_one(
+        "SELECT * FROM participant_credentials WHERE id = ?", (command.credential_id,)
+    )
+    return store.to_credential(row)
+
+
+async def list_runtime_credentials(*, participant: Participant) -> list[RuntimeCredential]:
+    """This seat's credentials. Never the tokens — those exist once, at mint time."""
+    rows = await db.fetch_all(
+        "SELECT * FROM participant_credentials WHERE participant_id = ? ORDER BY created_at",
+        (participant.id,),
+    )
+    return [store.to_credential(r) for r in rows]

@@ -46,9 +46,11 @@ from ..domain.commands import (
     IssueDirectiveCommand,
     JoinRoomCommand,
     LeaveRoomCommand,
+    MintCredentialCommand,
     PostMessageCommand,
     ReleaseClaimCommand,
     RenewClaimCommand,
+    RevokeCredentialCommand,
     SetParticipantRoleCommand,
     TakeOverExecutionCommand,
     UpdateTaskCommand,
@@ -519,6 +521,46 @@ async def release_claim(
     _assert_room(participant, room_id)
     task = await tasks.release(participant=participant, command=command)
     return {"ok": True, "task": task.model_dump(mode="json")}
+
+
+@router.post("/rooms/{room_id}/credentials", status_code=201)
+async def mint_credential(
+    room_id: str, participant: ParticipantDep, command: MintCredentialCommand
+) -> dict[str, Any]:
+    """Mint a narrow, expiring token for one of your own runtimes.
+
+    Returned once and stored only as a hash. Put it in the worker's environment,
+    never in room content — the disclosure screen would refuse it there anyway,
+    which is the screen doing its job rather than a limitation of it.
+    """
+    _assert_room(participant, room_id)
+    issued = await rooms.mint_runtime_credential(participant=participant, command=command)
+    return {
+        "ok": True,
+        "credential": issued.credential.model_dump(mode="json"),
+        "token": issued.token,
+        "next_step": (
+            "Run the worker with this as its --token. It can take and finish work "
+            "assigned to it and nothing else, and revoking it does not touch your seat."
+        ),
+    }
+
+
+@router.post("/rooms/{room_id}/credentials/revoke")
+async def revoke_credential(
+    room_id: str, participant: ParticipantDep, command: RevokeCredentialCommand
+) -> dict[str, Any]:
+    _assert_room(participant, room_id)
+    credential = await rooms.revoke_runtime_credential(participant=participant, command=command)
+    return {"ok": True, "credential": credential.model_dump(mode="json")}
+
+
+@router.get("/rooms/{room_id}/credentials")
+async def list_credentials(room_id: str, participant: ParticipantDep) -> dict[str, Any]:
+    """Your seat's runtime credentials, without their tokens."""
+    _assert_room(participant, room_id)
+    creds = await rooms.list_runtime_credentials(participant=participant)
+    return {"ok": True, "credentials": [c.model_dump(mode="json") for c in creds]}
 
 
 @router.post("/rooms/{room_id}/participants/role")

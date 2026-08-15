@@ -215,6 +215,25 @@ class ReleaseClaimCommand(CommandMeta):
     reason: str = Field(default="", max_length=500)
 
 
+class MintCredentialCommand(CommandMeta):
+    """Mint a runtime credential for one of your own attachments.
+
+    `scopes` narrows further; omitting it takes everything the seat holds that a
+    runtime is allowed to carry. It can never widen, and a credential can never
+    mint another one.
+    """
+
+    label: str = Field(default="", max_length=120)
+    scopes: list[Scope] | None = None
+    #: Mandatory in effect: omitted means the default, never forever.
+    ttl_seconds: int | None = Field(default=None, ge=300, le=90 * 24 * 3600)
+
+
+class RevokeCredentialCommand(CommandMeta):
+    credential_id: str
+    reason: str = Field(default="", max_length=500)
+
+
 class SetParticipantRoleCommand(CommandMeta):
     """Change what a participant may do in this room.
 

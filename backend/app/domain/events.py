@@ -32,6 +32,11 @@ class EventType(str, Enum):
     PARTICIPANT_LEFT = "participant.left"
     PARTICIPANT_SCOPES_CHANGED = "participant.scopes_changed"
 
+    #: A seat issued a narrow token to one of its runtimes. The grant is logged;
+    #: the token never is, because a credential in the log is a credential in every
+    #: replay and export of that log.
+    CREDENTIAL_MINTED = "credential.minted"
+    CREDENTIAL_REVOKED = "credential.revoked"
     PRESENCE_CHANGED = "presence.changed"
     #: A durable runtime identified itself to the room for the first time. Rare —
     #: once per runtime, not once per connection — but it is a state change, and

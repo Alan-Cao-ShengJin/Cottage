@@ -34,6 +34,7 @@ CLAIM: Final = "clm"
 ARTIFACT: Final = "art"
 CONFLICT: Final = "cft"
 DIRECTIVE: Final = "dir"
+CREDENTIAL: Final = "cred"
 COMMAND: Final = "cmd"
 
 

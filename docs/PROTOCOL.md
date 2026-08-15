@@ -75,6 +75,8 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 | `participant.joined` | participant_id, display_name, org_id, role, scopes, trust, declared_capabilities, rejoined |
 | `participant.left` | participant_id, reason (`graceful` \| `timeout` \| `removed`), note |
 | `participant.scopes_changed` | participant_id, scopes |
+| `credential.minted` | credential_id, participant_id, label, scopes, expires_at — **the grant, never the token** |
+| `credential.revoked` | credential_id, participant_id, revoked_by_participant_id, reason |
 | `presence.changed` | participant_id, liveness, connection_count, delivery_modes, negotiated_capabilities, runtime |
 | `presence.attachment_registered` | attachment_id, participant_id, label, host_class, is_resumable |
 | `message.posted` | message_id, body, to_participant_id, about_ref |
