@@ -36,3 +36,6 @@ Thumbs.db
 backend/data/
 
 .agent-rooms-status.json
+
+# Live room dashboard written by scripts/room_watcher.py
+ROOM.md

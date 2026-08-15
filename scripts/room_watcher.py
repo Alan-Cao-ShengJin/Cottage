@@ -1,15 +1,29 @@
 #!/usr/bin/env python
-"""Long-poll a room and keep a one-line summary of it on disk.
+"""Keep a control surface live in a room, and keep a summary of the room on disk.
 
-Exists because a human supervising through a chat surface has no window into the room
-except what their agent happens to mention. Silence then reads as "the room is dead"
-when in fact a companion is working — which is the exact confusion this product exists
-to remove, reproduced one level up.
+Two jobs, and the first one is the point.
 
-Deliberately read-only: it authenticates with a participant token but never connects,
-so it does not register presence, hold a lease, or make the seat look live when it is
-not. What it reports is what a *reader* of the room can see, which is the honest thing
-for a status indicator to show.
+**Staying live.** A chat-shaped client exists only during a tool call, so between calls
+its seat drops to `disconnected` — a supervisor that is very much still supervising reads
+as gone. That is only unavoidable for hosts with no runtime at all (a browser tab). Any
+host that runs on a machine can hold a small process open, and then its liveness says what
+is true: *this participant is being watched by something that will notice*. The division
+of labour is that the companion's liveness means "it is working" and this one's means "it
+is tracking" — two runtimes of one seat (D-044), which is exactly the shape the room was
+built for.
+
+Capabilities are declared for what this process actually does: it receives events and
+polls. It does **not** claim `can_execute_background`, because it executes nothing — the
+companion attached to the same seat does that, and the room grades a seat from its best
+live attachment rather than from a promise made here (principle 5).
+
+**Reporting.** A human supervising through a chat surface has no window into the room
+except what their agent happens to mention, and silence reads as a dead room while a
+companion works. The JSON feeds a terminal status line; the markdown copy is for keeping
+open in an editor split, since an editor reloads a changed file on disk.
+
+Pass `--read-only` to go back to observing without attaching — useful for watching a room
+you do not want to appear in.
 
 Pair with `scripts/room_statusline.py`, which renders the file this writes. Two
 processes rather than one because a status line is rendered many times a second and
@@ -33,13 +47,67 @@ from typing import Any
 DEFAULT_BASE = "https://agent-rooms.fly.dev"
 
 
-def read_room(base: str, room: str, token: str, *, timeout: int = 20) -> dict[str, Any]:
+#: What this process can honestly do. No `can_execute_background`: it tracks, it does
+#: not work. Overstating here would have the room route work to a seat on the strength
+#: of a runtime that cannot take it.
+WATCH_CAPABILITIES = [
+    "can_receive_events",
+    "supports_poll",
+    "supports_resume",
+]
+
+
+def call(
+    base: str,
+    room: str,
+    token: str,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout: int = 30,
+) -> dict[str, Any]:
     req = urllib.request.Request(
-        f"{base}/api/rooms/{room}/snapshot",
-        headers={"Authorization": f"Bearer {token}"},
+        f"{base}/api/rooms/{room}{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method=method,
     )
     with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.load(response)
+
+
+def read_room(base: str, room: str, token: str, *, timeout: int = 20) -> dict[str, Any]:
+    return call(base, room, token, "GET", "/snapshot", timeout=timeout)
+
+
+def attach(base: str, room: str, token: str, label: str) -> str:
+    """Register a durable runtime for this seat and return its connection id.
+
+    `runtime_role: control_surface` because that is what this is — the supervising
+    side of the seat, kept reachable — and saying so stops a reader mistaking a
+    tracking process for the one doing the work (D-054).
+    """
+    result = call(
+        base,
+        room,
+        token,
+        "POST",
+        "/connect",
+        {
+            "host_class": "persistent_local",
+            "capabilities": WATCH_CAPABILITIES,
+            "transport": "long_poll",
+            "attachment_label": label,
+            "attachment_resumable": True,
+            "runtime_role": "control_surface",
+            "executor_kind": "none",
+        },
+    )
+    return str(result["connection_id"])
 
 
 def summarize(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -74,6 +142,31 @@ def summarize(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def as_markdown(state: dict[str, Any]) -> str:
+    """The same reading, for a human keeping a file open in a split pane."""
+    stamp = time.strftime("%H:%M:%S", time.localtime(state.get("at") or time.time()))
+    if state.get("error"):
+        return f"# ROOM — unreachable\n\n`{state['error']}` at {stamp}\n"
+
+    lines = [
+        f"# ROOM — seq {state.get('seq')}",
+        "",
+        f"read at **{stamp}**",
+        "",
+        f"- participants: **{state.get('live', 0)} live** of {state.get('participants', 0)}",
+        f"- in progress: **{state.get('in_progress', 0)}**",
+    ]
+    if state.get("waiting_input"):
+        lines.append(f"- ⚠ **{state['waiting_input']} waiting on you**")
+    if state.get("open_questions"):
+        lines.append(f"- ❓ open questions: **{state['open_questions']}**")
+    if state.get("conflicts"):
+        lines.append(f"- ✗ conflicts: **{state['conflicts']}**")
+    if state.get("headline"):
+        lines += ["", f"> {state['headline']}"]
+    return "\n".join(lines) + "\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -81,7 +174,24 @@ def main() -> int:
     )
     parser.add_argument("--room", default=os.environ.get("AGENT_ROOMS_ROOM"))
     parser.add_argument("--out", default=os.environ.get("AGENT_ROOMS_STATUS_FILE"))
+    # Below the room's 120s work-stale cutoff and its presence grading window with room
+    # to miss one and recover, rather than tuned to sit just inside either.
     parser.add_argument("--interval", type=int, default=10)
+    parser.add_argument(
+        "--markdown",
+        default=os.environ.get("AGENT_ROOMS_STATUS_MD"),
+        help="Also write a human-readable copy here, to keep open in an editor split.",
+    )
+    parser.add_argument(
+        "--label",
+        default=os.environ.get("AGENT_ROOMS_LABEL", "supervisor-watch"),
+        help="Attachment label. Stable across restarts, so a restart is the same runtime.",
+    )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Observe without attaching, leaving this seat's presence untouched.",
+    )
     args = parser.parse_args()
 
     # Never an argument: a token on a command line is readable from any process
@@ -91,10 +201,31 @@ def main() -> int:
         parser.error("need --room, --out, and AGENT_ROOMS_TOKEN in the environment")
 
     out = pathlib.Path(args.out)
+    connection_id = ""
     while True:
         try:
+            if not args.read_only and not connection_id:
+                connection_id = attach(args.base, args.room, token, args.label)
+            if connection_id:
+                # Presence is graded on heartbeat age. This is the whole reason the
+                # process exists, so it happens before the read rather than after: a
+                # slow snapshot must not be what makes the seat look absent.
+                call(
+                    args.base,
+                    args.room,
+                    token,
+                    "POST",
+                    "/heartbeat",
+                    {"connection_id": connection_id},
+                )
             state = summarize(read_room(args.base, args.room, token))
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+        except urllib.error.HTTPError as exc:
+            # A connection the room has forgotten (restart, reaper, revocation) must be
+            # re-established rather than heartbeated forever into nothing.
+            if exc.code in {401, 404, 409}:
+                connection_id = ""
+            state = {"at": time.time(), "error": f"HTTP {exc.code}"}
+        except (urllib.error.URLError, TimeoutError) as exc:
             state = {"at": time.time(), "error": type(exc).__name__}
         except Exception as exc:  # noqa: BLE001 - a status line must not take the poller down
             state = {"at": time.time(), "error": type(exc).__name__}
@@ -102,6 +233,17 @@ def main() -> int:
         tmp.write_text(json.dumps(state), encoding="utf-8")
         # Atomic on Windows too: the status line must never read a half-written file.
         tmp.replace(out)
+
+        # A second, human-readable copy. The status line only renders in the terminal
+        # UI, so a supervisor working in an editor panel needs something they can keep
+        # open in a split — an editor reloads a changed file on disk, which makes an
+        # ordinary markdown file a live dashboard with no extension to install.
+        if args.markdown:
+            md = pathlib.Path(args.markdown)
+            md_tmp = md.with_suffix(".tmp")
+            md_tmp.write_text(as_markdown(state), encoding="utf-8")
+            md_tmp.replace(md)
+
         time.sleep(args.interval)
 
 
