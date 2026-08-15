@@ -201,6 +201,27 @@ class ReleaseClaimCommand(CommandMeta):
     reason: str = Field(default="", max_length=500)
 
 
+class SetParticipantRoleCommand(CommandMeta):
+    """Change what a participant may do in this room.
+
+    Exists because B uncovered a real authority blocker: only the seat that created
+    a room held `room.admin`, and there was no way to grant it — so the humans'
+    *own* control surfaces could never steer their own workers. `participant.left`
+    and `participant.scopes_changed` were both in the event registry; only one of
+    them had a way to happen.
+
+    Narrowing still applies: scopes may subset the new role's defaults, never exceed
+    them, and an untrusted identity keeps losing the denied set. A grant is a
+    promotion within the rules, not a bypass of them.
+    """
+
+    target_participant_id: str
+    role: ParticipantRole
+    #: Narrower than the role's defaults if given; never broader.
+    scopes: list[Scope] | None = None
+    reason: str = Field(default="", max_length=500)
+
+
 class IssueDirectiveCommand(CommandMeta):
     """Direct a participant without becoming it.
 

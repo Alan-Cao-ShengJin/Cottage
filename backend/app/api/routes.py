@@ -49,6 +49,7 @@ from ..domain.commands import (
     PostMessageCommand,
     ReleaseClaimCommand,
     RenewClaimCommand,
+    SetParticipantRoleCommand,
     TakeOverExecutionCommand,
     UpdateTaskCommand,
     UpdateWorkCommand,
@@ -507,6 +508,16 @@ async def release_claim(
     _assert_room(participant, room_id)
     task = await tasks.release(participant=participant, command=command)
     return {"ok": True, "task": task.model_dump(mode="json")}
+
+
+@router.post("/rooms/{room_id}/participants/role")
+async def set_participant_role(
+    room_id: str, participant: ParticipantDep, command: SetParticipantRoleCommand
+) -> dict[str, Any]:
+    """Promote or demote a participant. Admin only; narrowing rules still apply."""
+    _assert_room(participant, room_id)
+    updated = await rooms.set_participant_role(participant=participant, command=command)
+    return {"ok": True, "participant": updated.model_dump(mode="json")}
 
 
 @router.post("/rooms/{room_id}/directives", status_code=201)

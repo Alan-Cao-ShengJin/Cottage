@@ -24,6 +24,7 @@ from ..domain.commands import (
     CreateRoomCommand,
     JoinRoomCommand,
     LeaveRoomCommand,
+    SetParticipantRoleCommand,
 )
 from ..domain.events import EventActor, EventType
 from ..domain.identity import (
@@ -479,6 +480,67 @@ class IssuedInvitation:
 
     invitation: Invitation
     token: str
+
+
+async def set_participant_role(
+    *, participant: Participant, command: SetParticipantRoleCommand
+) -> Participant:
+    """Promote or demote another participant. Admin only, and never past the rules.
+
+    The narrowing in `effective_scopes` still governs the result, so this cannot mint
+    a privilege the role does not carry or hand `room.admin` to an untrusted
+    identity. What it can do is make someone an admin who was not one — which is the
+    whole point, because a room whose only admin is the seat that created it cannot
+    delegate control to the surfaces its human actually uses.
+
+    Demoting yourself is allowed and deliberately not special-cased. A room can be
+    left with no admin, exactly as a room can be left with no participants; refusing
+    would be guessing at an intent the caller stated plainly.
+    """
+    room = await store.load_room(participant.room_id)
+    authz.require_scope(participant, Scope.ROOM_ADMIN)
+    authz.require_writable(room)
+
+    target = await store.load_participant(command.target_participant_id)
+    if target.room_id != room.id:
+        raise NotFound(
+            "That participant is not in this room.",
+            target_participant_id=command.target_participant_id,
+        )
+
+    scopes = authz.effective_scopes(command.role, command.scopes, target.trust)
+
+    async def body(tx: db.Tx) -> CommandOutcome:
+        affected = await tx.execute(
+            "UPDATE participants SET role = ?, scopes = ? WHERE id = ? AND room_id = ?",
+            (command.role.value, db.dumps([s.value for s in scopes]), target.id, room.id),
+        )
+        if affected == 0:
+            raise NotFound("That participant is not in this room.", target_participant_id=target.id)
+        event = await eventlog.append(
+            tx,
+            room_id=room.id,
+            type_=EventType.PARTICIPANT_SCOPES_CHANGED,
+            actor=actor_for(participant),
+            payload={
+                "participant_id": target.id,
+                "role": command.role.value,
+                "scopes": [s.value for s in scopes],
+                "changed_by_participant_id": participant.id,
+                "reason": command.reason,
+            },
+            causation_id=command.command_id,
+        )
+        return CommandOutcome(result={"participant_id": target.id}, events=[event])
+
+    await execute_command(
+        command_id=command.command_id,
+        command_type="participant.set_role",
+        room_id=room.id,
+        participant_id=participant.id,
+        body=body,
+    )
+    return await store.load_participant(target.id)
 
 
 async def create_invitation(
