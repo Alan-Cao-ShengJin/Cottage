@@ -64,6 +64,16 @@ class StepResult:
     done: bool = False
     #: Non-fatal trouble worth surfacing to a human without stopping the work.
     concern: str | None = None
+    #: Something the executor cannot work out for itself. The loop turns this into a
+    #: room question; whether it *blocks* is `blocking` below, and the default is no.
+    question: str | None = None
+    #: Set only when the executor genuinely cannot proceed without an answer. It costs
+    #: the lease, so it is opt-in: an executor that blocks on every uncertainty makes
+    #: an unattended worker useless, and one that never blocks will guess at things it
+    #: should not have guessed at. The judgement belongs to whatever does the work.
+    blocking: bool = False
+    #: Where this runtime got to, for its own restart. Never room-visible.
+    resume: dict[str, object] | None = None
 
 
 class Executor(Protocol):
@@ -85,6 +95,14 @@ class EchoExecutor:
 
     name = "echo"
 
+    #: A step at which to raise a blocking question, so the ask/answer path can be
+    #: exercised deterministically. `None` means never — the default, because a
+    #: worker that stops to ask on every run is not a baseline for anything.
+    ask_at_step: int | None = None
+
+    def __init__(self, *, ask_at_step: int | None = None) -> None:
+        self.ask_at_step = ask_at_step
+
     def run_step(self, context: StepContext) -> StepResult:
         done = context.step >= context.total_steps
         heard = (
@@ -92,11 +110,35 @@ class EchoExecutor:
             if context.instructions
             else ""
         )
+        # Ask once, and only if nobody has answered yet: an executor that re-asks
+        # after being told would park the same work forever, which looks like
+        # patience and is a loop.
+        if (
+            self.ask_at_step is not None
+            and context.step == self.ask_at_step
+            and not heard
+        ):
+            return StepResult(
+                summary=(
+                    f"Step {context.step} of {context.total_steps} on '{context.title}'. "
+                    f"Stopping here: the next step is not mine to guess at."
+                ),
+                question=(
+                    f"Before step {context.step + 1} of '{context.title}': which target "
+                    f"should I use? I will not guess at this one."
+                ),
+                blocking=True,
+                resume={"phase": f"blocked-before-step-{context.step + 1}"},
+            )
         return StepResult(
             summary=(
                 f"Step {context.step} of {context.total_steps} on '{context.title}'.{heard}"
             ),
             done=done,
+            resume={
+                "phase": f"step-{context.step}",
+                "next_action": f"step {context.step + 1}",
+            },
         )
 
 
@@ -190,12 +232,15 @@ class SubprocessExecutor:
         return StepResult(
             summary=output[:1500] or f"Step {context.step} produced no output.",
             done=context.step >= context.total_steps,
+            resume={"phase": f"step-{context.step}"},
         )
 
 
-def build(kind: str, *, command: str | None = None) -> Executor:
+def build(
+    kind: str, *, command: str | None = None, ask_at_step: int | None = None
+) -> Executor:
     if kind == "echo":
-        return EchoExecutor()
+        return EchoExecutor(ask_at_step=ask_at_step)
     if kind == "subprocess":
         if not command:
             raise ValueError("--executor subprocess needs --executor-command")

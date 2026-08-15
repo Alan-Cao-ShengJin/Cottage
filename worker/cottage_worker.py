@@ -43,6 +43,9 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
+from executors import EchoExecutor, Executor, StepContext, StepResult
+from executors import build as build_executor
+
 log = logging.getLogger("cottage-worker")
 
 #: What this loop can actually do, and nothing more.
@@ -82,9 +85,36 @@ class Lease:
     expires_at: float
     heartbeat_interval_s: int
     title: str = ""
+    description: str = ""
+    targets: list[str] = field(default_factory=list)
 
     def needs_renewal(self, *, now: float, lease_seconds: float) -> bool:
         return (self.expires_at - now) < max(lease_seconds * RENEW_AT_FRACTION, 15.0)
+
+
+def _resume_state(raw: dict[str, object], *, step: int) -> dict[str, Any]:
+    """Coerce an executor's bookmark into the room's closed schema.
+
+    Unknown keys are **dropped here rather than sent**, because the server rejects
+    them and a rejected checkpoint loses the progress it was recording. This is also
+    the one place an executor's own dictionary meets the room, so it is the right
+    place to stop anything transcript-shaped from travelling: only these five fields
+    exist, and none of them is free-form context.
+    """
+    allowed = {
+        "phase",
+        "completed_step_ids",
+        "artifact_refs",
+        "pending_tool_calls",
+        "next_action",
+    }
+    state: dict[str, Any] = {k: v for k, v in raw.items() if k in allowed}
+    state.setdefault("phase", f"step-{step}")
+    for key in ("completed_step_ids", "artifact_refs", "pending_tool_calls"):
+        value = state.get(key)
+        if value is not None and not isinstance(value, list):
+            state[key] = [str(value)]
+    return state
 
 
 def join_with_invitation(
@@ -140,7 +170,10 @@ class Worker:
     label: str
     poll_seconds: int = 20
     max_cycles: int | None = None
-    handler_name: str = "notes"
+    #: What "doing the work" means. The loop never inspects it beyond the protocol
+    #: in `worker/executors.py`, which is what lets a model-backed one be swapped in
+    #: without the coordination guarantees being re-argued.
+    executor: Executor = field(default_factory=EchoExecutor)
     #: How many cycles a claimed task takes. The default handler used to do
     #: everything in one call and finish in two seconds, which made the loop's own
     #: comment — "one step per cycle, so a stop is obeyed within one step" — vacuous:
@@ -172,8 +205,19 @@ class Worker:
     participant_id: str = ""
     lease: Lease | None = None
     stopping: bool = False
-    #: Steps completed per task, so progress survives across cycles.
+    #: Steps completed per task. Seeded from the room's checkpoints on start, so a
+    #: restarted process resumes where it stopped instead of redoing work — which is
+    #: the difference between durable progress and a progress-shaped log line.
     progress: dict[str, int] = field(default_factory=dict)
+    #: Public summaries this worker has recorded, per task, oldest first. Passed to
+    #: the executor so a fresh process has the same account of the work the room does.
+    checkpoints: dict[str, list[str]] = field(default_factory=dict)
+    #: Things humans have told this worker about a task: `input` directives, and
+    #: answers to its own questions. Kept per task because that is the grain an
+    #: executor can act on, and never merged into anything resembling a transcript.
+    instructions: dict[str, list[str]] = field(default_factory=dict)
+    #: Answers already folded in, so re-reading hydration does not duplicate them.
+    seen_answers: set[str] = field(default_factory=set)
     #: Task ids this worker was told to stop. Remembered so it does not immediately
     #: try to reclaim them on the next cycle and spend the room's time being refused.
     forbidden: set[str] = field(default_factory=set)
@@ -265,6 +309,8 @@ class Worker:
         state = self.hydrate()
         self.participant_id = state.get("you", {}).get("participant_id", "")
         self.adopt_existing_leases(state)
+        self.adopt_recorded_progress(state)
+        self.absorb_answers(state)
 
         cycles = 0
         while not self.stopping and (
@@ -290,6 +336,13 @@ class Worker:
     def cycle(self) -> None:
         state = self.hydrate()
         self.cursor = max(self.cursor, int(state.get("cursor") or 0))
+        self.absorb_answers(state)
+        # Every cycle, not only at startup. Hydration carries checkpoints for the
+        # tasks this seat *currently holds*, so a worker that restarted and had to
+        # re-claim only learns its own history after the claim lands — and a startup-
+        # only read would have it begin again at step one, which is the exact failure
+        # checkpoints exist to remove.
+        self.adopt_recorded_progress(state)
 
         # 1. Directives first, always. Reading the board first would let this worker
         #    start something it has already been told not to do.
@@ -338,6 +391,14 @@ class Worker:
                 self.lease = None
         elif action == "resume" and task_id:
             self.forbidden.discard(task_id)
+        elif action == "input" and task_id:
+            # The one directive that carries content rather than control. It is kept
+            # per task and handed to the executor as an instruction — data the work
+            # takes into account, never something this loop executes. Room content is
+            # untrusted text (`docs/SECURITY.md`), and a directive is room content.
+            reason = (directive.get("reason") or "").strip()
+            if reason:
+                self.instructions.setdefault(task_id, []).append(reason)
 
         self.call(
             "POST",
@@ -363,11 +424,70 @@ class Worker:
                 expires_at=time.time() + float(held.get("seconds_remaining") or 0),
                 heartbeat_interval_s=int(held.get("heartbeat_interval_s") or 20),
                 title=held.get("title", ""),
+                targets=list(held.get("targets") or []),
             )
             log.info(
                 "resumed lease on %s (fence %s)", self.lease.task_id, self.lease.fence
             )
             return
+
+    def adopt_recorded_progress(self, state: dict[str, Any]) -> None:
+        """Take the room's account of what this worker has already done.
+
+        Before checkpoints existed the step counter lived in this process, so a
+        restart silently began again at step one — redoing work and reporting it as
+        new. The room now holds the record, which means the *durable* answer and the
+        worker's answer are the same one rather than two that can disagree.
+
+        The count comes from `completed_step_ids` where a bookmark recorded them and
+        from the number of checkpoints otherwise, because a checkpoint is written per
+        step; an executor that stops writing them will simply resume earlier than it
+        might have, which is the safe direction to be wrong in.
+        """
+        for task_id, records in (state.get("checkpoints") or {}).items():
+            if not records:
+                continue
+            self.checkpoints[task_id] = [r.get("summary", "") for r in records]
+            resume = (records[-1] or {}).get("resume_state") or {}
+            completed = resume.get("completed_step_ids") or []
+            recorded = len(completed) if completed else len(records)
+            self.progress[task_id] = max(self.progress.get(task_id, 0), int(recorded))
+            log.info(
+                "resuming %s from step %s (%s checkpoints, phase %r)",
+                task_id,
+                self.progress[task_id],
+                len(records),
+                resume.get("phase", ""),
+            )
+
+    def absorb_answers(self, state: dict[str, Any]) -> None:
+        """Turn replies to this worker's own questions into instructions it can act on.
+
+        From hydration rather than the event stream, because a restarted process
+        starts at the current cursor — so the one event it most needs is the one
+        already behind it. The room carries the answer in the resume payload instead.
+
+        An answer is *information this worker asked for*. It reaches the executor as
+        data, in the same channel as an `input` directive, and nothing in this loop
+        interprets it: room content is untrusted text (`docs/SECURITY.md`).
+        """
+        for answer in state.get("answers_for_you", []) or []:
+            answer_id = answer.get("answer_id") or ""
+            task_id = answer.get("task_id") or ""
+            body = (answer.get("body") or "").strip()
+            if (
+                not answer_id
+                or not task_id
+                or not body
+                or answer_id in self.seen_answers
+            ):
+                continue
+            self.seen_answers.add(answer_id)
+            self.instructions.setdefault(task_id, []).append(body)
+            # The room returned the task to `open` when the answer landed; forgetting
+            # the refusal is what lets this worker pick it back up next cycle.
+            self.forbidden.discard(task_id)
+            log.info("answered on %s: %s", task_id, body[:120])
 
     def take_work(self, state: dict[str, Any]) -> None:
         """Pick up work that is *for* this worker.
@@ -437,6 +557,8 @@ class Worker:
             expires_at=time.time() + self.seconds_until(claim["expires_at"]),
             heartbeat_interval_s=int(claim.get("heartbeat_interval_s") or 20),
             title=result["task"].get("title", ""),
+            description=result["task"].get("description", ""),
+            targets=list(result["task"].get("targets") or []),
         )
         log.info("claimed %s (fence %s)", self.lease.task_id, self.lease.fence)
         self.call(
@@ -477,17 +599,23 @@ class Worker:
         log.info("renewed %s (expires in %ss)", self.lease.task_id, self.lease_seconds)
 
     def advance(self) -> None:
-        """Do one step of work, and finish only when there is no work left.
+        """Do one step of work, record it, and finish only when there is none left.
 
         One step per cycle is the load-bearing part: between steps the loop returns to
         the top, re-reads directives, and renews. So the longest a stop can take to be
         obeyed is one step — and a task that took a single step made that guarantee
         true but empty, which is how the first preemption attempt found nothing left
         to preempt.
+
+        The step itself is done by an `Executor` this loop knows nothing about beyond
+        its interface (`worker/executors.py`). That separation is the safety property
+        rather than tidiness: swapping in something model-backed must not be able to
+        break lease renewal, and a bug in lease renewal must not be reachable from a
+        prompt.
         """
         assert self.lease is not None
-        step = self.progress.get(self.lease.task_id, 0) + 1
-        self.progress[self.lease.task_id] = step
+        task_id = self.lease.task_id
+        step = self.progress.get(task_id, 0) + 1
 
         if step == 1:
             # Say on the board that this is being worked, not merely held.
@@ -496,7 +624,7 @@ class Worker:
                     "POST",
                     "/tasks/update",
                     {
-                        "task_id": self.lease.task_id,
+                        "task_id": task_id,
                         "fence": self.lease.fence,
                         "in_progress": True,
                         "connection_id": self.connection_id,
@@ -505,33 +633,125 @@ class Worker:
             except CottageError as exc:
                 log.warning("could not mark in_progress: %s", exc)
 
-        if step < self.steps_per_task:
-            log.info("step %s/%s on %s", step, self.steps_per_task, self.lease.task_id)
+        result = self.executor.run_step(
+            StepContext(
+                task_id=task_id,
+                title=self.lease.title,
+                description=self.lease.description,
+                targets=tuple(self.lease.targets),
+                step=step,
+                total_steps=self.steps_per_task,
+                instructions=tuple(self.instructions.get(task_id, ())),
+                checkpoints=tuple(self.checkpoints.get(task_id, ())),
+            )
+        )
+        if result.concern:
+            log.warning("step %s on %s: %s", step, task_id, result.concern)
+
+        if result.question:
+            # Asked *before* the checkpoint is written separately, because a blocking
+            # ask writes its own checkpoint inside the same transaction as the release
+            # — two checkpoints for one step would put the same progress on the board
+            # twice and make the count meaningless.
+            self.ask(result, task_id=task_id, step=step)
             return
 
-        outcome = HANDLERS[self.handler_name](self.lease)
+        self.record_checkpoint(result, task_id=task_id, step=step)
+        self.progress[task_id] = step
+
+        if not result.done and step < self.steps_per_task:
+            log.info("step %s/%s on %s", step, self.steps_per_task, task_id)
+            return
+
         try:
             self.call(
                 "POST",
                 "/tasks/complete",
                 {
-                    "task_id": self.lease.task_id,
+                    "task_id": task_id,
                     "fence": self.lease.fence,
-                    "result": outcome,
+                    "result": result.summary,
                     "connection_id": self.connection_id,
                 },
             )
-            log.info("completed %s", self.lease.task_id)
+            log.info("completed %s", task_id)
         except CottageError as exc:
             if exc.code == "steering_halted":
-                log.info("told to stop %s before finishing it", self.lease.task_id)
-                self.forbidden.add(self.lease.task_id)
+                log.info("told to stop %s before finishing it", task_id)
+                self.forbidden.add(task_id)
             elif exc.code in {"stale_fence", "lease_required", "executor_conflict"}:
                 log.info("no longer ours: %s", exc)
             else:
                 raise
         finally:
-            self.progress.pop(self.lease.task_id, None)
+            self.progress.pop(task_id, None)
+            self.checkpoints.pop(task_id, None)
+            self.lease = None
+
+    def record_checkpoint(self, result: StepResult, *, task_id: str, step: int) -> None:
+        """Write progress to the room, so a restart is not an amnesia.
+
+        Failure here is logged and not fatal. A worker that died because it could not
+        record its progress would trade a recoverable gap for a lost lease — and the
+        room's next reader would then have neither the progress *nor* the worker.
+        """
+        assert self.lease is not None
+        payload: dict[str, Any] = {
+            "task_id": task_id,
+            "fence": self.lease.fence,
+            "summary": result.summary[:1200],
+            "connection_id": self.connection_id,
+            # Idempotent per (task, fence, step): the moment a worker checkpoints is
+            # the moment it is most likely to be interrupted, so the retry must not
+            # append a second record of the same step.
+            "command_id": f"ckp-{task_id}-{self.lease.fence}-{step}",
+        }
+        if result.resume:
+            payload["resume_state"] = _resume_state(result.resume, step=step)
+        try:
+            self.call("POST", "/tasks/checkpoint", payload)
+        except CottageError as exc:
+            log.warning("could not checkpoint %s step %s: %s", task_id, step, exc)
+            return
+        self.checkpoints.setdefault(task_id, []).append(result.summary)
+
+    def ask(self, result: StepResult, *, task_id: str, step: int) -> None:
+        """Raise what the executor could not work out for itself.
+
+        A blocking ask gives the lease back in the same transaction that parks the
+        task, so this worker stops holding work it cannot advance — and is free to
+        pick up anything else. The task is not offered to another claimant while the
+        question stands, because the next worker would hit the same wall.
+        """
+        assert self.lease is not None
+        payload: dict[str, Any] = {
+            "body": result.question or "",
+            "task_id": task_id,
+            "blocking": result.blocking,
+            "connection_id": self.connection_id,
+            "command_id": f"qst-{task_id}-{self.lease.fence}-{step}",
+        }
+        if result.blocking:
+            payload["fence"] = self.lease.fence
+            payload["checkpoint_summary"] = result.summary[:1200]
+            if result.resume:
+                payload["resume_state"] = _resume_state(result.resume, step=step)
+        try:
+            self.call("POST", "/questions", payload)
+        except CottageError as exc:
+            log.warning("could not ask about %s: %s", task_id, exc)
+            return
+        log.info(
+            "asked%s about %s: %s",
+            " (standing down)" if result.blocking else "",
+            task_id,
+            (result.question or "")[:120],
+        )
+        if result.blocking:
+            # The room released it as part of the ask. Dropping the local lease keeps
+            # this worker's belief and the room's state from diverging — the same rule
+            # applied when a directive stops us.
+            self.progress.pop(task_id, None)
             self.lease = None
 
     def wait(self) -> None:
@@ -604,29 +824,6 @@ class Worker:
         return max((when - datetime.now(timezone.utc)).total_seconds(), 0.0)
 
 
-# ---------------------------------------------------------------------------
-# Handlers: what "doing the work" means. Deliberately small and side-effect free.
-# ---------------------------------------------------------------------------
-
-
-def handle_notes(lease: Lease) -> str:
-    """The default. Produces a real, checkable result and touches nothing outside.
-
-    A demo handler that shelled out would make the proof about the handler rather
-    than about the loop, and would put arbitrary execution in a file whose job is to
-    show that coordination works.
-    """
-    return (
-        f"Completed by an unattended worker with no human attending. Task "
-        f"'{lease.title}' was claimed at fence {lease.fence}, worked across multiple "
-        f"cycles with the lease renewed as it went, and finished by the same runtime "
-        f"that claimed it."
-    )
-
-
-HANDLERS = {"notes": handle_notes}
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="An unattended Cottage worker.")
     parser.add_argument(
@@ -652,7 +849,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--poll-seconds", type=int, default=20)
     parser.add_argument("--max-cycles", type=int, default=None)
-    parser.add_argument("--handler", default="notes", choices=sorted(HANDLERS))
+    parser.add_argument(
+        "--executor",
+        default=os.environ.get("COTTAGE_EXECUTOR", "echo"),
+        choices=["echo", "subprocess"],
+        help=(
+            "How a step gets done. 'echo' is deterministic and credential-free, and "
+            "is what the coordination guarantees are tested against. 'subprocess' "
+            "delegates to an agent CLI its owner already runs and already authorized."
+        ),
+    )
+    parser.add_argument(
+        "--executor-command",
+        default=os.environ.get("COTTAGE_EXECUTOR_COMMAND"),
+        help="Command template for --executor subprocess. Must contain {prompt}.",
+    )
+    parser.add_argument(
+        "--ask-at-step",
+        type=int,
+        default=None,
+        help=(
+            "Echo executor only: raise a blocking question before this step, to "
+            "exercise the ask/answer path deterministically."
+        ),
+    )
     parser.add_argument(
         "--steps",
         type=int,
@@ -705,7 +925,9 @@ def main(argv: list[str] | None = None) -> int:
         label=args.label,
         poll_seconds=args.poll_seconds,
         max_cycles=args.max_cycles,
-        handler_name=args.handler,
+        executor=build_executor(
+            args.executor, command=args.executor_command, ask_at_step=args.ask_at_step
+        ),
         take_unassigned=args.take_unassigned,
         steps_per_task=args.steps,
         lease_seconds=args.lease_seconds,

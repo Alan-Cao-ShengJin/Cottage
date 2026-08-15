@@ -76,9 +76,13 @@ def test_a_malicious_task_title_is_data_not_a_command():
     assert nasty in prompt
 
     result = executor.run_step(_context(title=nasty))
-    # Whatever the platform's `echo` does with it, the point is that it ran one
-    # command and the payload stayed inside it.
-    assert result.concern is None or "not installed" in result.concern
+    # The assertion is about what did *not* happen. On a platform where `echo` is an
+    # executable this runs it with the payload as one argument; where `echo` is only
+    # a shell builtin — Windows — the lookup fails outright, which is the same
+    # property stated more emphatically: nothing here reaches a shell. Either way the
+    # `rm -rf` is a substring of an argument and never a second command.
+    assert result.concern is None or "command not found" in result.concern
+    assert "rm -rf" not in (result.concern or ""), "the payload never became a command"
 
 
 def test_a_missing_executor_command_is_a_concern_not_a_crash():

@@ -23,6 +23,7 @@ worker had got to is precisely the state a resume needs and a crash would destro
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from ..db import database as db
 from ..domain import ids
@@ -418,6 +419,40 @@ async def open_for(participant_id: str, *, room_id: str, tx: db.Tx | None = None
     args = (room_id, participant_id, participant_id, MAX_OPEN_QUESTIONS)
     rows = await (tx.fetch_all(sql, args) if tx else db.fetch_all(sql, args))
     return [store.to_question(r) for r in rows]
+
+
+async def answers_for(
+    participant_id: str, *, room_id: str, tx: db.Tx | None = None
+) -> list[dict[str, Any]]:
+    """Answers to questions this participant asked, newest last.
+
+    Exists because a runtime that restarts must still find the reply to a question
+    it asked before it died. Reading answers off the event stream alone cannot do
+    that — a fresh process starts at the current cursor, so the one event it most
+    needs is the one already behind it — and a projection of *open* questions loses
+    the answer at the exact moment it arrives. So the resume path carries the answer
+    itself.
+    """
+    sql = (
+        "SELECT a.id AS answer_id, a.body AS body, a.seq AS seq, "
+        "       q.id AS question_id, q.task_id AS task_id, q.body AS question "
+        "FROM answers a JOIN questions q ON q.id = a.question_id "
+        "WHERE a.room_id = ? AND q.asked_by_participant_id = ? "
+        "ORDER BY a.seq DESC LIMIT ?"
+    )
+    args = (room_id, participant_id, MAX_OPEN_QUESTIONS)
+    rows = await (tx.fetch_all(sql, args) if tx else db.fetch_all(sql, args))
+    return [
+        {
+            "answer_id": r["answer_id"],
+            "question_id": r["question_id"],
+            "task_id": r["task_id"],
+            "question": r["question"],
+            "body": r["body"],
+            "seq": int(r["seq"]),
+        }
+        for r in reversed(rows)
+    ]
 
 
 async def open_for_task(task_id: str, *, tx: db.Tx | None = None) -> list[Question]:

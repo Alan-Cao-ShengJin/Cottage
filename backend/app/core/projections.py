@@ -313,6 +313,7 @@ async def hydrate(
             (room_id, recipient.id, MAX_HYDRATION_MESSAGES),
         )
         open_questions = await questions_svc.open_for(recipient.id, room_id=room_id, tx=tx)
+        answers = await questions_svc.answers_for(recipient.id, room_id=room_id, tx=tx)
         conflicts = await store.list_conflicts(room_id, tx=tx)
         # Only for work this participant currently holds. A resuming runtime needs
         # where *it* got to; every other task's history is the board's business and
@@ -453,6 +454,10 @@ async def hydrate(
         # Both directions in one list: what is waiting on you, and what you are
         # waiting on. Split into two and one of them stops being read.
         "open_questions": [q.model_dump(mode="json") for q in open_questions],
+        # Replies to questions *you* asked. Here rather than only on the event stream
+        # because a restarted runtime starts at the current cursor, so the one event
+        # it most needs is the one already behind it (D-051).
+        "answers_for_you": answers,
         "claimable": claimable,
         "proposed_to_you": proposals,
         # Named for what it is. These are the most recent messages addressed to you,
