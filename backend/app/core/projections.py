@@ -27,6 +27,7 @@ from . import authz, eventlog, presence, privacy, store
 from . import checkpoints as checkpoints_svc
 from . import directives as directives_svc
 from . import questions as questions_svc
+from . import work as work_svc
 from .errors import ResumeGap
 
 log = logging.getLogger(__name__)
@@ -132,7 +133,6 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
 
     presences = await presence.presence_for_room(room)
     now = utcnow()
-    stale_cutoff = room.policy.work_stale_after_seconds
     progress_cutoff = room.policy.work_progress_stale_after_seconds
 
     work: list[dict[str, Any]] = []
@@ -146,6 +146,12 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
             continue
         owner_presence = presences.get(row["participant_id"])
         heartbeat_age = (now - from_iso(row["heartbeat_at"])).total_seconds()
+        # The same cutoff the sweeper applies, asked of the rule rather than rebuilt
+        # here (D-061). A flat `work_stale_after_seconds` was right until the owner
+        # floor landed in `work.py`, after which the board called an attended card
+        # stale for the 780 seconds the event log said it was fine — a projection
+        # contradicting the source of truth, with no `work.stale` event behind it.
+        stale_cutoff = work_svc.heartbeat_cutoff_for(room, owner_presence)
         # Both clocks, matching the sweeper (D-059): the beat says the owner is here,
         # the progress stamp says the work moved, and a card is only current if both
         # hold. `progress_at` is NULL on rows predating the split, where `heartbeat_at`

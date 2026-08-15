@@ -409,8 +409,16 @@ async def note_progress_tx(tx: db.Tx, *, room_id: str, task_id: str) -> None:
     )
 
 
-def _heartbeat_cutoff_for(room: Room, view: PresenceView | None) -> int:
+def heartbeat_cutoff_for(room: Room, view: PresenceView | None) -> int:
     """How long this owner's card may go unbeaten before it stops being evidence.
+
+    Public because the board must ask the rule rather than re-derive it. The sweeper
+    (`mark_stale_declarations`) and the read model (`projections.snapshot`) are two
+    readers of one rule, and when this floor was added the projection kept the old flat
+    cutoff — so between 120s and 900s a card rendered stale while the event log said it
+    was not (D-061). That is the same shape as D-046, D-049 and D-053: a rule moved and
+    a second reader stayed behind. There is exactly one implementation, here, and every
+    reader calls it.
 
     Never shorter than the owner's own presence clock (D-060). The room's flat window
     was written for a runtime that beats every 20 seconds, and applying it to a
@@ -459,7 +467,7 @@ async def mark_stale_declarations(room: Room) -> list[EventEnvelope]:
 
     for work in await store.list_open_work(room.id):
         view = presences.get(work.participant_id)
-        cutoff = _heartbeat_cutoff_for(room, view)
+        cutoff = heartbeat_cutoff_for(room, view)
         heartbeat_age = (now - from_iso(work.heartbeat_at)).total_seconds()
         progress_age = (now - from_iso(work.progress_at)).total_seconds()
         owner_gone = view is None or view.liveness.value in {"stale", "disconnected"}
@@ -503,15 +511,14 @@ async def mark_stale_declarations(room: Room) -> list[EventEnvelope]:
     return events
 
 
-async def is_stale(work: WorkDeclaration, room: Room, *, now=None) -> bool:
-    """Both clocks, since either one lapsing makes the card untrustworthy."""
-    at = now or utcnow()
-    heartbeat_age = (at - from_iso(work.heartbeat_at)).total_seconds()
-    progress_age = (at - from_iso(work.progress_at)).total_seconds()
-    return (
-        heartbeat_age > room.policy.work_stale_after_seconds
-        or progress_age > room.policy.work_progress_stale_after_seconds
-    )
+# `is_stale(work, room)` used to live here: both clocks, but the heartbeat one measured
+# against the flat room policy with no owner floor — the same wrong rule the projection
+# had. It had no callers in `backend/app`, so it was not a live bug; it was a correct
+# looking helper waiting for the next caller to reintroduce the defect. Deleted rather
+# than repaired: it cannot take the floor without a `PresenceView`, and once it takes
+# one it is `heartbeat_cutoff_for` plus the progress clock, which is what
+# `mark_stale_declarations` and `projections.snapshot` already spell out at the two
+# places that genuinely need it. A third spelling is how this bug got here.
 
 
 def _normalized_targets(targets: list[str]) -> list[str]:

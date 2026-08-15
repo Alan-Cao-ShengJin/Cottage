@@ -268,6 +268,20 @@ heartbeat interval is per connection and derived, and PROTOCOL's grading table �
 still called the grade `interactive_attached` and keyed it off "an interactive client" —
 now names `attended` and keys it off the capability, per principle 4.
 
+**The second half, found afterwards (D-061, done 2026-08-16).** D-060 floored the sweeper's
+heartbeat window at the owner's own clock and left `projections.snapshot` computing the flat
+`work_stale_after_seconds` for itself. Two implementations of one rule, disagreeing for the
+780 seconds between 120s and 900s: an attended participant's card rendered `stale` on every
+board in the room while the event log said it was fine and no `work.stale` had fired — a
+projection contradicting the source of truth, which principle 1 does not allow. Fixed by
+making the rule public (`work.heartbeat_cutoff_for`) and having the projection ask it per row
+with that owner's presence, and by deleting `is_stale`, a caller-less third spelling of the
+same rule with the same missing floor. Evidence is in the same test file: the 180-second
+attended case now asserts the board as well as the log, watched red then green. This is the
+fourth time a rule moved and a second reader stayed behind (D-046, D-049, D-053) — the check
+when a threshold gains a condition is "how many places compute this", and the answer must be
+one.
+
 This supersedes the demoted M2.4 item 3, which described the same root cause from its other
 end (`claim`/`renew` failing `capability_unsupported` after a lapse) and under-rated it: the
 lapse also makes presence itself unreadable for exactly the participants the room most needs

@@ -3010,3 +3010,63 @@ client". The code has said `attended` since the `Liveness` enum was written and
 contested design — the table now names the grade the wire actually carries, and states the
 condition as the capability (`requires_human_presence`) rather than a client shape, which
 is principle 4.
+
+---
+
+## D-061 — The board and the sweeper read one staleness rule
+
+**Date:** 2026-08-16
+**Status:** accepted
+**Context:** the second half of D-060, found by reading the code that D-060 did not touch.
+
+### What was wrong
+
+D-060 gave `mark_stale_declarations` an owner floor: a card may go stale no faster than its
+owner's own presence clock. `projections.snapshot` — the read model behind
+`get_room_state`, the `snapshot` frame, and the board — kept computing its own answer from
+the flat `room.policy.work_stale_after_seconds`. Two implementations of one rule, and after
+D-060 they disagreed.
+
+The disagreement had a precise window. For an attended owner the sweeper's cutoff is
+`300 × 3 = 900s`; the projection's was `120s`. Between those, an attended participant's card
+rendered `stale: true` on every board in the room for 780 seconds while the event log said
+it was fine and no `work.stale` had fired. The projection was contradicting the source of
+truth — principle 1 says every other table is derived from the log, and a derived value that
+says something the log does not is the derivation being wrong, not a second opinion.
+
+Client-visible, and in a projection: the fifth such defect, and every one of them has been in
+an adapter or a projection rather than in core.
+
+### The decision
+
+One implementation, and the renderer asks the rule. `_heartbeat_cutoff_for` becomes public
+`heartbeat_cutoff_for(room, view)` in `work.py`; `projections.snapshot` calls it per work row
+with that row's owner presence, inside the loop, because the floor depends on *that owner's*
+negotiated interval and hoisting it out would reintroduce a flat cutoff wearing a new name.
+Import direction is `projections → work` — renderer depends on rule, never the reverse, so
+`work.py` stays free of any projection import and there is no cycle.
+
+`is_stale(work, room)` is deleted rather than repaired. It had no callers in `backend/app`,
+so it was not a live bug — it was a correct-looking third spelling of the rule, carrying the
+same missing floor, waiting for the next caller to reintroduce the defect. It cannot take the
+floor without a `PresenceView`, and once it takes one it is `heartbeat_cutoff_for` plus the
+progress clock, which the two places that genuinely need it already spell out. A third
+spelling is how this got here.
+
+### The general lesson, and it is the fourth time
+
+D-046, D-049, D-053 and now this: a rule moved and a second reader stayed behind. The shape
+is always a rule that looks like a constant — a policy field read directly — so the second
+reader reads the field instead of calling the function. The check to run when a threshold
+gains a condition is not "did I update the caller" but "how many places compute this", and
+the answer must be one.
+
+**Evidence:** `backend/tests/test_attended_presence_across_turns.py`. The 180-second attended
+test now also asserts the *board*, not just the log: `snapshot(...)` renders that card
+`stale: False`. Watched red against the flat cutoff (`assert True is False`) and green with
+the fix, and a second test pins `heartbeat_cutoff_for(...) == 1800` at 600s. Whole backend
+suite 400 passed / 11 skipped, mypy and ruff clean on the touched files.
+
+**Docs squared with the code:** `docs/PROTOCOL.md` §3 now states that the snapshot's `stale`
+flag and the `work.stale` reason are one rule with one implementation, so a rendered card
+always has an event behind it.
