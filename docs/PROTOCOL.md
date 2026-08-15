@@ -91,6 +91,9 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 | `task.claimed` | task_id, participant_id, lease_id, fence, expires_at, heartbeat_interval_s, lease_seconds, executor_attachment_id, executor_connection_id |
 | `task.claim_renewed` | task_id, participant_id, fence, expires_at |
 | `task.claim_released` | task_id, participant_id, fence, note, forced, reason |
+| `directive.issued` | directive_id, target_participant_id, task_id, action (`pause` \| `stop` \| `resume` \| `reprioritize` \| `input`), reason, priority, human_origin (**attribution only, never authorization**), effect_status |
+| `directive.acknowledged` | directive_id, action, effect_status, rejected, note, issued_at_seq — evidence the target observed it, never permission for the effect |
+| `task.steered` | task_id, directive (`running` \| `paused` \| `stopped`), previous, reason, priority, steered_by_participant_id, holder_participant_id, executor_attachment_id, executor_connection_id |
 | `task.executor_changed` | task_id, participant_id, fence, previous_executor_ref, previous_executor_live, executor_attachment_id, executor_connection_id, reason |
 | `task.claim_expired` | task_id, participant_id, fence, expired_at, executor_attachment_id, executor_connection_id, reason — actor is the room, not a participant |
 | `task.blocked` | task_id, blocking_task_ids, note |

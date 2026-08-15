@@ -191,6 +191,12 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # cleared wherever the claim is cleared, so an executor never outlives its lease.
     ("tasks", "executor_attachment_id", "TEXT"),
     ("tasks", "executor_connection_id", "TEXT"),
+    # D-045. 'running' on every pre-existing row, which is the correct reading: no
+    # human has steered work that predates the ability to steer it.
+    ("tasks", "steering", "TEXT NOT NULL DEFAULT 'running'"),
+    ("tasks", "steering_reason", "TEXT NOT NULL DEFAULT ''"),
+    ("tasks", "steering_by_participant_id", "TEXT"),
+    ("tasks", "steering_at", "TEXT"),
 )
 
 

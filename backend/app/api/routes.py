@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from ..config import settings
 from ..core import (
     authz,
+    directives,
     eventlog,
     messages,
     presence,
@@ -31,6 +32,7 @@ from ..core.bus import bus
 from ..core.errors import Forbidden, ResumeGap
 from ..domain.capabilities import SUGGESTED_CAPABILITIES, Capability
 from ..domain.commands import (
+    AcknowledgeDirectiveCommand,
     CancelTaskCommand,
     ClaimTaskCommand,
     CompleteTaskCommand,
@@ -41,6 +43,7 @@ from ..domain.commands import (
     DeclareWorkCommand,
     EndWorkCommand,
     HeartbeatCommand,
+    IssueDirectiveCommand,
     JoinRoomCommand,
     LeaveRoomCommand,
     PostMessageCommand,
@@ -504,6 +507,37 @@ async def release_claim(
     _assert_room(participant, room_id)
     task = await tasks.release(participant=participant, command=command)
     return {"ok": True, "task": task.model_dump(mode="json")}
+
+
+@router.post("/rooms/{room_id}/directives", status_code=201)
+async def issue_directive(
+    room_id: str, participant: ParticipantDep, command: IssueDirectiveCommand
+) -> dict[str, Any]:
+    """Direct a participant: pause, stop, resume, reprioritise, or supply input.
+
+    Control actions take effect in this request, not when the target notices. The
+    response therefore describes what already happened, not what has been asked for.
+    """
+    _assert_room(participant, room_id)
+    directive = await directives.issue(participant=participant, command=command)
+    return {"ok": True, "directive": directive.model_dump(mode="json")}
+
+
+@router.post("/rooms/{room_id}/directives/acknowledge")
+async def acknowledge_directive(
+    room_id: str, participant: ParticipantDep, command: AcknowledgeDirectiveCommand
+) -> dict[str, Any]:
+    _assert_room(participant, room_id)
+    directive = await directives.acknowledge(participant=participant, command=command)
+    return {"ok": True, "directive": directive.model_dump(mode="json")}
+
+
+@router.get("/rooms/{room_id}/directives")
+async def list_open_directives(room_id: str, participant: ParticipantDep) -> dict[str, Any]:
+    """What is waiting for *you*. Oldest first: these are instructions, not context."""
+    _assert_room(participant, room_id)
+    open_ = await directives.open_for(participant.id)
+    return {"ok": True, "directives": [d.model_dump(mode="json") for d in open_]}
 
 
 @router.post("/rooms/{room_id}/tasks/take-over")

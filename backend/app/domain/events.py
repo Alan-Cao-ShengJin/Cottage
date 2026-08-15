@@ -59,6 +59,15 @@ class EventType(str, Enum):
     #: `task.claimed` because the holder did not change — only who is doing it.
     TASK_EXECUTOR_CHANGED = "task.executor_changed"
     TASK_CLAIM_EXPIRED = "task.claim_expired"
+    #: A human paused, stopped, resumed or reprioritised work in flight. The
+    #: holder and the executor are unchanged: steering directs, it does not seize.
+    TASK_STEERED = "task.steered"
+    #: A human directed a participant: control-plane intent, durable and targeted.
+    #: Separate from `task.steered`, which is the *effect* on the task — one
+    #: directive may produce both, and an incident needs to tell them apart.
+    DIRECTIVE_ISSUED = "directive.issued"
+    #: The target observed it. Evidence, never permission: the effect already landed.
+    DIRECTIVE_ACKNOWLEDGED = "directive.acknowledged"
     TASK_BLOCKED = "task.blocked"
     TASK_UNBLOCKED = "task.unblocked"
 

@@ -108,6 +108,19 @@ class ExecutorConflict(RoomError):
     status_code = 409
 
 
+class SteeringHalted(RoomError):
+    """A human paused or stopped this work, so the worker may not proceed.
+
+    Enforced rather than advertised. The alternative — returning the directive as
+    a field and trusting the runtime to honour it — makes human control a
+    convention, and this codebase has now three times replaced a convention with a
+    constraint after discovering the convention was not being kept.
+    """
+
+    code = "steering_halted"
+    status_code = 409
+
+
 class StaleFence(RoomError):
     """The caller's fence is behind the task's. It lost the lease and must re-read."""
 

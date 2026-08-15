@@ -32,7 +32,7 @@ from app.domain.commands import (
     TakeOverExecutionCommand,
 )
 from app.domain.identity import PrincipalKind
-from app.domain.room import Liveness
+from app.domain.room import Liveness, ParticipantRole, Scope
 
 from .conftest import ATTENDED_CAPABILITIES, FULL_CAPABILITIES
 
@@ -527,58 +527,76 @@ async def test_taking_over_what_you_already_execute_is_idempotent(make_room, joi
     )
 
 
-async def test_an_agent_may_not_force_release_another_runtimes_work(make_room, join):
-    """The override protects against external double-execution, so an agent must
-    not be able to grant it to itself merely by sharing a seat."""
-    room = await make_room()
-    seat = await join(room, display_name="Agent seat", kind=PrincipalKind.AGENT, connect=False)
-    worker_conn = await _connect(seat, label="worker")
-    chat_conn = await _connect(seat, label="chat")
+async def test_being_a_human_principal_is_not_authorization(make_room, join):
+    """The correction that mattered most in this area, so it gets its own test.
 
-    task = await _new_task(seat)
+    The first implementation accepted `identity.kind == HUMAN` as authority to
+    override. That looked safe — the field is stamped server-side, so a caller
+    cannot forge it — but unforgeable is not the property required. `kind` records
+    whose identity this is; it says nothing about who is at the keyboard, so an
+    unattended runtime holding a human-kind participant's credentials would have
+    manufactured "a human said stop" out of its own token.
+
+    Provenance is attribution, not verification (`docs/SECURITY.md`). This was
+    authorization. They are different questions and only one of them is answerable.
+    """
+    room = await make_room()
+    human = await join(room, display_name="Alan", kind=PrincipalKind.HUMAN, connect=False)
+    worker_conn = await _connect(human, label="worker")
+    chat_conn = await _connect(human, label="chat")
+
+    task = await _new_task(human)
     claimed = await tasks.claim(
-        participant=seat.participant,
+        participant=human.participant,
         command=ClaimTaskCommand(task_id=task.id, connection_id=worker_conn),
     )
     assert claimed.claim is not None
+    assert Scope.ROOM_ADMIN not in human.participant.scopes
 
     with pytest.raises(ExecutorConflict):
         await tasks.release(
-            participant=seat.participant,
+            participant=human.participant,
             command=ReleaseClaimCommand(
                 task_id=task.id,
                 fence=claimed.claim.fence,
                 force=True,
-                reason="I would like it back",
+                reason="I am a person, let me through",
                 connection_id=chat_conn,
             ),
         )
 
 
-async def test_a_human_may_force_release_but_not_silently(make_room, join):
+async def test_a_room_admin_may_force_release_but_not_silently(make_room, join):
     """Human preemption, which the steering channel depends on — with a reason."""
     room = await make_room()
-    seat = await join(room, display_name="Alan", kind=PrincipalKind.HUMAN, connect=False)
-    worker_conn = await _connect(seat, label="worker")
-    chat_conn = await _connect(seat, label="chat")
+    admin = await join(
+        room,
+        display_name="Alan",
+        kind=PrincipalKind.HUMAN,
+        role=ParticipantRole.OWNER,
+        connect=False,
+    )
+    worker_conn = await _connect(admin, label="worker")
+    chat_conn = await _connect(admin, label="chat")
+    assert Scope.ROOM_ADMIN in admin.participant.scopes
 
-    task = await _new_task(seat)
+    task = await _new_task(admin)
     claimed = await tasks.claim(
-        participant=seat.participant,
+        participant=admin.participant,
         command=ClaimTaskCommand(task_id=task.id, connection_id=worker_conn),
     )
     assert claimed.claim is not None
 
     with pytest.raises(InvalidCommand):
         await tasks.release(
-            participant=seat.participant,
+            participant=admin.participant,
             command=ReleaseClaimCommand(
                 task_id=task.id, fence=claimed.claim.fence, force=True, connection_id=chat_conn
             ),
         )
 
     released = await tasks.release(
-        participant=seat.participant,
+        participant=admin.participant,
         command=ReleaseClaimCommand(
             task_id=task.id,
             fence=claimed.claim.fence,

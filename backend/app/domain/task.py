@@ -32,6 +32,27 @@ class TaskStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class Steering(str, Enum):
+    """Human control over work in flight, orthogonal to status and to the lease.
+
+    Deliberately not a status: a paused task is still claimed, still held, still
+    someone's job. What changed is that a person said not yet — which is a fact
+    about authority, not about progress.
+    """
+
+    #: The absence of a directive, not a directive.
+    RUNNING = "running"
+    #: Keep your place; do not progress.
+    PAUSED = "paused"
+    #: Stop, and do not pick it back up. Re-claim is refused until resumed, without
+    #: which "stop" would mean "stop until your next loop iteration".
+    STOPPED = "stopped"
+
+
+#: Steering states in which a worker may not progress the task.
+HALTED_STEERING: frozenset[Steering] = frozenset({Steering.PAUSED, Steering.STOPPED})
+
+
 TERMINAL_TASK_STATUSES: frozenset[TaskStatus] = frozenset({TaskStatus.DONE, TaskStatus.CANCELLED})
 
 #: Statuses in which the task is held by a claimant.
@@ -83,6 +104,13 @@ class Task(BaseModel):
     #: fence value is never reissued after a release.
     fence: int = 0
     claim: TaskClaim | None = None
+    #: Whether a human has paused or stopped this work. `running` means nobody has.
+    steering: Steering = Steering.RUNNING
+    steering_reason: str = ""
+    #: Who steered. Recorded because "the room stopped it" is not an accountable
+    #: sentence — a person did, and the board should say which one.
+    steering_by_participant_id: str | None = None
+    steering_at: str | None = None
     result: str = ""
     privacy_class: PrivacyClass = PrivacyClass.ROOM_PUBLIC
     created_at: str

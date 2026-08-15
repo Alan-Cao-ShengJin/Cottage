@@ -132,6 +132,11 @@ def room_state(
     messages = snapshot.get("messages") or []
 
     state: dict[str, Any] = {
+        # Kept whole and kept first. Everything else in this view is compacted or
+        # dropped to save the caller's context; an instruction addressed to the caller
+        # is the one thing that must survive the trim, and it must be the first thing
+        # read (D-045).
+        "directives_for_you": snapshot.get("directives_for_you") or [],
         "room": {
             "room_id": room.get("id"),
             "name": room.get("name"),

@@ -26,6 +26,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from ...config import settings
 from ...core import (
+    directives,
     eventlog,
     messages,
     presence,
@@ -730,6 +731,11 @@ async def get_room_state(
     (`resume_here` is the same thing as a dedicated tool. It exists for clients that pick
     up new tools; this mode exists because some connectors cache their tool list, and a
     capability nobody can discover is a capability nobody has — D-040.)
+
+    Every mode returns `directives_for_you` first: instructions a human addressed to you,
+    oldest first. They have **already taken effect** — a stopped task is stopped whether or
+    not you have read this — so acknowledging one records that you saw it, and never
+    re-applies or undoes anything.
     """
     try:
         participant = await _participant(ctx, participant_token)
@@ -799,8 +805,15 @@ async def await_room_events(
         else:
             payload_events, dropped = compact.events(visible, max_events=max_events)
 
+        # Read before the events and returned before them: a worker that has been
+        # stopped should not have to parse the board to find that out. Also the reason
+        # a stopped worker cannot simply keep going — the effect already landed in the
+        # task layer, and this is only how it finds out (D-045).
+        pending = await directives.open_for(participant.id)
+
         result: dict[str, Any] = {
             "ok": True,
+            "directives_for_you": [d.model_dump(mode="json") for d in pending],
             "events": payload_events,
             "cursor": cursor,
             "timed_out": not visible,

@@ -33,6 +33,7 @@ PROPOSAL: Final = "prp"
 CLAIM: Final = "clm"
 ARTIFACT: Final = "art"
 CONFLICT: Final = "cft"
+DIRECTIVE: Final = "dir"
 COMMAND: Final = "cmd"
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from .capabilities import Capability, HostClass
+from .directive import DirectiveAction
 from .disclosure import Disclosure, Provenance
 from .identity import PrincipalKind
 from .room import (
@@ -198,6 +199,48 @@ class ReleaseClaimCommand(CommandMeta):
     #: override that leaves no trace is indistinguishable from a bug.
     force: bool = False
     reason: str = Field(default="", max_length=500)
+
+
+class IssueDirectiveCommand(CommandMeta):
+    """Direct a participant without becoming it.
+
+    The whole point of the control plane: a human pauses, stops, redirects or
+    answers a worker while the work stays that worker's job. Nothing here moves a
+    lease or an executor, so a directive is not a covert takeover — and because
+    `claim`, `complete` and `update` consult the resulting state, it is not a
+    request the runtime may quietly decline either.
+
+    `human_origin` is deliberately absent: it is derived server-side from the
+    issuer's identity. A caller-supplied one would let a same-seat unattended
+    runtime manufacture "a human said stop" out of its own credentials.
+    """
+
+    target_participant_id: str
+    action: DirectiveAction
+    #: Which work this is about. Required for everything except `input`, since
+    #: pausing "in general" is not something the task layer can enforce.
+    task_id: str | None = None
+    #: Required for anything that halts work. Whoever finds a task stopped needs to
+    #: know why without having to ask the person who stopped it.
+    reason: str = Field(default="", max_length=2000)
+    #: Only meaningful for `reprioritize`. It lives on this command rather than on
+    #: `update` because `update` demands the lease, which someone steering
+    #: deliberately does not hold.
+    priority: int | None = Field(default=None, ge=-100, le=100)
+
+
+class AcknowledgeDirectiveCommand(CommandMeta):
+    """Record that the target saw a directive — and, for `input`, consumed it.
+
+    Never undoes or re-applies an effect. Acknowledging a stop does not re-stop
+    anything; it only means the room can now say the worker knew.
+    """
+
+    directive_id: str
+    #: An agent may decline. The room's job is to make the refusal visible, not to
+    #: argue with it. Ignored for control actions, whose effect has already landed.
+    rejected: bool = False
+    note: str = Field(default="", max_length=2000)
 
 
 class TakeOverExecutionCommand(CommandMeta):

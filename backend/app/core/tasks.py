@@ -49,9 +49,8 @@ from ..domain.commands import (
     UpdateTaskCommand,
 )
 from ..domain.events import EventEnvelope, EventType
-from ..domain.identity import PrincipalKind
 from ..domain.room import Participant, Room, Scope
-from ..domain.task import HELD_TASK_STATUSES, Task, TaskStatus
+from ..domain.task import HALTED_STEERING, HELD_TASK_STATUSES, Steering, Task, TaskStatus
 from ..util import is_past, iso_in, normalize_target, utcnow_iso
 from . import authz, conflicts, eventlog, presence, privacy, store
 from .actors import SYSTEM_ACTOR, actor_for
@@ -64,6 +63,7 @@ from .errors import (
     LeaseRequired,
     NotFound,
     StaleFence,
+    SteeringHalted,
 )
 
 log = logging.getLogger(__name__)
@@ -247,6 +247,7 @@ async def _claim_tx(
         raise InvalidCommand(
             "That task is already finished.", task_id=task_id, status=row["status"]
         )
+    _require_not_halted(row, action="claim")
 
     # The idempotent re-claim branch below matches on participant, which is the seat
     # rather than the runtime. Without this check a chat surface could re-claim its
@@ -499,7 +500,9 @@ async def release(*, participant: Participant, command: ReleaseClaimCommand) -> 
         # up while another runtime is still doing it frees a third party to start
         # the same external action, which is the same end state as seizing it.
         if command.force:
-            _require_may_force(participant, command.reason)
+            require_override_authority(
+                participant, command.reason, what="release another runtime's work"
+            )
         else:
             await _require_executor_or_dead(
                 tx,
@@ -674,26 +677,34 @@ def _require_live_lease(row, participant: Participant) -> None:
         )
 
 
-def _require_may_force(participant: Participant, reason: str) -> None:
-    """Who may override executor affinity, and on what terms.
+def require_override_authority(participant: Participant, reason: str, *, what: str) -> None:
+    """Who may act on work they are not doing, and on what terms.
 
-    A human principal or a room admin, and never without a reason. The override
-    exists because a stuck runtime must not be able to hold work hostage — but the
-    thing being overridden is a safety rule about external effects, so it is not
-    something an agent may quietly grant itself on the strength of sharing a seat.
+    `room.admin` and a reason. Nothing else — and in particular **not** whether the
+    identity is a human principal, which is what this check used to accept.
+
+    That was wrong in a way worth keeping written down, because it looked safe:
+    `identity.kind` is stamped server-side, not supplied by the caller, so it is
+    unforgeable. But unforgeable is not the property needed here. `kind` says whose
+    identity this is; it says nothing about who is at the keyboard right now, so an
+    unattended runtime holding a human-kind participant's credentials would have
+    manufactured "a human said stop" merely by sharing the seat. Provenance is
+    **attribution, not verification** (`docs/SECURITY.md`), and this is authorization.
+
+    Human-ness is still recorded, as provenance on the event, where a claim about
+    who acted belongs. It is never sufficient on its own.
     """
-    is_human = participant.identity.kind == PrincipalKind.HUMAN
-    if not (is_human or Scope.ROOM_ADMIN in participant.scopes):
+    if Scope.ROOM_ADMIN not in participant.scopes:
         raise ExecutorConflict(
-            "Only a human principal or a room admin may override executor affinity. "
-            "An agent that wants to take over live work should take it over "
-            "explicitly, which is visible in the room.",
+            f"Only a room admin may {what}. Being a human principal is not the same "
+            "as being authorized: the room can attribute an action to your identity, "
+            "but it cannot verify that a person is present when it happens.",
             participant_id=participant.id,
         )
     if not reason.strip():
         raise InvalidCommand(
-            "Overriding executor affinity requires a reason, which is recorded in "
-            "the room. An override nobody can audit is worse than no override.",
+            f"To {what} you must give a reason, which is recorded in the room. An "
+            "override nobody can audit is worse than no override.",
         )
 
 
@@ -793,6 +804,140 @@ async def take_over_execution(
     return await store.load_task(command.task_id)
 
 
+def _require_not_halted(row, *, action: str) -> None:
+    """Refuse progress on work a human has paused or stopped.
+
+    Checked at `claim`, `complete` and `update` rather than returned as a field the
+    worker is asked to respect. `stopped` blocks re-claim specifically, because
+    without that "stop" would only mean "stop until your next loop iteration" — the
+    worker would release, re-claim, and carry on having technically obeyed.
+    """
+    steering = Steering(row["steering"])
+    if steering not in HALTED_STEERING:
+        return
+    if steering is Steering.PAUSED and action == "claim":
+        # Pausing keeps the holder's place; it does not put the task beyond reach.
+        return
+    raise SteeringHalted(
+        f"A human {steering.value} this task, so you may not {action} it: "
+        f"{row['steering_reason'] or 'no reason given'}. It resumes when they say so.",
+        task_id=row["id"],
+        steering=steering.value,
+        steering_reason=row["steering_reason"],
+        steered_by_participant_id=row["steering_by_participant_id"],
+    )
+
+
+async def apply_steering_tx(
+    tx: db.Tx,
+    *,
+    room: Room,
+    participant: Participant,
+    task_id: str,
+    steering: Steering,
+    reason: str,
+    priority: int | None,
+) -> list[EventEnvelope]:
+    """Apply a human's directive to a task, inside the caller's transaction.
+
+    Not a public command. Authority lives one layer up in `core.directives`, which
+    decides *whether* someone may steer; this decides what steering does. Keeping
+    them apart is what stops the enforcement point and the authorization point from
+    drifting into each other.
+
+    The holder and the executor are untouched, which is the entire difference
+    between steering and seizing: a chat surface can stop a worker without becoming
+    the thing that now has to finish the job. `stop` is the one action that also
+    releases the lease — halting a task while leaving it held by someone who has
+    been told to stop would freeze the work rather than free it, and the point of
+    stopping is usually that somebody else should pick it up later.
+    """
+    row = await tx.fetch_one("SELECT * FROM tasks WHERE id = ? AND room_id = ?", (task_id, room.id))
+    if row is None:
+        raise NotFound("Task does not exist.", task_id=task_id)
+    if row["status"] in {"done", "cancelled"}:
+        raise InvalidCommand(
+            "That task is already finished; there is nothing to steer.",
+            task_id=task_id,
+            status=row["status"],
+        )
+
+    previous = Steering(row["steering"])
+    now = utcnow_iso()
+    resolved_priority = row["priority"] if priority is None else priority
+    await tx.execute(
+        """
+        UPDATE tasks
+        SET steering = ?, steering_reason = ?, steering_by_participant_id = ?,
+            steering_at = ?, priority = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            steering.value,
+            reason,
+            participant.id,
+            now,
+            resolved_priority,
+            now,
+            task_id,
+        ),
+    )
+    events = [
+        await eventlog.append(
+            tx,
+            room_id=room.id,
+            type_=EventType.TASK_STEERED,
+            actor=actor_for(participant),
+            payload={
+                "task_id": task_id,
+                "steering": steering.value,
+                "previous": previous.value,
+                "reason": reason,
+                "priority": resolved_priority,
+                "steered_by_participant_id": participant.id,
+                # Stated rather than implied: steering did not move the work.
+                "holder_participant_id": row["claim_participant_id"],
+                "executor_attachment_id": row["executor_attachment_id"],
+                "executor_connection_id": row["executor_connection_id"],
+            },
+        )
+    ]
+
+    if steering is Steering.STOPPED and row["claim_lease_id"]:
+        # `fence` is deliberately not reset, so the stopped worker's fence stays
+        # permanently unusable and a late write from it cannot land.
+        affected = await tx.execute(
+            """
+            UPDATE tasks
+            SET status = 'open', claim_lease_id = NULL, claim_participant_id = NULL,
+                claim_fence = NULL, claim_claimed_at = NULL, claim_expires_at = NULL,
+                claim_heartbeat_interval_s = NULL, claim_renewed_at = NULL,
+                executor_attachment_id = NULL, executor_connection_id = NULL,
+                updated_at = ?
+            WHERE id = ? AND claim_lease_id = ?
+            """,
+            (now, task_id, row["claim_lease_id"]),
+        )
+        if affected:
+            events.append(
+                await eventlog.append(
+                    tx,
+                    room_id=room.id,
+                    type_=EventType.TASK_CLAIM_RELEASED,
+                    actor=actor_for(participant),
+                    payload={
+                        "task_id": task_id,
+                        "participant_id": row["claim_participant_id"],
+                        "fence": row["claim_fence"],
+                        "note": reason,
+                        "forced": True,
+                        "reason": f"stopped by directive: {reason}",
+                    },
+                )
+            )
+    return events
+
+
 async def _caller_executor(
     participant: Participant, connection_id: str | None, *, tx: db.Tx | None = None
 ) -> presence.Executor:
@@ -868,6 +1013,7 @@ async def update(*, participant: Participant, command: UpdateTaskCommand) -> Tas
             raise NotFound("Task does not exist.", task_id=command.task_id)
         _assert_fence(row, command.fence)
         _assert_holder(row, participant)
+        _require_not_halted(row, action="update")
         await _require_executor_or_dead(
             tx,
             row,
@@ -969,6 +1115,12 @@ async def complete(*, participant: Participant, command: CompleteTaskCommand) ->
         if row["status"] == "done":
             return CommandOutcome(result={"task_id": command.task_id})
         _assert_fence(row, command.fence)
+        # Steering is checked *before* the lease, and the order is the whole point of
+        # the message. `stop` releases the hold, so a stopped worker asking to finish
+        # has no lease — and would be told "claim it first", which is true, useless,
+        # and one round trip away from being told the actual reason. The room knows
+        # exactly why the lease went away; it should say so first.
+        _require_not_halted(row, action="complete")
         _require_live_lease(row, participant)
         await _require_executor_or_dead(
             tx,

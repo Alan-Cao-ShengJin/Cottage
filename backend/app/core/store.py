@@ -17,6 +17,7 @@ from typing import Any
 
 from ..db import database as db
 from ..domain.capabilities import CapabilityProfile, DeliveryMode, HostClass
+from ..domain.directive import Directive, DirectiveAction, EffectStatus
 from ..domain.identity import (
     AgentIdentity,
     Capability,
@@ -46,6 +47,7 @@ from ..domain.task import (
     Conflict,
     ConflictKind,
     ConflictStatus,
+    Steering,
     Task,
     TaskClaim,
     TaskStatus,
@@ -172,6 +174,25 @@ def to_connection(row: Any) -> Connection:
     )
 
 
+def to_directive(row: Any) -> Directive:
+    return Directive(
+        id=row["id"],
+        room_id=row["room_id"],
+        target_participant_id=row["target_participant_id"],
+        task_id=row["task_id"],
+        action=DirectiveAction(row["action"]),
+        reason=row["reason"],
+        issued_by_participant_id=row["issued_by_participant_id"],
+        human_origin=bool(row["human_origin"]),
+        created_seq=int(row["created_seq"]),
+        effect_status=EffectStatus(row["effect_status"]),
+        created_at=row["created_at"],
+        applied_at=row["applied_at"],
+        acknowledged_at=row["acknowledged_at"],
+        acknowledged_by_participant_id=row["acknowledged_by_participant_id"],
+    )
+
+
 def to_task(row: Any) -> Task:
     """Map a task row, applying lease expiry as seen by any reader.
 
@@ -216,6 +237,10 @@ def to_task(row: Any) -> Task:
         created_by_participant_id=row["created_by_participant_id"],
         fence=int(row["fence"]),
         claim=claim,
+        steering=Steering(row["steering"]),
+        steering_reason=row["steering_reason"],
+        steering_by_participant_id=row["steering_by_participant_id"],
+        steering_at=row["steering_at"],
         result=row["result"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],

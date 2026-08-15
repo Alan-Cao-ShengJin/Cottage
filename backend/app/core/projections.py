@@ -24,6 +24,7 @@ from ..domain.room import Participant, PrivacyClass, Room, Scope
 from ..domain.task import ConflictStatus
 from ..util import from_iso, utcnow
 from . import authz, eventlog, presence, privacy, store
+from . import directives as directives_svc
 from .errors import ResumeGap
 
 log = logging.getLogger(__name__)
@@ -97,6 +98,9 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
     """Everything `recipient` may see about the room, plus the cursor it starts at."""
     async with db.transaction(write=False) as tx:
         room = await store.load_room(room_id, tx=tx)
+        open_directives = [
+            d.model_dump(mode="json") for d in await directives_svc.open_for(recipient.id, tx=tx)
+        ]
         snapshot_seq = int(
             await tx.fetch_value("SELECT event_seq FROM rooms WHERE id = ?", (room_id,))
         )
@@ -175,6 +179,12 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
     ]
 
     return {
+        # FIRST, and literally first rather than merely early: a directive is an
+        # instruction to this participant, and everything else here is context. A
+        # worker reading top-down therefore acts on what it was told before it
+        # reasons about the board. The event stream itself stays ordered by seq —
+        # the guarantee is about this payload, not a re-sequenced log (D-045).
+        "directives_for_you": open_directives,
         "type": "snapshot",
         "protocol": "arp/1",
         "room": room.model_dump(mode="json"),
@@ -248,6 +258,9 @@ async def hydrate(
             truncated = True
 
     async with db.transaction(write=False) as tx:
+        open_directives = [
+            d.model_dump(mode="json") for d in await directives_svc.open_for(recipient.id, tx=tx)
+        ]
         room = await store.load_room(room_id, tx=tx)
         cursor = int(await tx.fetch_value("SELECT event_seq FROM rooms WHERE id = ?", (room_id,)))
         # Counted by the database, never by len() of the returned page. The payload is
@@ -350,6 +363,12 @@ async def hydrate(
     ]
 
     return {
+        # FIRST, and literally first rather than merely early: a directive is an
+        # instruction to this participant, and everything else here is context. A
+        # worker reading top-down therefore acts on what it was told before it
+        # reasons about the board. The event stream itself stays ordered by seq —
+        # the guarantee is about this payload, not a re-sequenced log (D-045).
+        "directives_for_you": open_directives,
         "type": "hydration",
         "protocol": "arp/1",
         "room": {

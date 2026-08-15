@@ -381,6 +381,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     executor_attachment_id      TEXT REFERENCES attachments(id) ON DELETE SET NULL,
     executor_connection_id      TEXT REFERENCES connections(id) ON DELETE SET NULL,
     result                      TEXT NOT NULL DEFAULT '',
+    -- Human control over work in flight (D-045). `running` is the absence of a
+    -- directive. `paused` keeps the holder's place but forbids progress; `stopped`
+    -- also forbids re-claiming, without which "stop" would mean "stop until the
+    -- worker's next loop iteration". Never a hint the worker is asked to respect:
+    -- claim, complete and update all check it, so a worker that ignores its steering
+    -- cannot act on the room regardless of what it decides internally.
+    steering                    TEXT NOT NULL DEFAULT 'running',
+    steering_reason             TEXT NOT NULL DEFAULT '',
+    steering_by_participant_id  TEXT,
+    steering_at                 TEXT,
     privacy_class               TEXT NOT NULL DEFAULT 'room_public',
     created_at                  TEXT NOT NULL,
     updated_at                  TEXT NOT NULL,
@@ -397,6 +407,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- An executor is a property *of a lease*, so it cannot outlive one, and it is
     -- one runtime rather than two kinds of runtime at once.
     CHECK (executor_attachment_id IS NULL OR executor_connection_id IS NULL),
+    CHECK (steering IN ('running','paused','stopped')),
     CHECK (
         claim_lease_id IS NOT NULL
         OR (executor_attachment_id IS NULL AND executor_connection_id IS NULL)
@@ -406,6 +417,40 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- written from one resolution point and cleared with the claim everywhere).
     -- A fresh file and the eventual PostgreSQL schema get the real constraint.
 );
+
+CREATE TABLE IF NOT EXISTS directives (
+    id                             TEXT PRIMARY KEY,
+    room_id                        TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    -- Addressed to a seat, not a runtime: whoever is steering does not, and should
+    -- not, know which of the target's runtimes happens to be executing right now.
+    target_participant_id          TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    task_id                        TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    action                         TEXT NOT NULL,
+    reason                         TEXT NOT NULL DEFAULT '',
+    issued_by_participant_id       TEXT NOT NULL,
+    -- Derived from the issuer's identity, never accepted from a caller. Attribution,
+    -- not verification: it says the issuing identity is a human principal, not that a
+    -- human was present. Authorization is `room.admin` and lives nowhere near here.
+    human_origin                   INTEGER NOT NULL DEFAULT 0,
+    created_seq                    INTEGER NOT NULL,
+    -- Effect and observation are ORTHOGONAL and must not be flattened into one
+    -- lifecycle. A control action applies at issue, because waiting for the target to
+    -- acknowledge would make stopping a runaway worker depend on the runaway worker.
+    -- `applied but never acknowledged` is therefore a real state, and the one an
+    -- incident review most wants to be able to read.
+    effect_status                  TEXT NOT NULL,
+    created_at                     TEXT NOT NULL,
+    applied_at                     TEXT,
+    acknowledged_at                TEXT,
+    acknowledged_by_participant_id TEXT,
+    CHECK (action IN ('pause','stop','resume','reprioritize','input')),
+    CHECK (effect_status IN ('pending','applied','rejected','superseded'))
+);
+
+-- Drives "what is waiting for me" without a scan.
+CREATE INDEX IF NOT EXISTS idx_directives_target
+    ON directives(target_participant_id, acknowledged_at);
+CREATE INDEX IF NOT EXISTS idx_directives_room ON directives(room_id, created_seq);
 
 CREATE INDEX IF NOT EXISTS idx_tasks_room ON tasks(room_id, status);
 -- Drives the lease reaper without a table scan.

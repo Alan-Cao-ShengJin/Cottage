@@ -12,7 +12,9 @@
       "Bash(git commit *)",
       "Bash(git push *)",
       "Bash(backend/.venv/Scripts/python.exe -m pytest backend/tests/test_command_schema_invariants.py -q)",
-      "Bash(cd \"D:/Code/Collab\" && sed -n '/async def _append_presence_changed/,/^async def presence_for_room/p' backend/app/core/presence.py | head -45)"
+      "Bash(cd \"D:/Code/Collab\" && sed -n '/async def _append_presence_changed/,/^async def presence_for_room/p' backend/app/core/presence.py | head -45)",
+      "Bash(cd \"D:/Code/Collab\" && sed -n '/^async def renew/,/^async def release/p' backend/app/core/tasks.py | head -75 && echo \"=== TaskStatus ===\" && grep -n \"class TaskStatus\" -A 15 backend/app/domain/task.py)",
+      "Bash(cd \"D:/Code/Collab\" && sed -n '/^    return {/,/^        \"your_work\"/p' backend/app/core/projections.py | tail -25)"
     ],
     "additionalDirectories": [
       "D:\\Code\\Collab\\backend\\.venv\\Lib\\site-packages\\uvicorn",
