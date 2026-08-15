@@ -36,12 +36,14 @@ must never make a network call.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import pathlib
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from typing import Any
 
 DEFAULT_BASE = "https://agent-rooms.fly.dev"
@@ -142,6 +144,52 @@ def summarize(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: Fields worth showing per event, in the order they are worth trying. An event whose
+#: payload has none of these is still listed by type — knowing that a lease moved matters
+#: even when there is no sentence to print about it.
+DETAIL_FIELDS = (
+    "summary",
+    "body",
+    "headline",
+    "title",
+    "note",
+    "reason",
+    "result",
+    "error",
+)
+
+
+def local_time(iso: str) -> str:
+    """UTC on the wire, the reader's clock on the page.
+
+    The room stamps `ts` in UTC, which is right for a log and wrong for a person
+    glancing at a feed — an event eight hours in the "past" reads as stale history
+    rather than as something that just happened.
+    """
+    if not iso:
+        return "--:--:--"
+    try:
+        when = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return "--:--:--"
+    return when.astimezone().strftime("%H:%M:%S")
+
+
+def describe(event: dict[str, Any]) -> str:
+    """One line for a human reading the room over someone's shoulder."""
+    payload = event.get("payload") or {}
+    detail = ""
+    for field_name in DETAIL_FIELDS:
+        value = payload.get(field_name)
+        if isinstance(value, str) and value.strip():
+            detail = " ".join(value.split())
+            break
+    actor = (event.get("actor") or {}).get("display_name") or "room"
+    stamp = local_time(str(event.get("ts") or event.get("created_at") or ""))
+    line = f"`{event.get('seq'):>4}` **{stamp}** {actor} · `{event.get('type')}`"
+    return f"{line} — {detail[:150]}" if detail else line
+
+
 def as_markdown(state: dict[str, Any]) -> str:
     """The same reading, for a human keeping a file open in a split pane."""
     stamp = time.strftime("%H:%M:%S", time.localtime(state.get("at") or time.time()))
@@ -164,6 +212,12 @@ def as_markdown(state: dict[str, Any]) -> str:
         lines.append(f"- ✗ conflicts: **{state['conflicts']}**")
     if state.get("headline"):
         lines += ["", f"> {state['headline']}"]
+
+    # Newest first: a feed a human glances at is read from the top, and the thing they
+    # need is what just happened, not what happened when they last looked.
+    feed = state.get("feed") or []
+    lines += ["", "## Live", ""]
+    lines += [f"- {line}" for line in reversed(feed)] or ["_nothing yet_"]
     return "\n".join(lines) + "\n"
 
 
@@ -192,6 +246,12 @@ def main() -> int:
         action="store_true",
         help="Observe without attaching, leaving this seat's presence untouched.",
     )
+    parser.add_argument(
+        "--feed-length",
+        type=int,
+        default=25,
+        help="How many recent events to keep in the readable feed.",
+    )
     args = parser.parse_args()
 
     # Never an argument: a token on a command line is readable from any process
@@ -202,6 +262,10 @@ def main() -> int:
 
     out = pathlib.Path(args.out)
     connection_id = ""
+    # Bounded, because this is a window on the room and not a second copy of the log —
+    # the event log is the source of truth and lives on the server.
+    feed: collections.deque[str] = collections.deque(maxlen=args.feed_length)
+    cursor = 0
     while True:
         try:
             if not args.read_only and not connection_id:
@@ -218,7 +282,20 @@ def main() -> int:
                     "/heartbeat",
                     {"connection_id": connection_id},
                 )
+            fresh = call(
+                args.base,
+                args.room,
+                token,
+                "GET",
+                f"/events?since_seq={cursor}&limit=60",
+            )
+            for event in fresh.get("events") or []:
+                feed.append(describe(event))
+                cursor = max(cursor, int(event.get("seq") or cursor))
+            cursor = max(cursor, int(fresh.get("current_seq") or cursor))
+
             state = summarize(read_room(args.base, args.room, token))
+            state["feed"] = list(feed)
         except urllib.error.HTTPError as exc:
             # A connection the room has forgotten (restart, reaper, revocation) must be
             # re-established rather than heartbeated forever into nothing.
