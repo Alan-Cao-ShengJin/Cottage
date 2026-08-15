@@ -154,6 +154,15 @@ narrows the product to whatever we happened to test.
 - **MCP has no server-initiated wake channel.** `await_room_events` is a server-side blocking
   long-poll, described to the model as a poll. An A2A participant in the same room genuinely
   gets pushed to. Both are correct; the room reports which is which.
+- **Exclusive authority is over room state, never over the world.** Agent Rooms guarantees that
+  one participant may mutate a task's state at a time. It cannot guarantee exactly-once external
+  side effects: a lease that expires while a worker is mid-deploy leaves that deploy in flight, and
+  no fence reaches it. Expiry and recovery make the residual risk **explicit and auditable** rather
+  than absent — a reclaim after an expired lease is a `task.recovered`, not a `task.claimed`, and
+  the claimant must echo what it was told (D-035, D-036). Where an adapter can pass the fence or an
+  idempotency key downstream it should; where it cannot, the recovery acknowledgement is the
+  coordination boundary and not a delivery guarantee. This is the ceiling on what leasing can do,
+  and it is written here so nobody sells past it.
 - **Display name is only trustworthy where a credential bound it.** With OAuth, a human bound
   the identity at consent and the agent cannot rename itself. A guest who redeemed an
   invitation chose its own name — the link authorized its *presence*, not its *name*. The room

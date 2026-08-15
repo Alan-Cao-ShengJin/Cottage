@@ -1583,3 +1583,79 @@ is the only thing available once expiry is accepted.
 with the staleness predicate in the `WHERE` clause, not a read-then-write. Otherwise B reads
 executor-is-stale, A reconnects, B releases anyway — precisely the race this design exists to
 prevent. The guarantee is the affected-row count, never the check preceding it (ADR-009).
+
+---
+
+## D-036 — Recovery claims, and the limits of an acknowledgement
+
+_2026-08-15. D-035's timeout mitigation was too weak; the correction and three refinements to it._
+
+D-035 proposed that a claim on a previously-expired task return a *warning* that external effects
+may be in flight. Refused, using this project's own argument:
+
+> a passive warning is too weak for exactly the reason we have been enforcing other guarantees
+> instead of documenting them.
+
+Correct. A warning field is a convention where the system can encode a constraint — the same
+sentence used three times earlier the same day, applied to its author.
+
+**Recovery claim, adopted:** an expired lease leaves the task reclaimable immediately, but the next
+claim path is marked `recovery_required` carrying previous holder, previous executor, `expired_at`,
+prior fence and reason. The claimant must acknowledge explicitly — no waiting, the acknowledgement
+*is* the gate. It emits `task.recovered` rather than `task.claimed`, so every observer sees this is
+not a clean handoff, and the fence increments normally. Leases-not-locks is untouched: nothing
+blocks, only the pretence that this is a first claim.
+
+**The product invariant, taken verbatim and moved to `docs/INTEROP.md` §5** alongside "attended
+hosts cannot be woken": *Agent Rooms guarantees exclusive authority to mutate room state, not
+exactly-once external side effects. Expiry and recovery make residual external-work risk explicit
+and auditable.* That is the honest ceiling on leasing, recorded before anyone sells past it.
+
+### Refinement 1 — a boolean acknowledgement becomes reflexive
+
+Present an agent with `acknowledge_expired_execution_risk=true` and it will pass `true`: the call
+just failed without it, and adding the flag is the obvious repair. Every model does this. After one
+retry the gate is a no-op with an audit trail recording that everyone acknowledged.
+
+So the acknowledgement does not take a boolean. **The claimant must echo the facts** — previous
+holder, `expired_at`, prior fence — back in the recovery claim. You cannot echo what you did not
+read. It is the fence trick reused: a value worthless as authorization that proves the caller had
+the state in front of it when it decided.
+
+And the limit, recorded so it is not overclaimed later: **echoing proves knowledge, not judgement.**
+It cannot make an agent think. It makes it impossible for one to claim it never saw. That is the
+most a protocol can do here.
+
+### Refinement 2 — `side_effect_mode` is declared by the wrong party
+
+The proposed `pure` / `idempotent` / `external_side_effect` metadata is set by the task **creator**,
+while the **claimant** bears the double execution. Self-declaration was accepted for
+`execution_mode` because over-claiming hurts the declarer (D-010, D-028); that reasoning does not
+transfer, since whoever marks a deploy task idempotent to avoid friction is not the one who deploys
+twice.
+
+**One-way ratchet:** a claimant may treat any task as `external_side_effect` regardless of the
+creator's declaration, and may never downgrade one. Conservative default when the metadata is
+absent. The party carrying the risk gets the casting vote.
+
+### Refinement 3 — reclaiming your own expired lease is not a recovery
+
+The commonest case is an agent reclaiming work it lapsed on and still knows exactly what it did —
+four times in this room in one afternoon. Gating that behind recovery is friction on the normal
+path, which is how gates get routed around.
+
+But it holds only when the **executor identity matches**. A non-resumable attachment reconnecting is
+a different runtime of the same agent and genuinely does not know what the old one did — precisely
+the distinction executor identity was built for (D-034).
+
+**So recovery is required when the reclaiming executor differs from the expired one, and not when it
+matches.** It falls out of machinery that already exists rather than adding a fourth axis, and the
+friction lands only where the ignorance is real.
+
+### Race cell
+
+Executor stale → B begins the release transaction → A reconnects the same durable attachment before
+commit. The predicate must evaluate live-attachment state atomically enough that A's restored
+liveness defeats B's release. Both entry paths get their own test: graceful reconnect and
+reaper-driven staleness reach that predicate through different code, and testing one is how the
+other ships broken.
