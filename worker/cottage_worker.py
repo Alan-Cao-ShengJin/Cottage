@@ -37,6 +37,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -218,6 +219,11 @@ class Worker:
     instructions: dict[str, list[str]] = field(default_factory=dict)
     #: Answers already folded in, so re-reading hydration does not duplicate them.
     seen_answers: set[str] = field(default_factory=set)
+    #: How often to check for a stop *while a step is running*, and to renew. Zero
+    #: disables the watcher, which is right for an executor that returns instantly:
+    #: the loop's ordering rule already bounds a stop by one step. It is wrong for
+    #: one that shells out, where a step can outlive the lease that authorises it.
+    watch_interval_seconds: float = 5.0
     #: Task ids this worker was told to stop. Remembered so it does not immediately
     #: try to reclaim them on the next cycle and spend the room's time being refused.
     forbidden: set[str] = field(default_factory=set)
@@ -633,7 +639,7 @@ class Worker:
             except CottageError as exc:
                 log.warning("could not mark in_progress: %s", exc)
 
-        result = self.executor.run_step(
+        result = self.run_step_watched(
             StepContext(
                 task_id=task_id,
                 title=self.lease.title,
@@ -645,6 +651,10 @@ class Worker:
                 checkpoints=tuple(self.checkpoints.get(task_id, ())),
             )
         )
+        if result is None:
+            # Stopped mid-step. The room already halted the task and the executor's
+            # child is dead; there is nothing to record and nothing to complete.
+            return
         if result.concern:
             log.warning("step %s on %s: %s", step, task_id, result.concern)
 
@@ -687,6 +697,76 @@ class Worker:
             self.progress.pop(task_id, None)
             self.checkpoints.pop(task_id, None)
             self.lease = None
+
+    def run_step_watched(self, context: StepContext) -> StepResult | None:
+        """Run one step, watching for a stop while it runs.
+
+        A step that returns in milliseconds needs none of this — the loop's ordering
+        rule already means the longest a stop can wait is one step. A step that shells
+        out to an agent CLI is different: it can run for minutes, and "obeyed at the
+        next step boundary" would be a stop that visibly does nothing while the thing
+        it stopped keeps working. So the step runs on a thread and this polls the
+        room; when a halt arrives, `cancel()` takes the child's whole process tree
+        down and the step is abandoned.
+
+        The lease is renewed here too. Without that, a long step would let a lease
+        lapse *while the work was still running* — the room would reap it, someone
+        else could take the task, and two runtimes would be doing it at once, which is
+        the failure leases exist to prevent (`docs/PROTOCOL.md` §4).
+
+        Returns `None` when the step was abandoned.
+        """
+        assert self.lease is not None
+        if self.watch_interval_seconds <= 0:
+            return self.executor.run_step(context)
+
+        outcome: dict[str, StepResult] = {}
+        failure: dict[str, BaseException] = {}
+
+        def worker() -> None:
+            try:
+                outcome["result"] = self.executor.run_step(context)
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the loop thread
+                failure["error"] = exc
+
+        thread = threading.Thread(
+            target=worker, name=f"step-{context.step}", daemon=True
+        )
+        thread.start()
+        while thread.is_alive():
+            thread.join(self.watch_interval_seconds)
+            if not thread.is_alive():
+                break
+            if self.stopping or self.halted(context.task_id):
+                log.info(
+                    "stopping step %s on %s mid-flight", context.step, context.task_id
+                )
+                self.executor.cancel()
+                thread.join(30)
+                return None
+            self.renew_if_needed()
+
+        if "error" in failure:
+            raise failure["error"]
+        return outcome.get("result")
+
+    def halted(self, task_id: str) -> bool:
+        """Whether a human has halted this task since the step began.
+
+        Read straight from the room rather than from a cached directive list: the
+        whole point is to notice something that arrived *after* this cycle's
+        hydration. A failed read is treated as "not halted" — the loop must not stop
+        working because a poll timed out, and the next boundary check will catch it.
+        """
+        try:
+            state = self.call("GET", f"/tasks/{task_id}")
+        except (CottageError, urllib.error.URLError):
+            return False
+        task = state.get("task") or {}
+        if task.get("steering") in {"paused", "stopped"}:
+            return True
+        claim = task.get("claim")
+        return claim is None or claim.get("participant_id") != self.participant_id
 
     def record_checkpoint(self, result: StepResult, *, task_id: str, step: int) -> None:
         """Write progress to the room, so a restart is not an amnesia.
@@ -862,7 +942,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--executor-command",
         default=os.environ.get("COTTAGE_EXECUTOR_COMMAND"),
-        help="Command template for --executor subprocess. Must contain {prompt}.",
+        help=(
+            "The agent CLI to run for --executor subprocess, as a fixed command. The "
+            "task goes to it over stdin, so it must NOT interpolate the prompt."
+        ),
+    )
+    parser.add_argument(
+        "--executor-cwd",
+        default=os.environ.get("COTTAGE_EXECUTOR_CWD"),
+        help="Working directory for the child. Give it one rather than inheriting ours.",
+    )
+    parser.add_argument(
+        "--executor-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Extra environment variable to pass to the child, by name. The child "
+            "otherwise gets an allowlist only, because this process holds a room "
+            "credential in its environment. Repeatable."
+        ),
+    )
+    parser.add_argument(
+        "--executor-timeout",
+        type=int,
+        default=int(os.environ.get("COTTAGE_EXECUTOR_TIMEOUT", "180")),
+        help="Seconds a single step may take before its process tree is killed.",
     )
     parser.add_argument(
         "--ask-at-step",
@@ -926,8 +1031,16 @@ def main(argv: list[str] | None = None) -> int:
         poll_seconds=args.poll_seconds,
         max_cycles=args.max_cycles,
         executor=build_executor(
-            args.executor, command=args.executor_command, ask_at_step=args.ask_at_step
+            args.executor,
+            command=args.executor_command,
+            ask_at_step=args.ask_at_step,
+            cwd=args.executor_cwd,
+            env_passthrough=args.executor_env,
+            timeout_seconds=args.executor_timeout,
         ),
+        # No watcher for the instant executor: its steps end before anything could
+        # interrupt them, and polling between them would be pure cost.
+        watch_interval_seconds=0.0 if args.executor == "echo" else 5.0,
         take_unassigned=args.take_unassigned,
         steps_per_task=args.steps,
         lease_seconds=args.lease_seconds,

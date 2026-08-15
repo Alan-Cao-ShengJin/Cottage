@@ -651,6 +651,22 @@ async def append_checkpoint(
     return {"ok": True, "checkpoint": checkpoint.model_dump(mode="json")}
 
 
+@router.get("/rooms/{room_id}/tasks/{task_id}")
+async def get_task(room_id: str, task_id: str, participant: ParticipantDep) -> dict[str, Any]:
+    """One task as it stands right now.
+
+    Cheaper than a snapshot and narrower than hydration, for the caller that has one
+    question: *is this still mine to work on?* An unattended worker in the middle of
+    a long step asks exactly that, and asking it should not cost the whole board.
+    """
+    _assert_room(participant, room_id)
+    authz.require_scope(participant, Scope.TASK_READ)
+    task = await store.load_task(task_id)
+    if task.room_id != room_id:
+        raise Forbidden("That task is not in this room.", task_id=task_id)
+    return {"ok": True, "task": task.model_dump(mode="json")}
+
+
 @router.get("/rooms/{room_id}/tasks/{task_id}/checkpoints")
 async def list_checkpoints(
     room_id: str,

@@ -18,10 +18,15 @@ API implementation is a third case, not a privileged one.
 
 from __future__ import annotations
 
+import os
 import shlex
+import shutil
+import signal
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from pathlib import Path
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
@@ -77,11 +82,20 @@ class StepResult:
 
 
 class Executor(Protocol):
-    """How a step gets done. Two methods so a restart can be honest about itself."""
+    """How a step gets done.
+
+    `cancel` exists so a stop can reach *inside* a step. Without it the loop could
+    only refuse to start the next one, which is fine for an executor that returns in
+    milliseconds and useless for one that shells out to an agent that runs for
+    minutes. It must be safe to call from another thread and safe to call when
+    nothing is running.
+    """
 
     name: str
 
     def run_step(self, context: StepContext) -> StepResult: ...
+
+    def cancel(self) -> None: ...
 
 
 class EchoExecutor:
@@ -102,6 +116,9 @@ class EchoExecutor:
 
     def __init__(self, *, ask_at_step: int | None = None) -> None:
         self.ask_at_step = ask_at_step
+
+    def cancel(self) -> None:
+        """Nothing to cancel: a step here returns before anyone could ask."""
 
     def run_step(self, context: StepContext) -> StepResult:
         done = context.step >= context.total_steps
@@ -142,32 +159,136 @@ class EchoExecutor:
         )
 
 
+#: Environment variables a child is allowed to inherit. An allowlist rather than a
+#: denylist, because the thing being excluded is *everything nobody thought of*: this
+#: process holds a room credential in its environment, and a denylist protects only
+#: the names someone remembered to write down.
+#:
+#: An operator who needs more names them explicitly (`--executor-env`), which turns
+#: "the child inherited a secret" into a decision with a diff rather than an accident.
+_ENV_ALLOWLIST: tuple[str, ...] = (
+    "PATH",
+    "PATHEXT",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "TERM",
+    # Windows needs these to start a process at all.
+    "SystemRoot",
+    "SystemDrive",
+    "ComSpec",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "NUMBER_OF_PROCESSORS",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+)
+
+#: Shells, refused as the executable. Running one would put the whole hardening
+#: exercise back where it started, since a shell's first job is to re-parse text.
+_SHELLS: frozenset[str] = frozenset(
+    {
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "fish",
+        "csh",
+        "tcsh",
+        "ksh",
+        "cmd",
+        "cmd.exe",
+        "powershell",
+        "powershell.exe",
+        "pwsh",
+        "pwsh.exe",
+        "wsl",
+        "wsl.exe",
+    }
+)
+
+#: Cap on what a child may return. An agent CLI that decides to print a repository
+#: would otherwise be a memory problem and, worse, a disclosure one — everything read
+#: here is a candidate for a room-visible summary.
+MAX_CHILD_OUTPUT_CHARS = 20_000
+
+
 class SubprocessExecutor:
     """Delegate the thinking to an agent CLI its owner already runs.
 
-    This is the bring-your-own-agent principle applied one layer down. No API key
-    reaches this process, no vendor SDK is imported, and the model is whichever one
-    the human already pays for and has already authorized on this machine. Cottage
-    never sees any of it.
+    This is bring-your-own-agent applied one layer below where the server holds the
+    same line. No API key reaches this process, no vendor SDK is imported, and the
+    model is whichever one the human already pays for and has already authorized on
+    this machine. Cottage sees none of it.
 
-    The command is a template with `{prompt}` substituted, split with `shlex` and
-    executed **without a shell**, so a task title containing a semicolon is an
-    awkward string rather than a command. That matters more than usual here: the
-    prompt is assembled from room content, which is untrusted data written by other
-    participants — never instructions to this process, and certainly never to a
-    shell (`docs/SECURITY.md`).
+    Six properties, each of which exists because the alternative is a real failure
+    rather than a theoretical one. **The prompt is built from room content written by
+    other participants** — untrusted text, by definition (`docs/SECURITY.md`).
+
+    1. **Fixed argv, and the prompt never appears in it.** The command is decided at
+       configuration time and the task data goes over **stdin**. There is no
+       substitution, so there is nothing for a task title to be substituted into.
+    2. **Never a shell**, and a shell is refused as the executable outright.
+    3. **A minimal environment, by allowlist.** This process holds a room credential;
+       the child gets `PATH` and the handful of names an OS needs to start a process,
+       plus whatever the operator named explicitly.
+    4. **A working directory it was given**, not wherever the worker happened to run.
+    5. **Bounded output and a timeout**, because a slow or chatty step must degrade
+       into a concern rather than into a dead worker.
+    6. **`cancel()` kills the process tree**, not just the child. An agent CLI that
+       spawns its own helpers would otherwise leave them running after a stop — and
+       a stop that leaves the work running is not a stop.
     """
 
     name = "subprocess"
 
-    def __init__(self, command_template: str, *, timeout_seconds: int = 180) -> None:
-        if "{prompt}" not in command_template:
+    def __init__(
+        self,
+        command: str | Sequence[str],
+        *,
+        timeout_seconds: int = 180,
+        cwd: str | None = None,
+        env_passthrough: Sequence[str] = (),
+    ) -> None:
+        argv = (
+            list(command)
+            if not isinstance(command, str)
+            else shlex.split(command, posix=False)
+        )
+        if not argv:
+            raise ValueError("the executor command is empty")
+        if "{prompt}" in " ".join(argv):
             raise ValueError(
-                "The command template must contain {prompt}, or the executor would "
-                "run the same command regardless of the work."
+                "The command must not interpolate the prompt. Task data goes to the "
+                "child over stdin, so there is nothing for room content to be "
+                "substituted into — which is the point."
             )
-        self.command_template = command_template
+        head = Path(argv[0]).name.lower()
+        if head in _SHELLS:
+            raise ValueError(
+                f"{argv[0]!r} is a shell. Running one would re-parse text this "
+                f"executor deliberately never lets a parser see. Name the agent "
+                f"binary directly."
+            )
+        resolved = shutil.which(argv[0])
+        self.argv = [resolved or argv[0], *argv[1:]]
         self.timeout_seconds = timeout_seconds
+        self.cwd = cwd
+        self.env = {
+            name: os.environ[name]
+            for name in (*_ENV_ALLOWLIST, *env_passthrough)
+            if name in os.environ
+        }
+        self._process: subprocess.Popen[str] | None = None
+        self._cancelled = False
 
     def build_prompt(self, context: StepContext) -> str:
         """Assemble what the agent is asked to do.
@@ -196,38 +317,70 @@ class SubprocessExecutor:
         )
         return "\n".join(lines)
 
+    def cancel(self) -> None:
+        """Terminate the child and everything it started.
+
+        Called when a human stops the work. Killing only the direct child would leave
+        an agent CLI's own helpers running, and a stop that leaves the work running
+        is not a stop — it is a lie about a stop, which is worse.
+        """
+        self._cancelled = True
+        process = self._process
+        if process is None or process.poll() is not None:
+            return
+        _kill_tree(process)
+
     def run_step(self, context: StepContext) -> StepResult:
         prompt = self.build_prompt(context)
-        argv = [
-            part.replace("{prompt}", prompt)
-            for part in shlex.split(self.command_template, posix=False)
-        ]
+        self._cancelled = False
         try:
-            completed = subprocess.run(  # noqa: S603 - argv list, never shell=True
-                argv,
-                capture_output=True,
+            process = subprocess.Popen(  # noqa: S603 - fixed argv, never shell=True
+                self.argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.timeout_seconds,
-                check=False,
+                cwd=self.cwd,
+                env=self.env,
+                **_new_process_group(),
             )
         except FileNotFoundError:
             return StepResult(
-                summary=f"Step {context.step} could not run: {argv[0]!r} is not installed.",
-                concern=f"executor command not found: {argv[0]!r}",
+                summary=f"Step {context.step} could not run: {self.argv[0]!r} is not installed.",
+                concern=f"executor command not found: {self.argv[0]!r}",
             )
+        except OSError as exc:
+            return StepResult(
+                summary=f"Step {context.step} could not start the executor.",
+                concern=f"executor could not start: {exc}"[:400],
+            )
+
+        self._process = process
+        try:
+            stdout, stderr = process.communicate(prompt, timeout=self.timeout_seconds)
         except subprocess.TimeoutExpired:
-            # Not fatal to the task. The loop renews and tries the next step, which
-            # is the difference between a slow step and a dead worker.
+            # Not fatal to the task. The tree is killed, the loop renews and tries the
+            # next step — the difference between a slow step and a dead worker.
+            _kill_tree(process)
+            process.communicate()
             return StepResult(
                 summary=f"Step {context.step} timed out after {self.timeout_seconds}s.",
                 concern="executor timed out",
             )
+        finally:
+            self._process = None
 
-        output = (completed.stdout or "").strip()
-        if completed.returncode != 0:
+        if self._cancelled:
             return StepResult(
-                summary=f"Step {context.step} failed (exit {completed.returncode}).",
-                concern=(completed.stderr or "").strip()[:400] or "non-zero exit",
+                summary=f"Step {context.step} was stopped before it finished.",
+                concern="executor cancelled",
+            )
+
+        output = (stdout or "")[:MAX_CHILD_OUTPUT_CHARS].strip()
+        if process.returncode != 0:
+            return StepResult(
+                summary=f"Step {context.step} failed (exit {process.returncode}).",
+                concern=(stderr or "").strip()[:400] or "non-zero exit",
             )
         return StepResult(
             summary=output[:1500] or f"Step {context.step} produced no output.",
@@ -236,13 +389,57 @@ class SubprocessExecutor:
         )
 
 
+def _new_process_group() -> dict[str, Any]:
+    """Start the child in its own group, so the whole tree can be signalled later."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _kill_tree(process: subprocess.Popen[str]) -> None:
+    """Kill a child and its descendants, on either platform, without raising.
+
+    Best effort by nature — a process can always be gone already, or be unkillable
+    for reasons outside this process's authority. It never raises, because the caller
+    is usually in the middle of obeying a stop and failing to kill something must not
+    also stop the worker from *reporting* that it stopped.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(  # noqa: S603, S607 - fixed argv, no shell
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                check=False,
+                timeout=15,
+            )
+        else:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError, PermissionError):
+        pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
 def build(
-    kind: str, *, command: str | None = None, ask_at_step: int | None = None
+    kind: str,
+    *,
+    command: str | None = None,
+    ask_at_step: int | None = None,
+    cwd: str | None = None,
+    env_passthrough: Sequence[str] = (),
+    timeout_seconds: int = 180,
 ) -> Executor:
     if kind == "echo":
         return EchoExecutor(ask_at_step=ask_at_step)
     if kind == "subprocess":
         if not command:
             raise ValueError("--executor subprocess needs --executor-command")
-        return SubprocessExecutor(command)
+        return SubprocessExecutor(
+            command,
+            cwd=cwd,
+            env_passthrough=env_passthrough,
+            timeout_seconds=timeout_seconds,
+        )
     raise ValueError(f"unknown executor {kind!r}")

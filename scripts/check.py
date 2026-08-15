@@ -24,6 +24,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND = REPO_ROOT / "backend"
 FRONTEND = REPO_ROOT / "frontend"
+WORKER = REPO_ROOT / "worker"
 
 
 def _python() -> str:
@@ -53,13 +54,23 @@ class Stage:
 
 
 def stages(*, include_frontend: bool, fast: bool) -> list[Stage]:
-    out = [Stage("pytest", [PYTHON, "-m", "pytest", "-q"], BACKEND)]
+    out = [
+        Stage("pytest", [PYTHON, "-m", "pytest", "-q"], BACKEND),
+        # The worker is a client, not part of the server — but it is the client that
+        # found four defects a green backend suite could not see, and its subprocess
+        # executor is the one place untrusted room content meets process execution.
+        # Leaving it out of the gate would put the least-covered, highest-consequence
+        # code in the project outside the thing that decides whether we may commit.
+        Stage("pytest (worker)", [PYTHON, "-m", "pytest", "-q"], WORKER),
+    ]
     if fast:
         return out
     out += [
         Stage("mypy", [PYTHON, "-m", "mypy", "app"], BACKEND),
         Stage("ruff", [PYTHON, "-m", "ruff", "check", "."], BACKEND),
         Stage("ruff format", [PYTHON, "-m", "ruff", "format", "--check", "."], BACKEND),
+        Stage("ruff (worker)", [PYTHON, "-m", "ruff", "check", "."], WORKER),
+        Stage("ruff format (worker)", [PYTHON, "-m", "ruff", "format", "--check", "."], WORKER),
     ]
     if include_frontend:
         npm = shutil.which("npm")

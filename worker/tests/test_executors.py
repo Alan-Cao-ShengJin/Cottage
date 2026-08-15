@@ -64,40 +64,17 @@ def test_the_context_cannot_quietly_grow():
         StepContext(**{**context.__dict__, "chat_transcript": "..."})
 
 
-def test_a_malicious_task_title_is_data_not_a_command():
-    """Room content is written by other participants and is untrusted.
-
-    The prompt is built from it, so a title containing shell syntax must end up as
-    an awkward string inside an argument — never as a second command.
-    """
-    executor = SubprocessExecutor("echo {prompt}")
-    nasty = 'deploy"; rm -rf /; echo "'
-    prompt = executor.build_prompt(_context(title=nasty))
-    assert nasty in prompt
-
-    result = executor.run_step(_context(title=nasty))
-    # The assertion is about what did *not* happen. On a platform where `echo` is an
-    # executable this runs it with the payload as one argument; where `echo` is only
-    # a shell builtin — Windows — the lookup fails outright, which is the same
-    # property stated more emphatically: nothing here reaches a shell. Either way the
-    # `rm -rf` is a substring of an argument and never a second command.
-    assert result.concern is None or "command not found" in result.concern
-    assert "rm -rf" not in (result.concern or ""), "the payload never became a command"
-
-
 def test_a_missing_executor_command_is_a_concern_not_a_crash():
     """An unattended worker that exits on a bad config is attended by whoever
     restarts it."""
-    result = SubprocessExecutor("definitely-not-a-real-binary {prompt}").run_step(
-        _context()
-    )
+    result = SubprocessExecutor("definitely-not-a-real-binary").run_step(_context())
     assert result.done is False
     assert result.concern is not None
     assert "not found" in result.concern
 
 
 def test_the_prompt_carries_progress_and_instructions_but_stays_bounded():
-    executor = SubprocessExecutor("noop {prompt}")
+    executor = SubprocessExecutor("noop-agent")
     prompt = executor.build_prompt(
         _context(
             checkpoints=tuple(f"checkpoint {i}" for i in range(20)),
@@ -110,10 +87,15 @@ def test_the_prompt_carries_progress_and_instructions_but_stays_bounded():
     assert "Do not include your reasoning" in prompt
 
 
-def test_a_template_without_a_prompt_slot_is_refused():
-    """Otherwise it would run the same command regardless of the work, which looks
-    like it is working."""
+def test_a_command_that_wants_the_prompt_in_argv_is_refused():
+    """Inverted from what it was, and the inversion is the hardening (D-052).
+
+    The command used to *require* a `{prompt}` slot. That put untrusted room content
+    in argv and left correctness resting on quoting. The task now goes over stdin, so
+    a template with a substitution point is a configuration error rather than
+    something to sanitise: there is nowhere for a task title to be substituted into.
+    """
     with pytest.raises(ValueError):
-        SubprocessExecutor("claude --print")
+        SubprocessExecutor("claude --print {prompt}")
     with pytest.raises(ValueError):
-        build("subprocess", command="claude --print")
+        build("subprocess", command="claude --print {prompt}")
