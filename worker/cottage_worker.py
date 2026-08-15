@@ -96,6 +96,17 @@ class Worker:
     poll_seconds: int = 20
     max_cycles: int | None = None
     handler_name: str = "notes"
+    #: How many cycles a claimed task takes. The default handler used to do
+    #: everything in one call and finish in two seconds, which made the loop's own
+    #: comment — "one step per cycle, so a stop is obeyed within one step" — vacuous:
+    #: there was only ever one step, and a human could not have preempted it if they
+    #: had been watching for it. Real work takes time, and a worker that cannot be
+    #: interrupted mid-task is not demonstrating anything about interruption.
+    steps_per_task: int = 12
+    #: Lease seconds to request. Deliberately short relative to `steps_per_task` so a
+    #: task outlives its lease several times over and renewal is actually exercised
+    #: rather than merely implemented.
+    lease_seconds: int = 60
     #: Whether to take work nobody addressed to it.
     #:
     #: Defaults to **false**, and that default was earned the hard way: on its first
@@ -116,6 +127,8 @@ class Worker:
     participant_id: str = ""
     lease: Lease | None = None
     stopping: bool = False
+    #: Steps completed per task, so progress survives across cycles.
+    progress: dict[str, int] = field(default_factory=dict)
     #: Task ids this worker was told to stop. Remembered so it does not immediately
     #: try to reclaim them on the next cycle and spend the room's time being refused.
     forbidden: set[str] = field(default_factory=set)
@@ -250,10 +263,11 @@ class Worker:
         else:
             self.take_work(state)
 
-        if self.lease is None:
-            # Nothing to do. Idling on the long poll is what makes this cheap, and it
-            # doubles as the heartbeat that keeps presence honest.
-            self.wait()
+        # Every cycle ends here, holding a lease or not. When a task took one cycle
+        # this only ran while idle; multi-step work would have spun without it,
+        # hammering the server and — worse — never heartbeating, so the room would
+        # have reaped the lease of a worker that was busy the whole time.
+        self.wait()
 
     def obey(self, directive: dict[str, Any]) -> None:
         """Act on a human's instruction, then record that it was seen.
@@ -272,6 +286,7 @@ class Worker:
 
         if action in {"stop", "pause"} and task_id:
             self.forbidden.add(task_id)
+            self.progress.pop(task_id, None)
             if self.lease is not None and self.lease.task_id == task_id:
                 # The room has already halted it; dropping the local lease keeps this
                 # worker's belief and the room's state from diverging.
@@ -347,7 +362,11 @@ class Worker:
             result = self.call(
                 "POST",
                 "/tasks/claim",
-                {"task_id": task["task_id"], "connection_id": self.connection_id},
+                {
+                    "task_id": task["task_id"],
+                    "requested_lease_seconds": self.lease_seconds,
+                    "connection_id": self.connection_id,
+                },
             )
         except CottageError as exc:
             if exc.code == "steering_halted":
@@ -390,7 +409,7 @@ class Worker:
     def renew_if_needed(self) -> None:
         assert self.lease is not None
         now = time.time()
-        if not self.lease.needs_renewal(now=now, lease_seconds=300):
+        if not self.lease.needs_renewal(now=now, lease_seconds=self.lease_seconds):
             return
         try:
             result = self.call(
@@ -399,6 +418,7 @@ class Worker:
                 {
                     "task_id": self.lease.task_id,
                     "fence": self.lease.fence,
+                    "extend_seconds": self.lease_seconds,
                     "connection_id": self.connection_id,
                 },
             )
@@ -409,15 +429,41 @@ class Worker:
             return
         claim = result["task"]["claim"]
         self.lease.expires_at = now + self.seconds_until(claim["expires_at"])
-        log.debug("renewed %s", self.lease.task_id)
+        log.info("renewed %s (expires in %ss)", self.lease.task_id, self.lease_seconds)
 
     def advance(self) -> None:
-        """Do one step of actual work, then finish or report.
+        """Do one step of work, and finish only when there is no work left.
 
-        One step per cycle on purpose: between steps the loop re-reads directives, so
-        the longest a stop can take to be obeyed is one step rather than one task.
+        One step per cycle is the load-bearing part: between steps the loop returns to
+        the top, re-reads directives, and renews. So the longest a stop can take to be
+        obeyed is one step — and a task that took a single step made that guarantee
+        true but empty, which is how the first preemption attempt found nothing left
+        to preempt.
         """
         assert self.lease is not None
+        step = self.progress.get(self.lease.task_id, 0) + 1
+        self.progress[self.lease.task_id] = step
+
+        if step == 1:
+            # Say on the board that this is being worked, not merely held.
+            try:
+                self.call(
+                    "POST",
+                    "/tasks/update",
+                    {
+                        "task_id": self.lease.task_id,
+                        "fence": self.lease.fence,
+                        "in_progress": True,
+                        "connection_id": self.connection_id,
+                    },
+                )
+            except CottageError as exc:
+                log.warning("could not mark in_progress: %s", exc)
+
+        if step < self.steps_per_task:
+            log.info("step %s/%s on %s", step, self.steps_per_task, self.lease.task_id)
+            return
+
         outcome = HANDLERS[self.handler_name](self.lease)
         try:
             self.call(
@@ -440,6 +486,7 @@ class Worker:
             else:
                 raise
         finally:
+            self.progress.pop(self.lease.task_id, None)
             self.lease = None
 
     def wait(self) -> None:
@@ -525,9 +572,10 @@ def handle_notes(lease: Lease) -> str:
     show that coordination works.
     """
     return (
-        f"Completed by an unattended worker with no human attending. "
-        f"Task '{lease.title}' was claimed at fence {lease.fence} and finished by the "
-        f"same runtime that claimed it."
+        f"Completed by an unattended worker with no human attending. Task "
+        f"'{lease.title}' was claimed at fence {lease.fence}, worked across multiple "
+        f"cycles with the lease renewed as it went, and finished by the same runtime "
+        f"that claimed it."
     )
 
 
@@ -547,6 +595,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--poll-seconds", type=int, default=20)
     parser.add_argument("--max-cycles", type=int, default=None)
     parser.add_argument("--handler", default="notes", choices=sorted(HANDLERS))
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=12,
+        help="Cycles of work a claimed task takes before it is completed.",
+    )
+    parser.add_argument(
+        "--lease-seconds",
+        type=int,
+        default=60,
+        help="Lease length to request. Short on purpose, so renewal is exercised.",
+    )
     parser.add_argument(
         "--take-unassigned",
         action="store_true",
@@ -576,6 +636,8 @@ def main(argv: list[str] | None = None) -> int:
         max_cycles=args.max_cycles,
         handler_name=args.handler,
         take_unassigned=args.take_unassigned,
+        steps_per_task=args.steps,
+        lease_seconds=args.lease_seconds,
     )
 
     def stop(*_: Any) -> None:
