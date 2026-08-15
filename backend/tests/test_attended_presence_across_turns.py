@@ -385,3 +385,63 @@ async def test_a_long_clock_buys_freshness_and_never_lease_eligibility(make_room
     )
     assert claimed["ok"] is False, claimed
     assert "human presence" in claimed["message"], claimed
+
+
+async def test_both_readers_agree_on_each_side_of_the_owners_own_cutoff(make_room):
+    """The cutoff itself, straddled — and both readers asked at both points.
+
+    Every other case here sits comfortably inside or outside its window, which proves
+    the floor exists but not where it is. This participant's own cutoff *is* the
+    attended floor: the room leaves `heartbeat_interval_s` alone, `derive_runtime_policy`
+    raises it to 300s, and 3x300 puts the boundary at 900s exactly. So this is the one
+    place a reader that kept `>=` where the other kept `>`, or that rounded, or that
+    quietly reinstated the flat 120s window, has to show it.
+
+    Straddled at +/-60s rather than at 900s itself, for two reasons. Asserting *at* the
+    boundary would pin which side equality falls on, which is not a behaviour anyone
+    has decided and not one a future change should have to preserve; strict-greater on
+    both sides is what is actually intended, and two points either side pin exactly
+    that. And the margin is 60s rather than one second because these ages are measured
+    against a wall clock that keeps moving between the backdate, the sweeper's `now`
+    and the projection's: whole-second ISO storage plus real elapsed time inside the
+    test would make a one-second margin fail on a slow machine and pass on a fast one,
+    which is a flaky test dressed up as a precise one. 60s is far larger than any
+    plausible drift and still 7% of the window — nowhere near loose enough to let a
+    reader on the flat 120s cutoff, or one that lost the floor entirely, survive.
+
+    `mark_stale_declarations` and the card are asserted together at *both* points, in
+    one test, deliberately. Split across two tests, a change could move one reader's
+    boundary and leave the other's, and the pair would still be green — which is D-061
+    exactly: one rule, two readers, and only the sweeper was updated.
+
+    The progress window is widened to an hour so the only clock in play is the
+    heartbeat one. Left at its 900s default it would trip at the same moment on the
+    upper point, and the test would no longer distinguish the boundary it names from a
+    coincidence (D-059's second clock, which is not what this pins).
+    """
+    room = await make_room(policy=RoomPolicy(work_progress_stale_after_seconds=3600))
+    joined = await _one_shot_turn(room, declare="A long turn, either side of the line")
+    participant_id = joined["participant_id"]
+
+    views = await presence.presence_for_room(await room.refresh())
+    assert views[participant_id].runtime.heartbeat_interval_s == ATTENDED_HEARTBEAT_INTERVAL_SECONDS
+    assert work_service.heartbeat_cutoff_for(await room.refresh(), views[participant_id]) == 900, (
+        "this seat's own cutoff is the attended floor — the boundary under test"
+    )
+
+    # Just below: 840s of a human reading. Nothing has contradicted the card yet.
+    await _turn_ended(participant_id, seconds_ago=840)
+    stale_below = await work_service.mark_stale_declarations(await room.refresh())
+    card_below = await _card(room, recipient_id=participant_id, work_id=joined["work_id"])
+
+    assert stale_below == [], "inside the owner's own window, the log says nothing happened"
+    assert card_below["stale"] is False, "and the board must not say otherwise on its own"
+
+    # Just above: 960s, same seat, same silence, one step past the line. Both readers
+    # must move together — an event behind the flip, and a card that matches it.
+    await _turn_ended(participant_id, seconds_ago=960)
+    stale_above = await work_service.mark_stale_declarations(await room.refresh())
+    card_above = await _card(room, recipient_id=participant_id, work_id=joined["work_id"])
+
+    assert [e.payload["participant_id"] for e in stale_above] == [participant_id]
+    assert card_above["stale"] is True, "past the line the board agrees, and for the same reason"
