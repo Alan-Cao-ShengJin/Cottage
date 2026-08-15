@@ -14,6 +14,7 @@ import pytest
 from app.adapters.mcp import compact
 from app.adapters.mcp import server as mcp_server
 from app.core import projections, tasks
+from app.core.errors import Forbidden
 from app.domain.commands import ClaimTaskCommand, CreateTaskCommand
 
 pytestmark = pytest.mark.asyncio
@@ -108,26 +109,64 @@ async def test_the_round_trip_a_blocked_worker_and_a_human_actually_perform(make
     assert reclaimed.claim.fence > task.claim.fence
 
 
-async def test_a_worker_answering_itself_is_refused_at_the_adapter_too(make_room, join):
-    """The refusal has to survive translation, not only exist in `core`."""
+async def test_the_self_answer_refusal_fires_only_for_a_named_runtime(make_room, join):
+    """The rule as it actually is over MCP, stated rather than assumed.
+
+    The refusal is scoped to the *runtime*, and a runtime is identified only when the
+    caller names its connection (D-055 correction). The MCP tools do not currently
+    thread a connection id, so a client that asks and answers through them is
+    unidentified on both sides and is **permitted**.
+
+    That is the deliberate direction of the rule — unidentified permits, because
+    refusing on an absence bites hardest against clients that declare least — but the
+    consequence deserves an assertion rather than a comment, because "the adapter is
+    laxer than core" is exactly the kind of gap this project keeps finding late.
+
+    The guarantee lost is small: blocking is voluntary, so a worker that wanted to
+    carry on could simply never have blocked. What remains is attribution, and
+    `answered_by_attachment_id` records who replied.
+    """
     room = await make_room()
     worker = await join(room, display_name="Worker")
-    task = await _claimed(room, worker)
+
+    # Unidentified on both sides: permitted, and recorded as same-seat.
+    lax = await _claimed(room, worker, title="Unnamed runtime")
     asked = await mcp_server.ask_question(
         body="Shall I proceed?",
-        task_id=task.id,
+        task_id=lax.id,
         blocking=True,
-        fence=task.claim.fence,
+        fence=lax.claim.fence,
         participant_token=worker.token,
     )
-
-    result = await mcp_server.answer_question(
+    permitted = await mcp_server.answer_question(
         question_id=asked["question"]["id"],
         body="Yes, obviously.",
         participant_token=worker.token,
     )
-    assert result["ok"] is False
-    assert result["error"] == "forbidden"
+    assert permitted["ok"] is True, "an unidentified caller is not evidence of self-answering"
+
+    # Named on both sides: refused, which is the property the rule exists for.
+    from app.core import questions as questions_svc
+    from app.domain.commands import AnswerQuestionCommand, AskQuestionCommand
+
+    strict = await _claimed(room, worker, title="Named runtime")
+    named = await questions_svc.ask(
+        participant=worker.participant,
+        command=AskQuestionCommand(
+            body="And this one?",
+            task_id=strict.id,
+            blocking=True,
+            fence=strict.claim.fence,
+            connection_id=worker.connection_id,
+        ),
+    )
+    with pytest.raises(Forbidden):
+        await questions_svc.answer(
+            participant=worker.participant,
+            command=AnswerQuestionCommand(
+                question_id=named.id, body="Yes.", connection_id=worker.connection_id
+            ),
+        )
 
 
 async def test_the_compact_view_never_carries_another_seat_s_bookmark(make_room, join):

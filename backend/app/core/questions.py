@@ -45,6 +45,32 @@ log = logging.getLogger(__name__)
 MAX_OPEN_QUESTIONS = 25
 
 
+async def _speaking_runtime(
+    participant: Participant, connection_id: str | None, *, tx: db.Tx
+) -> str | None:
+    """Which runtime is *speaking*, which is not the same question as which is executing.
+
+    Only an explicitly named connection counts. `resolve_executor` would happily answer
+    from the seat's single open connection — correct for executor affinity, where the
+    question is "who is doing the work and is it still alive", and wrong here, where the
+    question is "who is talking".
+
+    Found live and immediately (D-055 correction). A control surface holding no
+    connection of its own called `answer` on a seat whose only open connection belonged
+    to its companion, and was refused for trying to answer its own question — by
+    inheriting the identity of the very runtime it was trying to reply to.
+
+    So: a runtime that wants to be treated as a specific runtime must say which one it
+    is. Unidentified is unidentified, and it permits rather than refuses, for the reason
+    already recorded — refusing on an absence bites hardest against the clients that
+    declare least.
+    """
+    if not connection_id:
+        return None
+    executor = await tasks.caller_executor(participant, connection_id, tx=tx)
+    return executor.ref
+
+
 def _same_runtime(asked_by: str | None, answering: str | None) -> bool:
     """Whether the answer is coming from the runtime that asked (D-055).
 
@@ -111,7 +137,7 @@ async def ask(*, participant: Participant, command: AskQuestionCommand) -> Quest
 
     async def body(tx: db.Tx) -> CommandOutcome:
         events: list[EventEnvelope] = []
-        asking = await tasks.caller_executor(participant, command.connection_id, tx=tx)
+        asking = await _speaking_runtime(participant, command.connection_id, tx=tx)
         if command.blocking:
             events += await _park_task_tx(
                 tx,
@@ -150,7 +176,7 @@ async def ask(*, participant: Participant, command: AskQuestionCommand) -> Quest
                 room.id,
                 command.task_id,
                 participant.id,
-                asking.ref,
+                asking,
                 command.to_participant_id,
                 command.body,
                 1 if command.blocking else 0,
@@ -295,9 +321,9 @@ async def answer(*, participant: Participant, command: AnswerQuestionCommand) ->
         )
         if row is None:
             raise NotFound("Question does not exist.", question_id=command.question_id)
-        answering = await tasks.caller_executor(participant, command.connection_id, tx=tx)
+        answering = await _speaking_runtime(participant, command.connection_id, tx=tx)
         same_seat = row["asked_by_participant_id"] == participant.id
-        if same_seat and _same_runtime(row["asked_by_attachment_id"], answering.ref):
+        if same_seat and _same_runtime(row["asked_by_attachment_id"], answering):
             raise Forbidden(
                 "A runtime cannot answer its own question. Standing down and then "
                 "telling yourself to carry on is not waiting for anybody — it is a "
@@ -330,7 +356,7 @@ async def answer(*, participant: Participant, command: AnswerQuestionCommand) ->
                 # the ordinary case — but a reader deciding how much independent input
                 # a worker actually received needs to know which it was (D-055).
                 "same_seat": same_seat,
-                "answered_by_attachment_id": answering.ref,
+                "answered_by_attachment_id": answering,
             },
             disclosure=decision,
             causation_id=command.command_id,
@@ -360,7 +386,7 @@ async def answer(*, participant: Participant, command: AnswerQuestionCommand) ->
                 answered_by_attachment_id = ?
             WHERE id = ? AND answered_at IS NULL
             """,
-            (now, participant.id, answer_id, answering.ref, command.question_id),
+            (now, participant.id, answer_id, answering, command.question_id),
         )
         if updated == 0:
             raise InvalidCommand(

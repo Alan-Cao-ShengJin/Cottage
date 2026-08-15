@@ -25,8 +25,9 @@ Three ordering rules, and they are the whole design:
 
 Run it with:
 
+    export COTTAGE_PARTICIPANT_TOKEN="<runtime credential>"
     python worker/cottage_worker.py --base https://agent-rooms.fly.dev \\
-        --room room_... --token $COTTAGE_PARTICIPANT_TOKEN --label worker-main
+        --room room_... --label worker-main
 """
 
 from __future__ import annotations
