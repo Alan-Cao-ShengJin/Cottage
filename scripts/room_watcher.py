@@ -144,6 +144,40 @@ def summarize(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: Never worth waking a human for. `presence.changed` fires several times a minute for
+#: every polling participant, and a routine work refresh is a client keeping its card warm
+#: — the filter Codex arrived at independently (seq 144) after its own feed became a
+#: firehose. Everything else is reported: suppressing by default is how a relay quietly
+#: stops mentioning the thing that mattered.
+NOT_WORTH_WAKING = frozenset({"presence.attachment_registered"})
+
+#: Presence is noise when a participant is merely re-confirming that it is here, and is
+#: coordination news when it *stops* being here. Suppressing the whole event type — which
+#: this did until the Codex participant reviewed it at seq 203 — throws away every peer
+#: disconnect, which is precisely the event a supervisor needs to act on.
+PRESENCE_WORTH_WAKING = frozenset({"disconnected", "stale", "idle"})
+
+
+def worth_waking(event: dict[str, Any], *, me: str = "") -> bool:
+    kind = event.get("type")
+    if kind in NOT_WORTH_WAKING:
+        return False
+    if kind == "presence.changed":
+        return (
+            str((event.get("payload") or {}).get("liveness")) in PRESENCE_WORTH_WAKING
+        )
+    if (
+        kind == "message.posted"
+        and me
+        and (event.get("actor") or {}).get("participant_id") == me
+    ):
+        # Something I said, read back to me. Only messages: a checkpoint or a task
+        # change from this same seat comes from the *companion* runtime, which is news
+        # to the supervisor even though the room attributes it to one participant.
+        return False
+    return True
+
+
 #: Fields worth showing per event, in the order they are worth trying. An event whose
 #: payload has none of these is still listed by type — knowing that a lease moved matters
 #: even when there is no sentence to print about it.
@@ -188,6 +222,17 @@ def describe(event: dict[str, Any]) -> str:
     stamp = local_time(str(event.get("ts") or event.get("created_at") or ""))
     line = f"`{event.get('seq'):>4}` **{stamp}** {actor} · `{event.get('type')}`"
     return f"{line} — {detail[:150]}" if detail else line
+
+
+def plain(event: dict[str, Any]) -> str:
+    """The same line without markdown, and ASCII-only, for a stdout relay.
+
+    A relay line crosses a pipe into a host that may decode it as anything; the middle
+    dot arrived as a replacement character the first time this ran. Encoding has cost
+    this project a mangled checkpoint, a rejected secret and a dead status line already
+    — a status line is not the place to keep testing it.
+    """
+    return describe(event).replace("`", "").replace("**", "").replace(" · ", " | ")
 
 
 def as_markdown(state: dict[str, Any]) -> str:
@@ -247,6 +292,26 @@ def main() -> int:
         help="Observe without attaching, leaving this seat's presence untouched.",
     )
     parser.add_argument(
+        "--token-file",
+        default=os.environ.get("AGENT_ROOMS_TOKEN_FILE"),
+        help="Read the participant token from this file. A path is not a secret.",
+    )
+    parser.add_argument(
+        "--from-seq",
+        type=int,
+        default=None,
+        help="Start from this sequence instead of the room's current position. 0 replays.",
+    )
+    parser.add_argument(
+        "--emit",
+        action="store_true",
+        help=(
+            "Print each meaningful event to stdout as it arrives. Intended for a host "
+            "that turns stdout lines into notifications, so a supervisor whose turn has "
+            "ended can still be woken."
+        ),
+    )
+    parser.add_argument(
         "--feed-length",
         type=int,
         default=25,
@@ -255,8 +320,13 @@ def main() -> int:
     args = parser.parse_args()
 
     # Never an argument: a token on a command line is readable from any process
-    # listing for the life of the process (D-058).
+    # listing for the life of the process (D-058). `--token-file` exists because an
+    # inline `VAR=value cmd` prefix is *also* a command line — that is how this very
+    # script leaked its own credential, caught by another participant reading the
+    # process table rather than by any check of ours.
     token = os.environ.get("AGENT_ROOMS_TOKEN")
+    if args.token_file:
+        token = pathlib.Path(args.token_file).read_text(encoding="ascii").strip()
     if not (args.room and args.out and token):
         parser.error("need --room, --out, and AGENT_ROOMS_TOKEN in the environment")
 
@@ -265,7 +335,12 @@ def main() -> int:
     # Bounded, because this is a window on the room and not a second copy of the log —
     # the event log is the source of truth and lives on the server.
     feed: collections.deque[str] = collections.deque(maxlen=args.feed_length)
-    cursor = 0
+    # Start at the room's current position, not at the beginning. A relay that replays
+    # the whole log on restart wakes its human with two hundred events they have already
+    # seen — which is how a feed teaches someone to ignore it. `--from-seq 0` asks for
+    # the replay deliberately; the default is "from now".
+    cursor = args.from_seq if args.from_seq is not None else -1
+    me = ""
     while True:
         try:
             if not args.read_only and not connection_id:
@@ -282,6 +357,11 @@ def main() -> int:
                     "/heartbeat",
                     {"connection_id": connection_id},
                 )
+            if cursor < 0:
+                # First pass: adopt the room's current position without reporting it.
+                snap = read_room(args.base, args.room, token)
+                cursor = int(snap.get("snapshot_seq") or 0)
+                me = str(snap.get("you") or "")
             fresh = call(
                 args.base,
                 args.room,
@@ -292,6 +372,12 @@ def main() -> int:
             for event in fresh.get("events") or []:
                 feed.append(describe(event))
                 cursor = max(cursor, int(event.get("seq") or cursor))
+                if args.emit and worth_waking(event, me=me):
+                    # One line per event, flushed immediately: this stdout IS the relay.
+                    # A host that turns lines into notifications can wake a supervisor
+                    # whose turn has already ended, which is the difference between a
+                    # durable log and a continuous feed.
+                    print(plain(event), flush=True)
             cursor = max(cursor, int(fresh.get("current_seq") or cursor))
 
             state = summarize(read_room(args.base, args.room, token))
