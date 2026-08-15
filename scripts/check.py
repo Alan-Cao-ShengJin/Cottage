@@ -14,12 +14,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+# The stage banners are box-drawing characters, and Windows gives a redirected stdout
+# cp1252, where printing one raises UnicodeEncodeError — the gate then dies before
+# running a single check, reporting nothing about the code it was asked to judge.
+for _stream in (sys.stdout, sys.stderr):
+    with contextlib.suppress(AttributeError, ValueError):
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND = REPO_ROOT / "backend"

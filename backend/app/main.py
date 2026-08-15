@@ -30,6 +30,7 @@ from .core import presence, rooms, tasks, work
 from .core.bus import bus
 from .core.errors import RoomError
 from .db.database import init_db
+from .db.database import shutdown as shutdown_db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -135,6 +136,9 @@ async def lifespan(app: FastAPI):
             with contextlib.suppress(asyncio.CancelledError):
                 await reaper
             bus.clear()
+            # After the reaper, so nothing is still mid-transaction when the pooled
+            # connections close.
+            await shutdown_db()
 
 
 def service_descriptor(*, console: bool) -> dict[str, Any]:

@@ -1,0 +1,16 @@
+# The worker is linted from its own directory (`scripts/check.py` runs the worker stages
+# with `cwd=worker/`), so it never saw `backend/pyproject.toml` and silently fell back to
+# ruff's default line length of 88 while the backend used 100.
+#
+# Two formatting standards in one repository, and nothing said so. The disagreement only
+# surfaced when a file happened to have lines between the two limits, which made the gate
+# fail on a file `ruff format` had already formatted — reported by the companion running
+# the gate, not by anyone reading the config.
+#
+# Deliberately **only** the formatting settings. Adopting the backend's lint `select` list
+# here surfaces thirteen pre-existing findings in this directory, and quietly widening a
+# rule set while fixing a line-length bug is how an unrelated diff gets buried in a
+# formatting commit. That alignment is its own task.
+target-version = "py310"
+line-length = 100
+exclude = [".venv", "__pycache__"]

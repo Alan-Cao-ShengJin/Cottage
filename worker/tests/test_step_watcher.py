@@ -188,9 +188,7 @@ def test_steering_still_stops_a_step_mid_flight(monkeypatch, steering):
         if path == "/heartbeat":
             return {"ok": True}
         if path.startswith("/tasks/"):
-            return {
-                "task": {"steering": steering, "claim": {"participant_id": "par_test"}}
-            }
+            return {"task": {"steering": steering, "claim": {"participant_id": "par_test"}}}
         raise AssertionError(f"unexpected call {method} {path}")
 
     monkeypatch.setattr(worker, "call", fake_call)

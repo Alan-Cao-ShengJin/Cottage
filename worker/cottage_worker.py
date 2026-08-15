@@ -236,9 +236,7 @@ class Worker:
 
     # -- transport ---------------------------------------------------------
 
-    def call(
-        self, method: str, path: str, payload: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
+    def call(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         url = f"{self.base}/api/rooms/{self.room_id}{path}"
         request = urllib.request.Request(
             url,
@@ -250,9 +248,7 @@ class Worker:
             method=method,
         )
         try:
-            with urllib.request.urlopen(
-                request, timeout=self.poll_seconds + 40
-            ) as response:
+            with urllib.request.urlopen(request, timeout=self.poll_seconds + 40) as response:
                 return json.loads(response.read())
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", "replace")
@@ -261,9 +257,7 @@ class Worker:
             except ValueError:
                 raise CottageError("http_error", raw[:200], exc.code) from exc
             error = body.get("error")
-            code = (
-                error if isinstance(error, str) else (error or {}).get("code", "error")
-            )
+            code = error if isinstance(error, str) else (error or {}).get("code", "error")
             raise CottageError(code, body.get("message", raw[:200]), exc.code) from exc
 
     # -- lifecycle ---------------------------------------------------------
@@ -317,9 +311,7 @@ class Worker:
             )
 
     def hydrate(self) -> dict[str, Any]:
-        return self.call(
-            "GET", f"/hydrate?since_seq={self.cursor}" if self.cursor else "/hydrate"
-        )
+        return self.call("GET", f"/hydrate?since_seq={self.cursor}" if self.cursor else "/hydrate")
 
     # -- the loop ----------------------------------------------------------
 
@@ -332,9 +324,7 @@ class Worker:
         self.absorb_answers(state)
 
         cycles = 0
-        while not self.stopping and (
-            self.max_cycles is None or cycles < self.max_cycles
-        ):
+        while not self.stopping and (self.max_cycles is None or cycles < self.max_cycles):
             cycles += 1
             try:
                 self.cycle()
@@ -445,9 +435,7 @@ class Worker:
                 title=held.get("title", ""),
                 targets=list(held.get("targets") or []),
             )
-            log.info(
-                "resumed lease on %s (fence %s)", self.lease.task_id, self.lease.fence
-            )
+            log.info("resumed lease on %s (fence %s)", self.lease.task_id, self.lease.fence)
             return
 
     def adopt_recorded_progress(self, state: dict[str, Any]) -> None:
@@ -494,12 +482,7 @@ class Worker:
             answer_id = answer.get("answer_id") or ""
             task_id = answer.get("task_id") or ""
             body = (answer.get("body") or "").strip()
-            if (
-                not answer_id
-                or not task_id
-                or not body
-                or answer_id in self.seen_answers
-            ):
+            if not answer_id or not task_id or not body or answer_id in self.seen_answers:
                 continue
             self.seen_answers.add(answer_id)
             self.instructions.setdefault(task_id, []).append(body)
@@ -742,18 +725,14 @@ class Worker:
             except BaseException as exc:  # noqa: BLE001 - re-raised on the loop thread
                 failure["error"] = exc
 
-        thread = threading.Thread(
-            target=worker, name=f"step-{context.step}", daemon=True
-        )
+        thread = threading.Thread(target=worker, name=f"step-{context.step}", daemon=True)
         thread.start()
         while thread.is_alive():
             thread.join(self.watch_interval_seconds)
             if not thread.is_alive():
                 break
             if self.stopping or self.halted(context.task_id):
-                log.info(
-                    "stopping step %s on %s mid-flight", context.step, context.task_id
-                )
+                log.info("stopping step %s on %s mid-flight", context.step, context.task_id)
                 self.executor.cancel()
                 thread.join(30)
                 return None
@@ -921,9 +900,7 @@ class Worker:
             self.lease = None
         if self.connection_id:
             try:
-                self.call(
-                    "POST", f"/disconnect?connection_id={self.connection_id}", None
-                )
+                self.call("POST", f"/disconnect?connection_id={self.connection_id}", None)
             except CottageError:
                 pass
         log.info("stopped")
@@ -980,9 +957,7 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("COTTAGE_DISPLAY_NAME", "Unattended worker"),
         help="How this worker appears in the room when joining with --invitation.",
     )
-    parser.add_argument(
-        "--label", default=os.environ.get("COTTAGE_LABEL", "worker-main")
-    )
+    parser.add_argument("--label", default=os.environ.get("COTTAGE_LABEL", "worker-main"))
     parser.add_argument("--poll-seconds", type=int, default=20)
     parser.add_argument("--max-cycles", type=int, default=None)
     parser.add_argument(

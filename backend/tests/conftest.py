@@ -62,6 +62,9 @@ async def fresh_db(tmp_path: Path):
     bus.clear()
     yield
     bus.clear()
+    # Close the pooled connections while this test's loop is still running. Without it
+    # the worker threads for a deleted tmp_path database would outlive the test.
+    await db.shutdown()
     db.set_database_path(original)
 
 

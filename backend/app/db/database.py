@@ -14,6 +14,13 @@ Two things this module exists to provide, both required by the architecture:
    pattern, plus UNIQUE constraints, is all the concurrency control the domain
    uses, and it behaves the same on PostgreSQL.
 
+3. **Connection reuse.** Connections are pooled, because aiosqlite gives every
+   connection its own worker thread: opening one per transaction charged a thread
+   spawn, a file open, PRAGMA setup and a teardown to every single-row read. The pool
+   hands a connection out *exclusively* for the life of a transaction and takes it back
+   afterwards, so nothing about the transaction boundary changes — two concurrent
+   transactions never touch the same connection, exactly as before.
+
 `BEGIN IMMEDIATE` is used for write transactions because it is how *this* engine
 avoids a mid-transaction upgrade failure. It is an implementation detail of the
 adapter, not a semantic the domain relies on: correctness comes from the
@@ -22,6 +29,8 @@ conditional writes, and on a swap to PostgreSQL this becomes a plain `BEGIN`.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator, Iterable, Sequence
@@ -45,9 +54,22 @@ _db_path: Path = settings.database_path
 #: Generous, because a lock wait here is normal contention, not an error.
 BUSY_TIMEOUT_SECONDS = 10.0
 
+#: How many connections may be handed out at once. Bounded on purpose: each aiosqlite
+#: connection is a worker thread, so an unbounded pool would reintroduce, under load,
+#: the thread storm the pool exists to remove. A transaction that finds every slot taken
+#: waits for one rather than opening a ninth connection — which is also a fairer queue
+#: than SQLite's own lock wait, because it queues before `BEGIN IMMEDIATE` rather than
+#: inside it.
+POOL_SIZE = 8
+
 
 def set_database_path(path: Path | str) -> None:
-    """Point the process at a different database file (used by tests)."""
+    """Point the process at a different database file (used by tests).
+
+    Synchronous, so it cannot close the pool itself; `_get_pool` notices the path
+    changed and builds a new one. To close the old connections at a known moment rather
+    than on the next transaction, `await shutdown()` first.
+    """
     global _db_path
     _db_path = Path(path)
 
@@ -91,11 +113,11 @@ class Tx:
         return None if row is None else row[0]
 
 
-@asynccontextmanager
-async def _connection() -> AsyncIterator[aiosqlite.Connection]:
-    _db_path.parent.mkdir(parents=True, exist_ok=True)
+async def _open_connection(path: Path) -> aiosqlite.Connection:
+    """Open one connection, configured the way every connection here must be."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     conn = await aiosqlite.connect(
-        _db_path,
+        path,
         timeout=BUSY_TIMEOUT_SECONDS,
         # Manage transactions explicitly; the driver's implicit BEGIN would open a
         # deferred transaction and defeat the point of `transaction(write=True)`.
@@ -109,12 +131,105 @@ async def _connection() -> AsyncIterator[aiosqlite.Connection]:
         isolation_level=None,
     )
     conn.row_factory = aiosqlite.Row
+    # Per-connection, not per-database: both reset with the connection, so a pooled
+    # connection that skipped them would enforce no foreign keys and never wait on a
+    # busy lock. Set here, in the one place a connection is born, so there is no second
+    # path that can forget.
+    await conn.execute("PRAGMA foreign_keys = ON")
+    await conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_SECONDS * 1000)}")
+    return conn
+
+
+@asynccontextmanager
+async def _connection() -> AsyncIterator[aiosqlite.Connection]:
+    """A private, unpooled connection. Used for schema work at boot only."""
+    conn = await _open_connection(_db_path)
     try:
-        await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_SECONDS * 1000)}")
         yield conn
     finally:
         await conn.close()
+
+
+class _Pool:
+    """A bounded set of reusable connections to one database file.
+
+    Exclusivity is the whole contract: `acquire` removes a connection from the pool and
+    `release` puts it back, so a connection is never shared by two transactions in
+    flight. That is what lets `transaction()` keep issuing raw `BEGIN`/`COMMIT` on it.
+
+    Bound to the event loop it was first used on, because the semaphore is. A different
+    loop (a test's, typically) gets a different pool rather than a cross-loop await.
+    """
+
+    def __init__(self, path: Path, loop: asyncio.AbstractEventLoop, size: int) -> None:
+        self.path = path
+        self.loop = loop
+        self._idle: list[aiosqlite.Connection] = []
+        self._slots = asyncio.Semaphore(size)
+        self._closed = False
+
+    async def acquire(self) -> aiosqlite.Connection:
+        await self._slots.acquire()
+        try:
+            if self._idle:
+                return self._idle.pop()
+            return await _open_connection(self.path)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    async def release(self, conn: aiosqlite.Connection, *, discard: bool = False) -> None:
+        """Return a connection, or close it if its transaction state is unknown.
+
+        `discard` is not a nicety. A connection whose COMMIT or ROLLBACK failed may still
+        be inside a transaction; handing it to the next caller would make their `BEGIN`
+        fail, or worse, silently enrol their work in someone else's transaction.
+        """
+        try:
+            if discard or self._closed:
+                with contextlib.suppress(Exception):
+                    await conn.close()
+            else:
+                self._idle.append(conn)
+        finally:
+            self._slots.release()
+
+    async def close(self) -> None:
+        self._closed = True
+        idle, self._idle = self._idle, []
+        for conn in idle:
+            with contextlib.suppress(Exception):
+                await conn.close()
+
+
+_pool: _Pool | None = None
+
+
+async def _get_pool() -> _Pool:
+    """The pool for the current database path and loop, created on first use.
+
+    Replaced rather than mutated when either changes, so a test that repoints the path
+    cannot be served a connection to the previous file.
+    """
+    global _pool
+    loop = asyncio.get_running_loop()
+    pool = _pool
+    if pool is None or pool.path != _db_path or pool.loop is not loop:
+        # Publish the replacement before awaiting anything, so a concurrent caller sees
+        # the new pool instead of racing to build a second one.
+        stale, pool = pool, _Pool(_db_path, loop, POOL_SIZE)
+        _pool = pool
+        if stale is not None:
+            await stale.close()
+    return pool
+
+
+async def shutdown() -> None:
+    """Close every pooled connection. Idempotent; call on app teardown."""
+    global _pool
+    pool, _pool = _pool, None
+    if pool is not None:
+        await pool.close()
 
 
 @asynccontextmanager
@@ -124,16 +239,34 @@ async def transaction(*, write: bool = True) -> AsyncIterator[Tx]:
     A rollback takes the state mutation *and* its event append with it, which is
     the atomicity guarantee the event log depends on.
     """
-    async with _connection() as conn:
-        await conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+    pool = await _get_pool()
+    conn = await pool.acquire()
+    healthy = True
+    try:
+        try:
+            await conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        except BaseException:
+            healthy = False
+            raise
         tx = Tx(conn)
         try:
             yield tx
         except BaseException:
-            await conn.execute("ROLLBACK")
+            try:
+                await conn.execute("ROLLBACK")
+            except BaseException:
+                # The original exception is what the caller needs to see; this one only
+                # tells us the connection is no longer safe to reuse.
+                healthy = False
             raise
         else:
-            await conn.execute("COMMIT")
+            try:
+                await conn.execute("COMMIT")
+            except BaseException:
+                healthy = False
+                raise
+    finally:
+        await pool.release(conn, discard=not healthy)
 
 
 # ---------------------------------------------------------------------------

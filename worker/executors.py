@@ -130,11 +130,7 @@ class EchoExecutor:
         # Ask once, and only if nobody has answered yet: an executor that re-asks
         # after being told would park the same work forever, which looks like
         # patience and is a loop.
-        if (
-            self.ask_at_step is not None
-            and context.step == self.ask_at_step
-            and not heard
-        ):
+        if self.ask_at_step is not None and context.step == self.ask_at_step and not heard:
             return StepResult(
                 summary=(
                     f"Step {context.step} of {context.total_steps} on '{context.title}'. "
@@ -148,9 +144,7 @@ class EchoExecutor:
                 resume={"phase": f"blocked-before-step-{context.step + 1}"},
             )
         return StepResult(
-            summary=(
-                f"Step {context.step} of {context.total_steps} on '{context.title}'.{heard}"
-            ),
+            summary=(f"Step {context.step} of {context.total_steps} on '{context.title}'.{heard}"),
             done=done,
             resume={
                 "phase": f"step-{context.step}",
@@ -263,11 +257,7 @@ class SubprocessExecutor:
         cwd: str | None = None,
         env_passthrough: Sequence[str] = (),
     ) -> None:
-        argv = (
-            list(command)
-            if not isinstance(command, str)
-            else shlex.split(command, posix=False)
-        )
+        argv = list(command) if not isinstance(command, str) else shlex.split(command, posix=False)
         if not argv:
             raise ValueError("the executor command is empty")
         if "{prompt}" in " ".join(argv):
@@ -410,11 +400,8 @@ class SubprocessExecutor:
         if output.upper().startswith(QUESTION_MARKER):
             asked = output[len(QUESTION_MARKER) :].lstrip(" :—-\n").strip()
             return StepResult(
-                summary=(
-                    f"Stopped before step {context.step} rather than guess: {asked[:400]}"
-                ),
-                question=asked[:2000]
-                or "The executor asked for something it did not name.",
+                summary=(f"Stopped before step {context.step} rather than guess: {asked[:400]}"),
+                question=asked[:2000] or "The executor asked for something it did not name.",
                 blocking=True,
                 resume={"phase": f"blocked-before-step-{context.step}"},
             )
