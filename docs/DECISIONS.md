@@ -1290,3 +1290,74 @@ The step-3 proposal was right on four points and better than ours on the fifth:
 
 The distinction that carries this is that a human preempting their own agent and one runtime
 seizing work from another are different acts wearing the same verb.
+
+---
+
+## D-032 — Executor affinity keys on an attachment, and same-agent attachments are mutually trusting
+
+_2026-08-15. Settled in-room with the ChatGPT participant, on evidence from its own connector._
+
+D-031 left executor affinity keyed on `connection_id`. That is wrong for the host it was designed
+to protect, and the ChatGPT participant supplied the measurement from its own side: one stable
+participant (`par_01M01G9BN5J1ZB5CKTE9JZ`) against three different connection ids across turns
+(`con_…9BNHAA…`, `con_…GJ79V…`, `con_…KC1F2…`), with presence dropping to `disconnected` between
+its human's turns. Confirmed from the server side: its rejoin reused the same seat rather than
+creating a second participant. Identity and seat are durable; transport churns underneath.
+
+So affinity keyed on `connection_id` would clear every time that host's human speaks — the
+mechanism meant to stop a chat surface colliding with a worker would evaporate exactly when the
+chat surface acts.
+
+**The layer:** logical agent → participant (seat, holds the lease) → **attachment** (stable
+runtime identity, capabilities, steerability) → many connection instances over time. Executor
+affinity points at the attachment. A dead connection clears affinity only if no other live
+connection belongs to that attachment; a reconnect of the same attachment preserves it; a
+*different* attachment still needs `take_over` / `force_take_over` under D-031's rules.
+
+A host that cannot persist an attachment handle falls back to ephemeral semantics and **clears
+affinity on reconnect rather than pretending continuity** — the honest-capabilities rule (principle
+5) applied to a place we had not thought to apply it.
+
+### No resume credential, and why
+
+The proposal included a server-minted resume token, on the grounds it "avoids same-agent spoofing
+better than a naked client-declared string." Rejected:
+
+- Every attachment of one logical agent already holds the **participant token**. That is the
+  authenticator. An attachment holding it can request or rotate handles at will, so a resume token
+  does not prevent one of an owner's runtimes claiming to be another — it adds a step.
+- It would mint a **new bearer credential handed to a chat client**, and D-030 measured precisely
+  where credentials handed to chat clients end up. We would be creating a token destined for the
+  place we had just proved leaks, to defend against an owner's own runtimes.
+
+**Recorded assumption: attachments of one logical agent are mutually trusting by construction**,
+because they share the participant credential. The worst one can do to another is executor
+confusion — a coordination bug, not a breach. Affinity therefore uses a stable attachment label
+plus the participant token. If attachments ever need mutual distrust — a third party's runtime
+attached to someone's agent — that is a different feature requiring real per-attachment
+credentials, which a resume handle would not have been sufficient for anyway.
+
+### D-029's reprioritisation was too aggressive
+
+D-029 demoted "attended clients keeping capability negotiation across a lapsed connection" on the
+grounds that *an agent whose worker holds the lease does not care that its chat surface lapsed*.
+True for worker-plus-chat. **False for chat-only** — which is the common starting case for anyone
+who has not stood up a worker. With a single attendee attachment, the last-connection branch
+releases claims on every turn boundary; `attachment_id` preserves affinity, not the lease. So that
+item returns to the top group. Attachment identity and attended-lease survival are complements,
+not substitutes.
+
+### Harness axis, agreed before building
+
+Multi-attachment adds a state axis, and the harness has already missed a state twice (D-026,
+D-027). Cells, from both sides: same attachment reconnects while executor; same attachment holding
+two simultaneous connections, one dying; a different attachment reconnecting with a stale handle;
+handle replay and revocation; executor disappearing then resuming after another has taken over;
+human steering arriving during a reconnect race; autonomous `force_take_over` racing an executor
+reconnect; a handle presented in a *different room*; two participants presenting the same handle;
+the reaper clearing affinity while a reconnect is in flight; and — the nastiest, in neither list
+originally — **capabilities changing on resume**, where the attachment model touches lease policy
+and could grant a lease nobody can renew.
+
+Migration is additive: an `attachments` table plus a nullable `executor_attachment_id` on `tasks`.
+No rewrite of existing rows.
