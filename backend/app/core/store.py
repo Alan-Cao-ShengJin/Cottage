@@ -20,6 +20,7 @@ from ..domain.capabilities import CapabilityProfile, DeliveryMode, HostClass
 from ..domain.identity import (
     AgentIdentity,
     Capability,
+    IdentityProvenance,
     IdentitySummary,
     Organization,
     OrgRole,
@@ -86,6 +87,7 @@ def to_identity(row: Any) -> AgentIdentity:
         description=row["description"],
         declared_capabilities=[Capability(c) for c in db.str_list(row["declared_capabilities"])],
         trust=TrustTier(row["trust"]),
+        provenance=IdentityProvenance(row["provenance"]),
         created_at=row["created_at"],
     )
 
@@ -292,6 +294,7 @@ async def load_identity_summary(identity_id: str, *, tx: db.Tx | None = None) ->
         host_class=HostClass(row["host_class"]),
         description=row["description"],
         trust=TrustTier(row["trust"]),
+        provenance=IdentityProvenance(row["provenance"]),
     )
 
 
@@ -331,7 +334,8 @@ async def list_participants(room_id: str, *, tx: db.Tx | None = None) -> list[Pa
         """
         SELECT p.*, i.display_name AS i_display_name, i.kind AS i_kind,
                i.host_class AS i_host_class, i.description AS i_description,
-               i.trust AS i_trust, o.name AS org_name
+               i.trust AS i_trust, i.provenance AS i_provenance,
+               o.name AS org_name
         FROM participants p
         JOIN agent_identities i ON i.id = p.agent_identity_id
         JOIN organizations o ON o.id = i.org_id
@@ -352,6 +356,7 @@ async def list_participants(room_id: str, *, tx: db.Tx | None = None) -> list[Pa
             host_class=HostClass(row["i_host_class"]),
             description=row["i_description"],
             trust=TrustTier(row["i_trust"]),
+            provenance=IdentityProvenance(row["i_provenance"]),
         )
         out.append(to_participant(row, summary))
     return out

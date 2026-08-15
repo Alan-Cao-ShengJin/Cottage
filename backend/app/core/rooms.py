@@ -26,7 +26,13 @@ from ..domain.commands import (
     LeaveRoomCommand,
 )
 from ..domain.events import EventActor, EventType
-from ..domain.identity import AgentIdentity, PrincipalKind, TrustTier, User
+from ..domain.identity import (
+    AgentIdentity,
+    IdentityProvenance,
+    PrincipalKind,
+    TrustTier,
+    User,
+)
 from ..domain.room import (
     ROLE_RANK,
     Invitation,
@@ -914,14 +920,15 @@ async def create_identity(
     description: str = "",
     capabilities: list[Capability] | None = None,
     trust: TrustTier = TrustTier.MEMBER,
+    provenance: IdentityProvenance = IdentityProvenance.ACCOUNT,
 ) -> AgentIdentity:
     identity_id = ids.new_id(ids.IDENTITY)
     await db.execute(
         """
         INSERT INTO agent_identities (
             id, org_id, owner_user_id, display_name, kind, host_class,
-            description, declared_capabilities, trust, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+            description, declared_capabilities, trust, provenance, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             identity_id,
@@ -933,6 +940,7 @@ async def create_identity(
             description,
             db.dumps([c.value for c in (capabilities or [])]),
             trust.value,
+            provenance.value,
             utcnow_iso(),
         ),
     )
@@ -1032,6 +1040,115 @@ class Principal:
     org_id: str
     user: User | None = None
     identity: AgentIdentity | None = None
+
+
+@dataclass(frozen=True)
+class InvitationCredential:
+    """Authorization to join exactly one room, and to do nothing else.
+
+    The credential a stranger has. Before this existed an invitation token named a room but
+    authenticated nobody, so an invited person had no way to begin at all: `/mcp` requires a
+    token, minting one required an account, and only the operator had one. The product's
+    central claim was therefore false in practice (D-023).
+
+    Deliberately **not** a `Principal`. A principal is a standing identity that can create
+    rooms, list them, and act across the org; this is a capability with one use. Modelling it
+    as a separate type is what stops it leaking into call sites that expect the other —
+    `PrincipalDep` cannot accidentally accept one, because the types do not match.
+    """
+
+    invitation: Invitation
+    room_id: str
+    #: The org the guest will be provisioned into: the inviting room's, because that is
+    #: where the authorization came from. It does *not* make the guest an org member —
+    #: `authz.can_see_org_internal` requires account provenance as well (D-025).
+    org_id: str
+    #: Whose account the guest identity record hangs off. On an instance with one operator
+    #: there is nobody else it could belong to, and every row needs an owner. It confers
+    #: nothing: the guest cannot act as this user.
+    provisioning_user_id: str
+
+
+async def authenticate_invitation(token: str) -> InvitationCredential:
+    """Resolve an invitation token into a credential, or refuse.
+
+    Applies every liveness check `join_room` would — revoked, expired, exhausted — so a
+    dead invitation is refused at the door rather than after we have provisioned an
+    identity for its holder. `Unauthenticated` rather than `Forbidden` for an unknown
+    token, matching how every other bearer credential answers, and with no detail about
+    *which* check failed: probing a token must not reveal whether it merely expired.
+    """
+    row = await db.fetch_one("SELECT * FROM invitations WHERE token_hash = ?", (hash_token(token),))
+    if row is None:
+        raise Unauthenticated("Unknown or revoked token.")
+    invitation = store.to_invitation(row)
+
+    if invitation.revoked_at or is_past(invitation.expires_at) or invitation.is_exhausted:
+        raise Unauthenticated("Unknown or revoked token.")
+
+    org_id, user_id = await provisioning_context_for_invitation(token)
+    return InvitationCredential(
+        invitation=invitation,
+        room_id=invitation.room_id,
+        org_id=org_id,
+        provisioning_user_id=user_id,
+    )
+
+
+async def provision_guest_identity(
+    credential: InvitationCredential,
+    *,
+    display_name: str,
+    host_class: HostClass = HostClass.UNKNOWN,
+    description: str = "",
+    capabilities: list[Capability] | None = None,
+) -> AgentIdentity:
+    """Get or create the identity a link-holder joins as, keyed **per room**.
+
+    Two requirements pull against each other here, and the key is what reconciles them.
+
+    A restarting agent must land on its existing seat rather than littering the room with
+    ghosts of itself (D-015), so this cannot always create. But `ensure_identity` keys on
+    `(owner_user_id, display_name)`, and every guest of a room shares one owner — the
+    inviting user — so under that key a guest called "Assistant" in *this* room and one in
+    a completely different room would be the same identity. That is worse than a ghost:
+    `participant_private` events are addressed to a participant.
+
+    Keying on `(this room, this name)` fixes the cross-room collapse and keeps rejoin
+    stable. What remains is that two different people holding the *same* link and choosing
+    the *same* name land on one seat. That is a property of sharing a capability rather
+    than a defect in it — both hold identical authority over this room either way — and it
+    is visible, since the room lists its participants by name. A room owner who needs one
+    holder per link sets `max_redemptions=1`.
+    """
+    existing = await db.fetch_one(
+        """
+        SELECT i.*
+          FROM participants p
+          JOIN agent_identities i ON i.id = p.agent_identity_id
+         WHERE p.room_id = ?
+           AND i.display_name = ?
+           AND i.provenance = ?
+         LIMIT 1
+        """,
+        (credential.room_id, display_name, IdentityProvenance.INVITATION.value),
+    )
+    if existing is not None:
+        return store.to_identity(existing)
+
+    return await create_identity(
+        org_id=credential.org_id,
+        owner_user_id=credential.provisioning_user_id,
+        display_name=display_name,
+        host_class=host_class,
+        description=description,
+        capabilities=capabilities,
+        # Someone with authority in the room minted this link, so the guest may work —
+        # `vouched`, not `untrusted`. What nobody vouched for is the *name*, which is what
+        # `provenance` records and what the room shows.
+        trust=TrustTier.VOUCHED,
+        provenance=IdentityProvenance.INVITATION,
+    )
 
 
 async def authenticate_principal(token: str) -> Principal:

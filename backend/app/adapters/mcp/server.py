@@ -568,11 +568,18 @@ async def _resolve_identity(
     is ignored, which is the point: an agent must not be able to name itself, because in a
     cross-company room a name is what other participants trust.
 
-    **Unauthenticated path (local development only).** With `MCP_REQUIRE_AUTH=false` there
-    is no credential, so the invitation is the only authorization available and the client
-    names itself. Get-or-create keyed on that name, so a restarting agent resolves to the
-    same identity instead of littering the room with ghosts of itself. The startup guard
-    refuses to expose this path publicly.
+    **Guest path.** No access token, but a live invitation — which since D-025 is itself a
+    credential, and is how an invited stranger gets in at all. The invitation authorizes
+    presence; nobody vouched for the name, so the identity is recorded with
+    `provenance=invitation` and the room presents the name as self-asserted. A fresh
+    identity per redemption, never get-or-create: guests of one room share an owner, so
+    keying on `(owner, name)` would merge two strangers who both chose "Assistant" into one
+    participant — and `participant_private` events are addressed to a participant.
+
+    **Local development.** With `MCP_REQUIRE_AUTH=false` there is no credential at all and
+    the invitation is still the only authorization, which lands on the same guest path. The
+    startup guard refuses to expose *that* configuration publicly; the guest path itself is
+    safe in public precisely because the invitation is checked.
     """
     principal = await principal_for_tool(ctx, settings.mcp_resource_url)
     if principal is not None and principal.identity is not None:
@@ -584,10 +591,9 @@ async def _resolve_identity(
         # we know whether the caller was authenticated.
         return principal.identity, principal.identity.display_name
 
-    org_id, user_id = await rooms.provisioning_context_for_invitation(invitation_token)
-    identity = await rooms.ensure_identity(
-        org_id=org_id,
-        owner_user_id=user_id,
+    credential = await rooms.authenticate_invitation(invitation_token)
+    identity = await rooms.provision_guest_identity(
+        credential,
         display_name=display_name,
         host_class=host_class,
         description=description,

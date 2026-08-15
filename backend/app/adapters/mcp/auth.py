@@ -98,6 +98,22 @@ def _token_from_sdk_context(ctx: Any) -> str | None:
     return None
 
 
+async def _is_live_invitation(token: str) -> bool:
+    """Whether this bearer is a currently-redeemable invitation.
+
+    Only enough to let the request reach the tools; it deliberately grants nothing and
+    resolves nothing. `join_room` authenticates the invitation again for itself, so a token
+    that dies between this check and that one is still refused where it matters.
+    """
+    from ...core import rooms
+
+    try:
+        await rooms.authenticate_invitation(token)
+    except RoomError:
+        return False
+    return True
+
+
 def require_principal() -> TokenPrincipal:
     principal = _current.get()
     if principal is None:
@@ -196,6 +212,18 @@ class McpAuthMiddleware:
         try:
             principal = await authenticate_access_token(token, expected_audience=self.audience)
         except Unauthenticated as exc:
+            # An invitation is also a credential here — narrowly. It authorizes joining the
+            # one room it names and nothing else, which is what lets a stranger begin at
+            # all: completing OAuth requires an account, and on this instance only the
+            # operator has one, so before this the invited party had no way in (D-025).
+            #
+            # The blast radius is bounded by the tools rather than by this check:
+            # `create_room` takes an explicit `principal_token` argument, and every other
+            # tool needs a participant token that only joining produces. `join_room` then
+            # re-resolves the invitation itself.
+            if await _is_live_invitation(token):
+                await self.app(scope, receive, send)
+                return
             await self._challenge(send, status=401, error="invalid_token", description=exc.message)
             return
         except Forbidden as exc:

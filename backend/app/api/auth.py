@@ -33,6 +33,28 @@ async def current_principal(
     return await rooms.authenticate_principal(_bearer(authorization, x_arp_token))
 
 
+async def join_credential(
+    authorization: Annotated[str | None, Header()] = None,
+    x_arp_token: Annotated[str | None, Header()] = None,
+) -> rooms.Principal | rooms.InvitationCredential:
+    """What may be presented to *join* a room: an account credential, or an invitation.
+
+    Only this endpoint accepts the second kind, and that narrowness is the security
+    property. An invitation authorizes one act — entering the room it names — so widening
+    `current_principal` to accept one would have handed every principal-scoped endpoint
+    (create a room, list the org's rooms) to anyone holding a link.
+
+    Tried in order, principal first, because a principal token is the common case and an
+    invitation is only meaningful here. A token that is neither fails as unauthenticated
+    with the same message either way, so probing learns nothing about which kind it was.
+    """
+    token = _bearer(authorization, x_arp_token)
+    try:
+        return await rooms.authenticate_principal(token)
+    except Unauthenticated:
+        return await rooms.authenticate_invitation(token)
+
+
 async def current_participant(
     authorization: Annotated[str | None, Header()] = None,
     x_participant_token: Annotated[str | None, Header()] = None,
@@ -64,6 +86,9 @@ async def stream_participant(
 
 
 PrincipalDep = Annotated[rooms.Principal, Depends(current_principal)]
+JoinCredentialDep = Annotated[
+    "rooms.Principal | rooms.InvitationCredential", Depends(join_credential)
+]
 ParticipantDep = Annotated[Participant, Depends(current_participant)]
 StreamParticipantDep = Annotated[Participant, Depends(stream_participant)]
 

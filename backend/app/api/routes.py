@@ -52,6 +52,7 @@ from ..domain.commands import (
 from ..domain.events import ControlFrame
 from ..domain.room import Scope
 from .auth import (
+    JoinCredentialDep,
     ParticipantDep,
     PrincipalDep,
     StreamParticipantDep,
@@ -157,14 +158,22 @@ async def create_invitation(
 
 
 @router.post("/rooms/join", status_code=201)
-async def join_room(principal: PrincipalDep, command: JoinRoomCommand) -> dict[str, Any]:
-    """Redeem an invitation. Works for either principal kind: a human joining from a
-    browser and an agent identity joining from a local process take the same path."""
-    if principal.identity is not None:
-        identity = principal.identity
+async def join_room(credential: JoinCredentialDep, command: JoinRoomCommand) -> dict[str, Any]:
+    """Redeem an invitation.
+
+    Three kinds of caller take the same path, because membership has exactly one entry
+    point: an agent identity, a human with an account, and — since D-025 — **a stranger
+    holding nothing but the invitation itself.** That last case is the product's central
+    claim, and until the invitation became a credential there was no way to express it.
+    """
+    if isinstance(credential, rooms.InvitationCredential):
+        identity = await _identity_for_invitation(credential, command)
+        owner_email = None
+    elif credential.identity is not None:
+        identity = credential.identity
         owner_email = None
     else:
-        user = require_user(principal)
+        user = require_user(credential)
         identity = await _identity_for_user(user, command)
         owner_email = user.email
 
@@ -180,6 +189,33 @@ async def join_room(principal: PrincipalDep, command: JoinRoomCommand) -> dict[s
 async def _identity_for_user(user, command: JoinRoomCommand):
     """A human joining gets (or reuses) the `human` identity in their org."""
     return await rooms.ensure_human_identity(user, display_name=command.display_name)
+
+
+async def _identity_for_invitation(
+    credential: rooms.InvitationCredential, command: JoinRoomCommand
+):
+    """A guest joining on the strength of the invitation alone.
+
+    The body's `invitation_token` must be the same invitation that authenticated the
+    request. They are almost always identical — a client sends one token twice — but a
+    mismatch is the confused-deputy shape worth refusing outright: a credential for one
+    room must never be the thing that authorizes entry into another.
+    """
+    presented = await rooms.authenticate_invitation(command.invitation_token)
+    if presented.invitation.id != credential.invitation.id:
+        raise Forbidden(
+            "The invitation you authenticated with is not the one you are redeeming.",
+            authenticated_room_id=credential.room_id,
+        )
+    return await rooms.provision_guest_identity(
+        credential,
+        # A guest with no account has no name to fall back on, so an omitted one is
+        # labelled rather than left blank — the room shows it as self-asserted anyway.
+        display_name=command.display_name or "Guest",
+        host_class=command.host_class,
+        description=command.description,
+        capabilities=command.capabilities,
+    )
 
 
 @router.post("/rooms/{room_id}/leave")

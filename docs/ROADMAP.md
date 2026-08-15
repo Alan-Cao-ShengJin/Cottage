@@ -52,13 +52,16 @@ answer is Cottage, cap the effort.
 
 **M2 — Universal connectivity**
 
-Status: **not started.** M1 is complete (below) and the gate is green.
+Status: **in progress.** M2.0 and M2.0b are done and verified live; M2.1 is next. The claim
+"anyone starts a room and invites someone over the internet" is true for the first time — a
+stranger with only a join token can join `agent-rooms.fly.dev` and do work. What remains
+unproven is the *cross-vendor* half: every client that has ever joined was ours.
 
 Why this before shared state: the differentiator is the *cross-platform room*. Deepening a
 room whose universality is unproven optimises the wrong axis, and shared state built against
 one adapter would need revisiting once three more exist.
 
-### M2.0 — Hosted-lite: a stable URL, today ✅ built, ⏳ not yet deployed
+### M2.0 — Hosted-lite: a stable URL, today ✅ (2026-08-15)
 Everything already built is unreachable by a stranger, which makes the central claim false in
 practice regardless of how good the core is. So this lands first, scoped for speed rather than
 scale (D-020):
@@ -99,7 +102,7 @@ enable in a deployed environment" while the deploy path requires exactly that. T
 was never about environment but about secrecy — a published default token must not guard a
 reachable instance — and `check_public_safety` already enforced it.
 
-### M2.0b — An invitation must be a credential ← **next, and the top blocker**
+### M2.0b — An invitation must be a credential ✅ (2026-08-15)
 Deploying M2.0 disproved a claim this roadmap had been making (D-023). An invitation token names
 a *room*; it authenticates *nobody*. A public instance must run `MCP_REQUIRE_AUTH=true`, so the
 only way through `/mcp` is an OAuth token, and consent requires a principal token that only the
@@ -110,21 +113,32 @@ So **no stranger has ever been able to join, on any deployment, by any path** �
 we have observed was our own operator's. Until this is fixed, "invite someone over the internet"
 is false, and M2.1–M2.6 would all be testing a room only one person can enter.
 
-The shape of the fix, to be decided and recorded before implementing:
+**Done and verified live** (D-025). `scripts/verify_stranger_join.py` now plays both roles
+against the deployed instance — operator, then stranger — and is the standing guard. What
+shipped, against the constraints set out below:
 
-- Presenting a valid invitation authorizes **exactly one** operation — `join_room` for the room
-  that invitation names — and nothing else. Not room creation, not org reads, not acting as
-  another participant.
-- The identity it provisions is a **guest**: nobody the room trusts bound its display name, so
-  it must be reported as unvouched rather than silently trusted. `docs/INTEROP.md` §5 already
-  states the principle ("display name is only trustworthy where a credential bound it"); this is
-  where the room has to *show* it.
-- Two client paths, because not every host does OAuth well: the invitation accepted at the
-  consent screen in place of a principal token (standards-clean, keeps PKCE and audience
-  binding), and/or the invitation accepted directly as a bearer on `/mcp` (what "paste a URL and
-  a token into your agent" needs).
-- The existing revocation, expiry, and single-room scoping of invitations must all still hold,
-  and a revoked invitation must not leave a usable credential behind.
+- ✅ Presenting a valid invitation authorizes **exactly one** operation — `join_room` for the
+  room it names. Verified refused, live: creating a room, listing the org's rooms, reading a
+  room it has not joined, and redeeming a *different* room's invitation.
+- ✅ The identity it provisions is a **guest**, carrying `provenance=invitation`, and the room
+  shows `name_is_self_asserted` beside it. It is `vouched` rather than `untrusted` — someone
+  with authority minted the link, and an invited collaborator who cannot claim work is a
+  spectator — so what is withheld is the *name's* credibility, not the ability to help.
+- ✅ A guest is **not an org member for `org_internal` purposes**, however its org row reads.
+  This was the subtle one: a guest is provisioned into the inviting room's org, so a tenancy
+  comparison called it a member and `org_internal` payloads would have flowed to a stranger
+  holding a link. `authz.can_see_org_internal` now requires account provenance — and the two
+  filters that actually gate disclosure were inlining their own tenancy comparison rather than
+  calling it, so the predicate fix alone was decorative. A behavioural test caught that.
+- ✅ The invitation is accepted directly as a bearer on `/mcp` and on `/api/rooms/join` — "paste
+  a URL and a token into your agent", which is what a host that does OAuth badly needs. The
+  consent-screen variant was not built: it buys standards tidiness, not reach, and the bearer
+  path already makes every MCP client work.
+- ✅ Revocation, expiry and exhaustion are all checked at the door, so a dead link never gets
+  as far as provisioning anyone. **Refined from the original constraint:** revoking an
+  invitation stops future *joins*; it does not eject participants who already joined. Removing
+  someone is `participant.removed`, a separate admin act — conflating them would mean revoking
+  a 50-use link silently kicks everyone who used it.
 
 ### M2.1 — Interop conformance harness
 Put N host families in one room simultaneously and assert the six properties in
@@ -264,13 +278,11 @@ Deepen M2.4: richer digests, pasteable turn output, lease tuning for `attended` 
 
 ## Known blockers / open questions
 
-- **An invitation token is not a credential, so nobody can be invited** (D-023). A stranger
-  holding a valid join token is refused on every path. **This is now the most important open
-  item**, ahead of the one below it, because it blocks the only test that would settle that one.
-  M2.0b.
 - **No second-vendor client has ever joined a room.** Every "verified" row in
   `docs/INTEROP.md` was verified by our own software. Until that changes, cross-platform is a
-  design property, not an observed one.
+  design property, not an observed one. **This is now the most important open item**, and the
+  two things that used to block it — no reachable instance, no way for a stranger to
+  authenticate — are gone.
 - **PostgreSQL compatibility is argued, not demonstrated** (D-011). No invariant depends on
   SQLite locking, but that needs proving: a migration mechanism, a `TEXT` vs `timestamptz`
   review, and the concurrency invariants (I1, I3) run against Postgres. Deferred to M5 by

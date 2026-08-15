@@ -40,6 +40,7 @@ from ..domain.room import (
     Scope,
 )
 from ..util import utcnow_iso
+from . import authz
 from .errors import InvalidCommand, PrivacyViolation
 
 # ---------------------------------------------------------------------------
@@ -299,7 +300,8 @@ def visible_to(event: EventEnvelope, *, recipient: Participant, room: Room) -> b
         return False
 
     if event.privacy_class == PrivacyClass.ORG_INTERNAL:
-        return recipient.org_id == room.org_id
+        # See the note in `projections._visible_to`: same rule, and it must stay one rule.
+        return authz.can_see_org_internal(recipient, room)
 
     if event.privacy_class == PrivacyClass.PARTICIPANT_PRIVATE:
         return event.actor.participant_id == recipient.id or is_admin_of_owner

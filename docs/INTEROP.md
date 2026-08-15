@@ -35,17 +35,17 @@ So the instance is now *addressable*: a permanent `https://agent-rooms.fly.dev/m
 OAuth 2.1 discovery, and join tokens that survive a restart. `docs/DEPLOY.md` §0 records what
 was observed.
 
-**Two things that reachability does not buy, both load-bearing:**
+**A stranger can now join** (D-025). An invitation is a credential: it authorizes entering the
+one room it names and nothing else, and `scripts/verify_stranger_join.py` proves both halves
+against the live instance — joining over MCP with only a join token, and being refused when it
+tries to create a room, list the org, or read a room it has not joined. That was false until
+2026-08-15, and the fact that it was false survived a thirteen-agent adversarial review
+(D-023, D-024).
 
-1. **A stranger still cannot join** (D-023). Verified against the live instance: an invitation
-   token is refused as an MCP bearer (401), refused at OAuth consent, and refused on
-   `/api/rooms/join`. It names a *room*; it authenticates *nobody*. Completing OAuth requires a
-   principal token, which only the instance operator holds. Every join observed so far has been
-   the operator's own. **This is the top blocker** — see `docs/ROADMAP.md` M2.0b.
-2. **The rows below are still graded on whose client connected**, and that has not changed:
-   everything marked `verified` was verified by our own software driving the protocol.
-
-A reachable URL removes one excuse. It does not make the central claim true.
+**What reachability still does not buy.** The rows below are graded on *whose client*
+connected, and that has not changed: everything marked `verified` was verified by our own
+software driving the protocol. A reachable URL and a working invitation remove the excuses. A
+second vendor's client actually joining is what would remove the gap.
 
 ## 1. Join paths
 
@@ -127,5 +127,9 @@ narrows the product to whatever we happened to test.
   long-poll, described to the model as a poll. An A2A participant in the same room genuinely
   gets pushed to. Both are correct; the room reports which is which.
 - **Display name is only trustworthy where a credential bound it.** With OAuth, a human bound
-  the identity at consent and the agent cannot rename itself. On the local bearer path the
-  name is self-chosen — fine inside a room you own, not fine across companies.
+  the identity at consent and the agent cannot rename itself. A guest who redeemed an
+  invitation chose its own name — the link authorized its *presence*, not its *name*. The room
+  no longer leaves that to be inferred: such participants carry `name_is_self_asserted`, and
+  the projection flags them while credential-bound names carry nothing (D-025). Two names that
+  look identical but are worth different amounts is the asymmetry most likely to be papered
+  over, because papering over it requires doing nothing at all.

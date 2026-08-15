@@ -46,6 +46,29 @@ class TrustTier(str, Enum):
     UNTRUSTED = "untrusted"
 
 
+class IdentityProvenance(str, Enum):
+    """How this identity came to exist — and therefore what its name is worth.
+
+    Distinct from `TrustTier`, which answers "may it act". This answers "who said it is
+    who it says it is", and the two are genuinely independent: an invited guest can be
+    trusted to do work while its *name* remains its own claim.
+
+    The distinction became load-bearing when invitations became credentials (D-025). Before
+    that every identity was created by, or bound by, someone with an account, so provenance
+    was uniform and invisible.
+    """
+
+    #: Created for a user of the org, or bound by one at an OAuth consent screen. The
+    #: display name is backed by a credential, so other participants may rely on it.
+    ACCOUNT = "account"
+    #: Provisioned by redeeming an invitation link. Somebody with authority in the room
+    #: deliberately issued that link — so presence is authorized — but nobody vouched for
+    #: *this* name: the holder chose it. Two consequences, both enforced rather than
+    #: documented: the room shows the name as self-asserted, and the identity is not an org
+    #: member for `org_internal` purposes however its org row reads (`core/authz.py`).
+    INVITATION = "invitation"
+
+
 class Organization(BaseModel):
     id: str
     name: str
@@ -82,6 +105,8 @@ class AgentIdentity(BaseModel):
     #: and the connection's declaration wins for that connection.
     declared_capabilities: list[Capability] = Field(default_factory=list)
     trust: TrustTier = TrustTier.MEMBER
+    #: How this identity was created, and therefore whether its name is vouched for.
+    provenance: IdentityProvenance = IdentityProvenance.ACCOUNT
     created_at: str
 
 
@@ -101,3 +126,6 @@ class IdentitySummary(BaseModel):
     host_class: HostClass = HostClass.UNKNOWN
     description: str = ""
     trust: TrustTier = TrustTier.MEMBER
+    #: Shown to other participants, because a self-asserted name that looks identical to a
+    #: credential-bound one is the disclosure this field exists to prevent.
+    provenance: IdentityProvenance = IdentityProvenance.ACCOUNT

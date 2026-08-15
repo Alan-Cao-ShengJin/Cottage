@@ -53,6 +53,11 @@ def participant(row: dict[str, Any]) -> dict[str, Any]:
         out["role"] = "owner"
     if (row.get("trust") or "member") != "member":
         out["trust"] = row["trust"]
+    # Only when it changes how the name should be read. A coordinating agent deciding
+    # whether to trust "Alice's Deploy Bot" needs to know nobody vouched for that name;
+    # saying so for every participant would be noise, and noise gets skimmed past.
+    if (row.get("identity") or {}).get("name_is_self_asserted"):
+        out["name_is_self_asserted"] = True
     return out
 
 

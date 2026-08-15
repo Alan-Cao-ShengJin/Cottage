@@ -177,6 +177,12 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("principal_tokens", "scope", "TEXT NOT NULL DEFAULT ''"),
     ("principal_tokens", "audience", "TEXT"),
     ("principal_tokens", "last_used_at", "TEXT"),
+    # Defaults to 'account', which is right for every row that predates it: before
+    # invitations became credentials (D-025) an identity could only be created by, or
+    # bound by, someone holding an account. The exception is the permissive local
+    # development path, whose self-named identities are retroactively labelled
+    # 'account' — throwaway data on a laptop, and the guard refuses that path in public.
+    ("agent_identities", "provenance", "TEXT NOT NULL DEFAULT 'account'"),
 )
 
 

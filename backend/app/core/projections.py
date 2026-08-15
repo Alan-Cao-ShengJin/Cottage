@@ -19,9 +19,10 @@ import logging
 from typing import Any
 
 from ..db import database as db
+from ..domain.identity import IdentityProvenance
 from ..domain.room import Participant, PrivacyClass, Room, Scope
 from ..util import from_iso, utcnow
-from . import presence, privacy, store
+from . import authz, presence, privacy, store
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +47,11 @@ def _visible_record(
     if restricted_to is not None and recipient.id not in restricted_to and not is_admin_of_owner:
         return False
     if privacy_class == PrivacyClass.ORG_INTERNAL:
-        return recipient.org_id == room.org_id
+        # Delegated rather than compared inline. The comparison this replaced —
+        # `recipient.org_id == room.org_id` — is tenancy, and tenancy stopped being
+        # sufficient once an invitation could provision a guest *into* the room's org
+        # (D-025). Two copies of a rule diverge; one predicate cannot.
+        return authz.can_see_org_internal(recipient, room)
     if privacy_class == PrivacyClass.PARTICIPANT_PRIVATE:
         return owner_participant_id == recipient.id or is_admin_of_owner
     return True
@@ -74,6 +79,12 @@ def _identity_view(
         # design. Anything org-sensitive belongs in the room, under a privacy class.
         "description": summary.description,
         "trust": summary.trust.value,
+        # Whether anyone vouched for the *name* above. A guest who redeemed a link chose
+        # its own, and a name that looks identical to a credential-bound one is exactly
+        # the confusion this field exists to prevent — attribution is the product's
+        # integrity guarantee, so it has to say how much the attribution is worth.
+        "provenance": summary.provenance.value,
+        "name_is_self_asserted": summary.provenance == IdentityProvenance.INVITATION,
     }
 
 

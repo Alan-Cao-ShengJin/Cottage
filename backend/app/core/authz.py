@@ -16,7 +16,7 @@ way authorization goes wrong:
 
 from __future__ import annotations
 
-from ..domain.identity import TrustTier
+from ..domain.identity import IdentityProvenance, TrustTier
 from ..domain.room import (
     ROLE_SCOPES,
     UNTRUSTED_DENIED_SCOPES,
@@ -99,10 +99,28 @@ def require_admin(participant: Participant) -> None:
 def is_org_member(participant: Participant, room: Room) -> bool:
     """Whether this participant belongs to the room's owning org.
 
-    Gates `org_internal` disclosure and visibility.
+    Tenancy only — a comparison of org ids. It answers "same tenant?", not "is this
+    someone the org vouches for?", and `can_see_org_internal` needs the second question.
     """
     return participant.org_id == room.org_id
 
 
 def can_see_org_internal(participant: Participant, room: Room) -> bool:
-    return is_org_member(participant, room)
+    """Whether `org_internal` payloads may be disclosed to this participant.
+
+    Same tenant **and** an identity that an account holder stands behind.
+
+    The second condition is not redundant, and leaving it out was a real hole. An
+    invitation link provisions its guest inside the *inviting room's* org (that is where
+    the authorization comes from), so a link-holder passes the tenancy check while being
+    exactly the stranger `org_internal` exists to exclude. `docs/SECURITY.md` §1 describes
+    this tier as "user authenticated into their own org", which a link-holder is not.
+
+    So provenance decides it: an identity created for an account, or bound by one at a
+    consent screen, is a member; one provisioned by redeeming a link is a guest, whatever
+    org row it happens to live in (D-025).
+    """
+    return (
+        is_org_member(participant, room)
+        and participant.identity.provenance == IdentityProvenance.ACCOUNT
+    )

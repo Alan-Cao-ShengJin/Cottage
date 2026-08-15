@@ -784,3 +784,95 @@ authenticates nobody (D-023). Six lenses over the same artifacts missed the prod
 capability being absent, because every lens took the operator's point of view. Finding that needed a
 different move: playing the stranger. Reviewing the artifacts you built, however adversarially, is
 not the same as using the thing as someone who does not already have the keys.
+
+---
+
+## D-025 — An invitation is a credential, and a guest is not an org member
+**Date:** 2026-08-15 · **Status:** accepted · **Resolves D-023**
+
+The product's central claim is now true and verified against the live instance: a stranger
+holding nothing but a join token can enter a room over the internet, work in it, and do nothing
+else. `scripts/verify_stranger_join.py` plays both roles — operator, then stranger — and is the
+standing guard.
+
+### What an invitation now is
+
+A **capability**, modelled as its own type rather than as a `Principal`. That distinction is the
+containment: a principal is a standing identity that can create rooms and read across an org, so
+`PrincipalDep` cannot accidentally accept an invitation because the types do not match. Only
+`/api/rooms/join` and the MCP `join_room` path accept one.
+
+Verified refused, live, before any join is attempted: creating a room (401), listing the
+organization's rooms (401), reading a room it has not joined (401), and redeeming a *different*
+room's invitation (403 — the confused-deputy shape, refused as defence in depth since holding
+the other token would suffice anyway).
+
+Accepted as a bearer directly on `/mcp`, which is what makes "paste a URL and a token into your
+agent" work for a client whose OAuth support is weak or absent. The alternative — accepting an
+invitation at the consent screen in place of a principal token — was designed and not built: it
+buys standards tidiness, not reach.
+
+### Three findings the implementation turned up
+
+**1. A guest passes a tenancy check and must still not be an org member.** A guest is
+provisioned into the *inviting room's* org, because that is where the authorization came from.
+So `participant.org_id == room.org_id` is true, and `org_internal` payloads would have flowed to
+a stranger holding a link — exactly who that class exists to exclude. `docs/SECURITY.md` §1
+describes this tier as "user authenticated into their own org", which a link-holder is not.
+
+Hence `IdentityProvenance`: `account` (created for, or bound by, an account holder) versus
+`invitation` (provisioned by redeeming a link). `can_see_org_internal` requires the former.
+Provenance is deliberately orthogonal to `TrustTier` — one answers "who says it is who it says
+it is", the other "may it act" — and they genuinely differ here: a guest is `vouched`, because
+somebody with authority minted the link, so it can claim tasks and do real work. An invited
+collaborator who could only watch would defeat the point of inviting them. What is withheld is
+the *name's* credibility, not the ability to help.
+
+**2. The predicate fix was decorative until the filters used it.** `can_see_org_internal` lived
+in `core/authz.py` and was **called from nowhere**; the two places that actually gate disclosure
+— `privacy.visible_to` and `projections._visible_record` — each inlined their own
+`recipient.org_id == room.org_id`. Fixing the helper changed no behaviour whatsoever. A
+behavioural test caught it: assert on the predicate and it passes while the projection still
+leaks. Both filters now delegate, because two copies of a rule diverge and one cannot.
+
+**3. Guest identity keying is a real trade, and both bad options were reachable.**
+`ensure_identity` keys on `(owner_user_id, display_name)`, and every guest of every room shares
+one owner — the inviting user — so "Assistant" in one room would have been the *same identity*
+as "Assistant" in another, across a tenancy boundary, with `participant_private` events
+addressed to it. Always creating a fresh identity fixes that but breaks stable seats: a
+restarting agent litters the room with ghosts of itself, which an existing test rightly
+forbids. Keying on `(this room, this name)` satisfies both.
+
+What remains is that two people sharing one link and choosing the same name land on one seat.
+That is a property of sharing a capability rather than a defect in it — both hold identical
+authority over the room either way — and it is visible, since the room lists participants by
+name. A room owner who wants one holder per link sets `max_redemptions=1`.
+
+### Honesty about the name, made mechanical
+
+A guest's display name is its own claim. Presenting it identically to a credential-bound name
+would have everyone coordinating against a fiction, so the projection emits
+`name_is_self_asserted` and the compact MCP view surfaces it *only* when true — noise on every
+participant gets skimmed past. `docs/INTEROP.md` §5 had stated the principle since M2; this is
+where the room enforces it rather than documenting it.
+
+### One constraint from D-023 refined rather than met
+
+D-023 required that "a revoked invitation must leave no usable credential behind, including any
+token already derived from it." Implementing it made the semantics clearer: revocation stops
+future *joins*, and ejecting an existing participant is `participant.removed`, a separate admin
+act. Conflating them would mean revoking a 50-use link silently kicks everyone who ever used it.
+Revocation, expiry and exhaustion are all checked at the door, so a dead link never gets as far
+as provisioning anyone.
+
+### The method note worth keeping
+
+This gap survived a thirteen-agent adversarial review of the same code (D-024), because every
+lens took the operator's point of view and the operator could always join. It also survived the
+unit suite, which exercises the permissive local path where an invitation *is* the only
+authorization — so the feature worked perfectly in every test and could not work in production.
+
+Reviewing your own artifacts, however adversarially, is not the same as using the thing as
+someone who does not already hold the keys. The tests added here are written from the stranger's
+side for that reason, and `verify_stranger_join.py` exists so the next regression is caught by
+the party who would actually suffer it.

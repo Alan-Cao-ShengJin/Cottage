@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS agent_identities (
     description            TEXT NOT NULL DEFAULT '',
     declared_capabilities  TEXT NOT NULL DEFAULT '[]',  -- JSON array
     trust                  TEXT NOT NULL DEFAULT 'member',
+    -- account | invitation. How this identity came to exist, hence whether its display
+    -- name is backed by a credential and whether it counts as an org member for
+    -- `org_internal` disclosure. See domain/identity.py IdentityProvenance.
+    provenance             TEXT NOT NULL DEFAULT 'account',
     created_at             TEXT NOT NULL
 );
 
