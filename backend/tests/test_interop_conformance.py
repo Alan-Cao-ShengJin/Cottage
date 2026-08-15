@@ -39,8 +39,10 @@ from app.domain.commands import (
     CreateTaskCommand,
     DeclareWorkCommand,
     JoinRoomCommand,
+    UpdateTaskCommand,
 )
 from app.domain.room import RoomPolicy
+from app.domain.task import TaskStatus
 
 
 class Room:
@@ -219,6 +221,65 @@ async def test_a_task_claimed_by_one_path_is_refused_to_all_others(mixed_room):
     )
     held = next(t for t in state["tasks"] if t["task_id"] == task.id)
     assert held["held_by"] == mixed_room.push.participant.id
+
+
+async def test_a_held_task_cannot_be_finished_or_edited_by_a_non_holder(mixed_room):
+    """Exclusivity has to cover the terminal transitions, not only the claim.
+
+    This is the gap the original property 2 left open, and a live ChatGPT participant
+    walked straight into it on 2026-08-15: refusing the *claim* while allowing anyone
+    to `complete` the task is not exclusivity, it is a speed bump. The reason it is
+    easy to get wrong is that `complete` and `update` do carry a fence check — and a
+    fence *looks* like a secret. It is not: every participant needs it to reason about
+    staleness, so it is published in the projection and in `task.claimed`. Presenting
+    it proves the caller read the board, never that it holds the lease (D-026).
+    """
+    owner = mixed_room.fixture.owner
+    task = await tasks.create(
+        participant=owner,
+        command=CreateTaskCommand(title="Rewrite the auth middleware", targets=["app/auth.py"]),
+    )
+    held = await tasks.claim(
+        participant=mixed_room.push.participant, command=ClaimTaskCommand(task_id=task.id)
+    )
+    assert held.claim is not None
+    fence = held.claim.fence
+
+    # The premise: a stranger can read the holder's current fence off the board.
+    state = await mcp_tools.get_room_state(participant_token=mixed_room.guest["participant_token"])
+    published = next(t for t in state["tasks"] if t["task_id"] == task.id)
+    assert published["fence"] == fence, "the fence is public — that is why it cannot authorize"
+
+    stranger = mixed_room.guest_participant
+    with pytest.raises(RoomError) as completed:
+        await tasks.complete(
+            participant=stranger,
+            command=CompleteTaskCommand(
+                task_id=task.id, fence=fence, result="Completed by someone who never held it."
+            ),
+        )
+    assert completed.value.code == "lease_conflict"
+
+    with pytest.raises(RoomError) as edited:
+        await tasks.update(
+            participant=stranger,
+            command=UpdateTaskCommand(task_id=task.id, fence=fence, title="Renamed by a stranger"),
+        )
+    assert edited.value.code == "lease_conflict"
+
+    # The holder's lease is untouched by either attempt.
+    after = await store.load_task(task.id)
+    assert after.status is not TaskStatus.DONE
+    assert after.claim is not None
+    assert after.claim.participant_id == mixed_room.push.participant.id
+    assert after.title == "Rewrite the auth middleware"
+
+    # And the holder itself is still free to finish its own work.
+    finished = await tasks.complete(
+        participant=mixed_room.push.participant,
+        command=CompleteTaskCommand(task_id=task.id, fence=fence, result="Done by the holder."),
+    )
+    assert finished.status is TaskStatus.DONE
 
 
 # ---------------------------------------------------------------------------

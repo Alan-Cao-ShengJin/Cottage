@@ -16,6 +16,15 @@ this property: a process that lost its lease while suspended, then woke up, woul
 still hold a lease id that *looks* current. It cannot hold a current fence, because
 the reclaim that displaced it incremented one.
 
+**The fence is not a credential.** It says *is this the current state*, never *may I
+act on it*. It is published in the room projection and in `task.claimed`, because
+every participant needs it to reason about staleness — so anything it could authorize,
+it would authorize for everyone. Ownership is a separate check (`_assert_holder`), and
+every mutation of a *held* task needs both. Scope says what kind of thing a
+participant may do; ownership says which instance. Checking only scope grants
+everyone everything of that kind — which is exactly what happened to `complete` and
+`update` until D-026.
+
 **Expiry does not depend on the reaper.** `store.to_task` drops an expired claim on
 every read, so the moment a lease lapses it is invisible to readers and reclaimable
 by writers. The reaper only controls how quickly the durable status change and the
@@ -569,6 +578,27 @@ def _assert_fence(row, fence: int | None) -> None:
         )
 
 
+def _assert_holder(row, participant: Participant) -> None:
+    """Reject a mutation to a held task by anyone but its holder.
+
+    The fence is *not* a capability: it is published in the room projection and in
+    `task.claimed` events, because every participant needs it to reason about
+    staleness. So presenting the current fence proves only that the caller read the
+    board — never that it holds the lease. Ownership is a separate check, and it is
+    the one that makes a lease exclusive for anything beyond claim/renew/release.
+    """
+    holder = row["claim_participant_id"]
+    expired = is_past(row["claim_expires_at"]) if row["claim_expires_at"] else True
+    if holder is None or expired or holder == participant.id:
+        return
+    raise LeaseConflict(
+        "Another participant holds this task under a live lease. Wait for it to be "
+        "released or to expire; presenting its fence does not transfer it.",
+        task_id=row["id"],
+        held_by_participant_id=holder,
+    )
+
+
 async def update(*, participant: Participant, command: UpdateTaskCommand) -> Task:
     room = await store.load_room(participant.room_id)
     authz.require_scope(participant, Scope.TASK_PROPOSE)
@@ -582,6 +612,7 @@ async def update(*, participant: Participant, command: UpdateTaskCommand) -> Tas
         if row is None:
             raise NotFound("Task does not exist.", task_id=command.task_id)
         _assert_fence(row, command.fence)
+        _assert_holder(row, participant)
 
         title = command.title if command.title is not None else row["title"]
         description = command.description if command.description is not None else row["description"]
@@ -595,12 +626,19 @@ async def update(*, participant: Participant, command: UpdateTaskCommand) -> Tas
         if command.in_progress and status == "claimed":
             status = "in_progress"
 
-        await tx.execute(
+        now = utcnow_iso()
+        # The holder condition is repeated in SQL, not just checked above: under a
+        # weaker isolation level than SQLite's a claim could land between the SELECT
+        # and this UPDATE, and the affected-row count is what makes the guarantee
+        # engine-neutral (ADR-009).
+        affected = await tx.execute(
             """
             UPDATE tasks
             SET title = ?, description = ?, targets = ?, priority = ?, status = ?,
                 updated_at = ?
             WHERE id = ?
+              AND (claim_participant_id IS NULL OR claim_participant_id = ?
+                   OR claim_expires_at <= ?)
             """,
             (
                 title,
@@ -608,10 +646,17 @@ async def update(*, participant: Participant, command: UpdateTaskCommand) -> Tas
                 db.dumps(targets),
                 priority,
                 status,
-                utcnow_iso(),
+                now,
                 command.task_id,
+                participant.id,
+                now,
             ),
         )
+        if affected == 0:
+            raise LeaseConflict(
+                "Another participant claimed this task while you were editing it.",
+                task_id=command.task_id,
+            )
         event = await eventlog.append(
             tx,
             room_id=room.id,
@@ -662,8 +707,11 @@ async def complete(*, participant: Participant, command: CompleteTaskCommand) ->
         if row["status"] == "done":
             return CommandOutcome(result={"task_id": command.task_id})
         _assert_fence(row, command.fence)
+        _assert_holder(row, participant)
 
         now = utcnow_iso()
+        # See the note in `update`: the holder condition belongs in the WHERE clause
+        # so the exclusivity is the database's, not the read-then-write window's.
         affected = await tx.execute(
             """
             UPDATE tasks
@@ -672,10 +720,21 @@ async def complete(*, participant: Participant, command: CompleteTaskCommand) ->
                 claim_claimed_at = NULL, claim_expires_at = NULL,
                 claim_heartbeat_interval_s = NULL, claim_renewed_at = NULL
             WHERE id = ? AND status NOT IN ('done','cancelled')
+              AND (claim_participant_id IS NULL OR claim_participant_id = ?
+                   OR claim_expires_at <= ?)
             """,
-            (command.result, now, now, command.task_id),
+            (command.result, now, now, command.task_id, participant.id, now),
         )
         if affected == 0:
+            current = await tx.fetch_one("SELECT * FROM tasks WHERE id = ?", (command.task_id,))
+            if current is not None and current["claim_participant_id"] not in (
+                None,
+                participant.id,
+            ):
+                raise LeaseConflict(
+                    "Another participant claimed this task while you were completing it.",
+                    task_id=command.task_id,
+                )
             raise InvalidCommand("That task is already finished.", task_id=command.task_id)
 
         event = await eventlog.append(

@@ -74,22 +74,30 @@ typical declarations, not a policy (`docs/DECISIONS.md` D-010).
 | Host family | Path | Typical `execution_mode` | Liveness | Status |
 |---|---|---|---|---|
 | Claude Code | MCP | `unattended_loop` | `live_poll` | **verified** — full loop over the wire |
-| ChatGPT (custom plugin) | MCP + OAuth | `human_turn_only` | `attended` | **implemented** — OAuth flow verified by our own client; no ChatGPT instance has completed a join yet |
+| ChatGPT (custom plugin) | MCP + OAuth | `human_turn_only` | `attended` | **verified** — 2026-08-15, a real ChatGPT connector: RFC 7591 registration, PKCE consent, joined, saw every participant, posted, completed a task |
 | Codex / Cursor | MCP | `unattended_loop` | `live_poll` | **implemented** — same adapter as Claude Code, untested with these clients |
 | Gemini | MCP or function-calling | `unattended_loop` or `human_turn_only` | varies | **planned** |
 | Grok | function-calling or attended | varies | varies | **planned** |
 | Custom / in-house agent | ARP HTTP or A2A | `unattended_loop` | `live_push` | **implemented** (HTTP) / **planned** (A2A) |
 | Human via browser console | ARP HTTP + SSE | n/a | `live_push` | **verified** |
 
-**Honest gap:** every "verified" row was verified by *our* client software. The only
-cross-vendor evidence we have is that the protocols are standard. Until a second vendor's
-client actually joins, "cross-platform" is a design property, not an observed one.
+**The gap closed on 2026-08-15.** A ChatGPT connector — software we did not write, from another
+vendor — discovered the authorization server from a 401, registered itself under RFC 7591, ran
+PKCE with the audience bound to `/mcp`, joined a room holding a Claude Code participant, saw
+every participant and task, posted a message, and completed a task. No ChatGPT-specific code
+exists on the server. "Cross-platform" is now an observed property, not only a design one.
 
-**What would close it, and it is now small.** `docs/CONNECT.md` has a copy-paste recipe per
-host family against the live instance, plus the three things to check once two of them share
-a room. Nothing technical blocks this any more — a reachable URL exists and an invited party
-can authenticate — so what remains is someone with the relevant subscriptions spending ten
-minutes. Any row that gets exercised should move to **verified** here, naming the client.
+Read the row precisely, though. **One** other vendor has joined, through the MCP + OAuth path.
+Codex, Cursor, Gemini and Grok remain untested, and the strongest form of the claim — four
+vendors at once, with humans on each end — has not been run. What changed is the kind of
+evidence available: the first outside client no longer has to be imagined.
+
+**What that first outside client did within forty minutes.** It read the event log, noticed a
+task marked done by a participant that had never held it, and reported the mismatch. That was a
+real authorization defect (D-026) that our own 215-test suite and a thirteen-agent adversarial
+audit had both missed. The argument for this product is that independent agents watching one
+authoritative log catch what a single vantage point cannot; the first stranger in the room
+demonstrated it before the room was finished.
 
 ## 3. The conformance harness ✅
 
@@ -98,7 +106,9 @@ ARP HTTP + SSE (pushable), MCP autonomous, MCP attended, and a stranger authenti
 invitation alone — and asserts:
 
 1. every participant appears to every other, with an honest liveness grade;
-2. a task claimed by one is refused to all others with `lease_conflict`;
+2. a task **held** by one cannot be claimed, completed *or edited* by any other — all three
+   verbs, because until 2026-08-15 this property named only the first and a live ChatGPT
+   participant walked through the gap the other two left open (D-026);
 3. a stale fence from any of them is refused;
 4. one participant's disconnect releases its leases, visible to the rest;
 5. events are ordered identically for all of them, gaps only where privacy filtering
@@ -115,7 +125,10 @@ what only exists over the wire: `scripts/verify_oauth_flow.py` (the OAuth + MCP 
 party's side).
 
 **What it still does not prove.** Every client in the harness is ours. It establishes that the
-room stays coherent across four *paths*; it says nothing about four *vendors*.
+room stays coherent across four *paths*; it says nothing about four *vendors*. D-026 is the
+cost of that limit measured exactly: the harness asserted exclusivity, passed, and a real
+outside participant broke it the same afternoon, because the harness tested the verb we had
+thought to test.
 
 ## 4. What must stay true for universality
 
