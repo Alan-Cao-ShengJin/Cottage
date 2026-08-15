@@ -367,13 +367,21 @@ async def create_room(
         principal = await _creating_principal(ctx, principal_token)
 
         created = await rooms.create_room(
-            user=principal.user,
+            # The whole principal, not `principal.user`. Passing the latter sent None
+            # for every agent identity and produced "needs an authenticated principal"
+            # at a caller that had just authenticated — the guard and the docstring
+            # were widened and the call was not.
+            principal=principal,
             command=CreateRoomCommand(
                 name=name,
                 purpose=purpose,
                 visibility=RoomVisibility.CROSS_ORG if cross_org else RoomVisibility.INTERNAL,
             ),
-            creator_display_name=display_name,
+            # An agent presents the name a human bound to its identity, never one it
+            # chose for itself — the same rule `join_room` enforces (D-015). Without
+            # this, the one room an agent creates is the one place it can call itself
+            # anything, which is exactly the seam that rule closes.
+            creator_display_name=(None if principal.identity is not None else display_name),
         )
         # Bind this session so later tools need no token, and open a polling connection
         # so the creator is present rather than a room with nobody in it.

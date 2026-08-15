@@ -216,3 +216,45 @@ async def test_a_supplied_token_that_is_wrong_is_refused_not_ignored(fresh_db, o
         await mcp_server._creating_principal(None, "not-a-real-token")
     # And the refusal has to tell a client with a cached schema what to send instead.
     assert "empty string" in str(exc.value)
+
+
+async def test_the_mcp_tool_itself_creates_a_room_for_an_oauth_agent(fresh_db, org, monkeypatch):
+    """Calls the tool, not the service under it.
+
+    Written because the gate missed a whole class of bug twice in one hour: the
+    service was widened to accept an agent identity, and the adapter kept passing
+    `principal.user` — `None` for exactly the callers being enabled. Every service
+    test passed and the only host that matters got "needs an authenticated
+    principal" one second after authenticating.
+
+    The lesson is about where the seam is: `core` had tests, the adapter had none,
+    and the adapter is the half a real client actually touches.
+    """
+    from app.adapters.mcp import server as mcp_server
+    from app.core.oauth import TokenPrincipal
+
+    org_id, user_id = org
+    identity = await _identity(org_id, user_id, display_name="ChatGPT (Alan)")
+
+    async def fake_caller(ctx, audience):
+        return TokenPrincipal(
+            subject_kind="agent_identity",
+            org_id=org_id,
+            identity=identity,
+            user_id=None,
+            scope="agent",
+            client_id="cli_test",
+        )
+
+    monkeypatch.setattr(mcp_server, "principal_for_tool", fake_caller)
+
+    result = await mcp_server.create_room(name="unattended proof", principal_token="", ctx=None)
+    assert result["ok"] is True, result
+    assert result["join_token"], "the one thing a human hands to a friend"
+    assert result["participant_token"]
+
+    participant = await store.load_participant(result["participant_id"])
+    assert Scope.ROOM_ADMIN in participant.scopes, "the creator must be able to steer"
+    # The bound name, not the tool's "Room creator" default: the room an agent creates
+    # must not be the one place it can call itself anything.
+    assert participant.identity.display_name == "ChatGPT (Alan)"
