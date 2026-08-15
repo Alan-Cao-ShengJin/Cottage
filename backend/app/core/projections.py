@@ -21,12 +21,16 @@ from typing import Any
 from ..db import database as db
 from ..domain.identity import IdentityProvenance
 from ..domain.room import Participant, PrivacyClass, Room, Scope
+from ..domain.task import ConflictStatus
 from ..util import from_iso, utcnow
 from . import authz, presence, privacy, store
 
 log = logging.getLogger(__name__)
 
 MAX_SNAPSHOT_MESSAGES = 200
+#: Smaller than the snapshot cap on purpose: hydration is a resume payload for one
+#: participant, and every line of it is spent context for the model reading it.
+MAX_HYDRATION_MESSAGES = 25
 
 
 def _visible_record(
@@ -196,6 +200,133 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
         "tasks": visible_tasks,
         "messages": messages,
         "conflicts": [c.model_dump(mode="json") for c in conflicts],
+    }
+
+
+async def hydrate(*, room_id: str, recipient: Participant) -> dict[str, Any]:
+    """What *this* participant needs to resume, rather than everything about the room.
+
+    A control surface arrives cold. `snapshot` answers "what is going on here" and
+    costs the whole board; this answers "what was I doing, what is waiting on me, and
+    where do I resume" — so a human can open another authorized surface and continue
+    without asking every agent to recap (D-030).
+
+    It is deliberately **operational state, not conversation**. A hydration payload
+    cannot say what a human asked or which tradeoffs were weighed, and it must never be
+    presented as though it could: that is what continuity notes are for, and shipping
+    this first does not stand in for them (D-031).
+
+    Everything here is derived from the event log and filtered through the same
+    visibility rules as every other projection, so it discloses nothing a snapshot
+    would not.
+    """
+    async with db.transaction(write=False) as tx:
+        room = await store.load_room(room_id, tx=tx)
+        cursor = int(await tx.fetch_value("SELECT event_seq FROM rooms WHERE id = ?", (room_id,)))
+        tasks = await store.list_tasks(room_id, tx=tx)
+        work_rows = await tx.fetch_all(
+            "SELECT * FROM work_declarations WHERE room_id = ? AND participant_id = ? "
+            "AND ended_at IS NULL ORDER BY started_at ASC",
+            (room_id, recipient.id),
+        )
+        proposal_rows = await tx.fetch_all(
+            "SELECT * FROM task_proposals WHERE room_id = ? AND to_participant_id = ? "
+            "AND resolution IS NULL ORDER BY created_at ASC",
+            (room_id, recipient.id),
+        )
+        addressed_rows = await tx.fetch_all(
+            "SELECT * FROM messages WHERE room_id = ? AND to_participant_id = ? "
+            "ORDER BY seq DESC LIMIT ?",
+            (room_id, recipient.id, MAX_HYDRATION_MESSAGES),
+        )
+        conflicts = await store.list_conflicts(room_id, tx=tx)
+
+    now = utcnow()
+    by_id = {t.id: t for t in tasks}
+
+    # Leases, with the two facts a resuming runtime cannot reconstruct for itself: the
+    # fence it must present, and how long it has before the room takes the work back.
+    leases: list[dict[str, Any]] = []
+    for task in tasks:
+        if task.claim is None or task.claim.participant_id != recipient.id:
+            continue
+        remaining = (from_iso(task.claim.expires_at) - now).total_seconds()
+        leases.append(
+            {
+                "task_id": task.id,
+                "title": task.title,
+                "status": task.status.value,
+                "fence": task.claim.fence,
+                "expires_at": task.claim.expires_at,
+                "seconds_remaining": max(0, int(remaining)),
+                "targets": task.targets,
+            }
+        )
+
+    proposals = [
+        {
+            "proposal_id": row["id"],
+            "task_id": row["task_id"],
+            "title": by_id[row["task_id"]].title if row["task_id"] in by_id else "",
+            "proposed_by_participant_id": row["proposed_by_participant_id"],
+            "note": row["note"],
+            "created_at": row["created_at"],
+            "expires_at": row["expires_at"],
+        }
+        for row in proposal_rows
+        if row["task_id"] not in by_id
+        or _visible_record(
+            recipient=recipient,
+            room=room,
+            privacy_class=by_id[row["task_id"]].privacy_class,
+            owner_participant_id=by_id[row["task_id"]].created_by_participant_id,
+        )
+    ]
+
+    addressed = [
+        {
+            "id": row["id"],
+            "seq": int(row["seq"]),
+            "participant_id": row["participant_id"],
+            "body": row["body"],
+            "created_at": row["created_at"],
+        }
+        for row in reversed(addressed_rows)
+    ]
+
+    involving_me = [
+        c.model_dump(mode="json")
+        for c in conflicts
+        if c.status is ConflictStatus.OPEN and recipient.id in c.participant_ids
+    ]
+
+    return {
+        "type": "hydration",
+        "protocol": "arp/1",
+        "room": {
+            "id": room.id,
+            "name": room.name,
+            "purpose": room.purpose,
+            "status": room.status.value,
+        },
+        "you": {
+            "participant_id": recipient.id,
+            "display_name": recipient.identity.display_name,
+            "role": recipient.role.value,
+            "scopes": [s.value for s in recipient.scopes],
+            "trust": recipient.trust.value,
+        },
+        # Resume the stream from here. Named `cursor` to match await_room_events.
+        "cursor": cursor,
+        "your_work": [store.to_work(r).model_dump(mode="json") for r in work_rows],
+        "your_leases": leases,
+        "proposed_to_you": proposals,
+        "addressed_to_you": addressed,
+        "blocking_you": involving_me,
+        # Said explicitly rather than left to be inferred from empty lists, because a
+        # cold surface has no way to tell "nothing is waiting" from "nothing loaded".
+        "needs_you": len(proposals) + len(addressed) + len(involving_me),
+        "is_conversation_history": False,
     }
 
 

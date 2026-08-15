@@ -9,6 +9,7 @@ three gates in `core/privacy.py` — authorization, policy, inspection — and p
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from app.core import messages, privacy, tasks, work
 from app.core.errors import PrivacyViolation
@@ -327,3 +328,40 @@ async def test_the_disclosure_decision_is_recorded_on_the_event(make_room, join)
     assert row["actor_participant_id"] == alice.participant.id
     restricted = db.str_list(row["restricted_to_participant_ids"])
     assert set(restricted) == {alice.participant.id, bob.participant.id}
+
+
+async def test_a_misspelled_addressee_is_rejected_rather_than_published(make_room, join):
+    """An ignored field is a leak; a rejected command is a bad request.
+
+    `to_participant_id` is a real field name three places in this system — on
+    `Disclosure`, on messages, on task proposals — just not directly on
+    `PostMessageCommand`. So writing it there is the natural mistake, and Pydantic's
+    default of dropping unknown fields turns it into a silent privacy downgrade: the
+    author asked for one recipient and the room publishes to everyone, with no error
+    anywhere. That is the same shape as D-024, D-026, D-027 and D-030 — a control that
+    appears to work and does the opposite.
+    """
+    room = await make_room()
+    alice = await join(room, display_name="Alice")
+    bob = await join(room, display_name="Bob")
+
+    with pytest.raises(ValidationError) as rejected:
+        PostMessageCommand(body="salary figures", to_participant_id=bob.participant.id)
+    assert "to_participant_id" in str(rejected.value)
+
+    # The correct form still works, and lands as a restricted event rather than a
+    # room-wide one — so the rule rejects the mistake without narrowing the feature.
+    await messages.post(
+        participant=alice.participant,
+        command=PostMessageCommand(
+            body="salary figures",
+            disclosure=Disclosure(
+                audience=Audience.PARTICIPANT, to_participant_id=bob.participant.id
+            ),
+        ),
+    )
+    row = await db.fetch_one(
+        "SELECT * FROM room_events WHERE room_id = ? AND type = 'message.posted'",
+        (room.room.id,),
+    )
+    assert db.str_list(row["restricted_to_participant_ids"])

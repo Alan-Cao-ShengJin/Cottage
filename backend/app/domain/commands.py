@@ -8,7 +8,7 @@ after a timeout it could not distinguish from a failure.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .capabilities import Capability, HostClass
 from .disclosure import Disclosure, Provenance
@@ -26,7 +26,19 @@ from .work import WorkStatus
 
 
 class CommandMeta(BaseModel):
-    """Mixed into every command. Adapters must pass a stable `command_id`."""
+    """Mixed into every command. Adapters must pass a stable `command_id`.
+
+    Unknown fields are **rejected**, not ignored. Pydantic's default would drop them
+    silently, and for this domain that is a privacy failure rather than a nuisance:
+    `post_message(body=..., to_participant_id=...)` is a natural thing for an agent to
+    write — `to_participant_id` is a real field on `Disclosure`, on messages and on task
+    proposals — and silently dropping it publishes to the whole room content that was
+    addressed to one participant. The control appears to work and does the opposite,
+    which is the failure shape this codebase has shipped four times (D-024, D-026,
+    D-027, D-030). A rejected command is a bad request; an ignored field is a leak.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     command_id: str | None = None
 

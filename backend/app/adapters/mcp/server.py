@@ -644,6 +644,37 @@ async def leave_room(
 
 
 @mcp.tool()
+async def resume_here(
+    participant_token: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Pick up where you left off. Call this first when you arrive without context.
+
+    Returns only what concerns *you* — the work you declared, the leases you hold with
+    their fence numbers and how long is left on them, tasks proposed to you, messages
+    addressed to you, conflicts naming you, and the `cursor` to resume
+    `await_room_events` from. It is much smaller than `get_room_state`, which describes
+    the whole room.
+
+    **This is operational state, not conversation.** It can tell you what you were doing
+    and what is waiting on you. It cannot tell you what your human asked, what was
+    already discussed, or which options were rejected — do not present it as though it
+    could. If you need that, ask your human or read the room's messages.
+
+    `needs_you` counts the things actually waiting on you, so zero means nothing is
+    waiting rather than nothing loaded.
+    """
+    try:
+        participant = await _participant(ctx, participant_token)
+        return {
+            "ok": True,
+            **await projections.hydrate(room_id=participant.room_id, recipient=participant),
+        }
+    except RoomError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
 async def get_room_state(
     detail: str = "compact",
     max_messages: int = compact.DEFAULT_MAX_MESSAGES,
