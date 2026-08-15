@@ -85,11 +85,11 @@ typical declarations, not a policy (`docs/DECISIONS.md` D-010).
 cross-vendor evidence we have is that the protocols are standard. Until a second vendor's
 client actually joins, "cross-platform" is a design property, not an observed one.
 
-## 3. The conformance harness
+## 3. The conformance harness ✅
 
-`scripts/verify_oauth_flow.py` proves one path end to end. That is not enough for a claim
-about combinations, so M2.1 adds a harness that puts **N host families in one room
-simultaneously** and asserts:
+`backend/tests/test_interop_conformance.py` puts **four join paths in one room at once** —
+ARP HTTP + SSE (pushable), MCP autonomous, MCP attended, and a stranger authenticated by an
+invitation alone — and asserts:
 
 1. every participant appears to every other, with an honest liveness grade;
 2. a task claimed by one is refused to all others with `lease_conflict`;
@@ -100,7 +100,16 @@ simultaneously** and asserts:
 6. an `attended` participant is never assumed prompt by an `unattended_loop` one.
 
 Point 6 is the one that only appears in a mixed room, which is why a per-adapter test cannot
-replace this.
+replace this. A per-adapter suite can be entirely green while the *room* is incoherent: each
+participant correct alone, and a shared board that tells each of them something different.
+
+Two scripts sit alongside it, both driving a real deployment because unit tests cannot see
+what only exists over the wire: `scripts/verify_oauth_flow.py` (the OAuth + MCP handshake) and
+`scripts/verify_stranger_join.py` (the invited party's whole experience, from the invited
+party's side).
+
+**What it still does not prove.** Every client in the harness is ours. It establishes that the
+room stays coherent across four *paths*; it says nothing about four *vendors*.
 
 ## 4. What must stay true for universality
 

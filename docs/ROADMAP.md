@@ -140,12 +140,20 @@ shipped, against the constraints set out below:
   someone is `participant.removed`, a separate admin act — conflating them would mean revoking
   a 50-use link silently kicks everyone who used it.
 
-### M2.1 — Interop conformance harness
-Put N host families in one room simultaneously and assert the six properties in
-`docs/INTEROP.md` §3 — including the one that only appears in a mixed room: an
-`unattended_loop` participant must never be led to assume an `attended` one is prompt.
-Extend `test_three_execution_modes_coexist_with_honest_grades` from execution modes to
-adapters. **This lands first**, so every later path has a bar to clear.
+### M2.1 — Interop conformance harness ✅ (2026-08-15)
+`backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
+MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six
+properties from `docs/INTEROP.md` §3 asserted across them: mutual visibility with honest
+grades, one claim winner refused to every other path, stale fences refused whichever path
+presents them, a disconnect freeing work visibly to the rest, one event ordering with gaps
+only where privacy explains them, and — the one that cannot appear in a single-path test — an
+attended participant never presented as prompt to an autonomous one.
+
+It surfaced something worth keeping: on the bearer-invitation path *every* participant is a
+guest with a self-asserted name, because the invitation genuinely is the only authorization.
+That is correct and is now asserted rather than assumed away.
+
+The bar every later path must clear: add an adapter, add it to this harness.
 
 ### M2.2 — A2A adapter
 Agent card publication, inbound delivery, outbound push, untrusted trust tier with vouching,
