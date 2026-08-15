@@ -51,6 +51,7 @@ from ..domain.commands import (
 from ..domain.events import EventEnvelope, EventType
 from ..domain.room import Participant, Room, Scope
 from ..domain.task import HALTED_STEERING, HELD_TASK_STATUSES, Steering, Task, TaskStatus
+from ..domain.work import WorkEndReason
 from ..util import is_past, iso_in, normalize_target, utcnow_iso
 from . import authz, conflicts, eventlog, presence, privacy, store
 from .actors import SYSTEM_ACTOR, actor_for
@@ -1215,7 +1216,24 @@ async def complete(*, participant: Participant, command: CompleteTaskCommand) ->
             disclosure=decision,
             causation_id=command.command_id,
         )
-        return CommandOutcome(result={"task_id": command.task_id}, events=[event])
+        # The work card must not outlive the work on *this* path either. It was wired
+        # into `stop` when the stop proof exposed it and nowhere else, so a worker that
+        # finished normally left its card open until staleness reaped it — and the room
+        # described an idle companion as busy in between tasks (D-057).
+        from . import work as work_service
+
+        events = [
+            event,
+            *await work_service.end_for_task_tx(
+                tx,
+                room=room,
+                task_id=command.task_id,
+                actor=participant,
+                reason="task completed",
+                end_reason=WorkEndReason.COMPLETED,
+            ),
+        ]
+        return CommandOutcome(result={"task_id": command.task_id}, events=events)
 
     await execute_command(
         command_id=command.command_id,
@@ -1250,7 +1268,13 @@ async def cancel(*, participant: Participant, command: CancelTaskCommand) -> Tas
             SET status = 'cancelled', updated_at = ?, claim_lease_id = NULL,
                 claim_participant_id = NULL, claim_fence = NULL,
                 claim_claimed_at = NULL, claim_expires_at = NULL,
-                claim_heartbeat_interval_s = NULL, claim_renewed_at = NULL
+                claim_heartbeat_interval_s = NULL, claim_renewed_at = NULL,
+                -- Cleared with the claim, because an executor is a property *of a
+                -- lease* and cannot outlive one (D-044). This clause was missing:
+                -- cancelling a held task left the executor columns set, and the
+                -- schema CHECK — not review, again — is what caught it, the second
+                -- time this exact branch has been forgotten.
+                executor_attachment_id = NULL, executor_connection_id = NULL
             WHERE id = ? AND status NOT IN ('done','cancelled')
             """,
             (utcnow_iso(), command.task_id),
@@ -1265,7 +1289,21 @@ async def cancel(*, participant: Participant, command: CancelTaskCommand) -> Tas
             payload={"task_id": command.task_id, "reason": command.reason},
             causation_id=command.command_id,
         )
-        return CommandOutcome(result={"task_id": command.task_id}, events=[event])
+        from . import work as work_service
+
+        # Cancellation is the fourth exit from the lifecycle, and it had the same hole.
+        events = [
+            event,
+            *await work_service.end_for_task_tx(
+                tx,
+                room=room,
+                task_id=command.task_id,
+                actor=participant,
+                reason=command.reason or "task cancelled",
+                end_reason=WorkEndReason.SUPERSEDED,
+            ),
+        ]
+        return CommandOutcome(result={"task_id": command.task_id}, events=events)
 
     await execute_command(
         command_id=command.command_id,

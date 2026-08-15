@@ -283,7 +283,13 @@ async def end_all_open_tx(
 
 
 async def end_for_task_tx(
-    tx: db.Tx, *, room: Room, task_id: str, actor: Participant, reason: str
+    tx: db.Tx,
+    *,
+    room: Room,
+    task_id: str,
+    actor: Participant,
+    reason: str,
+    end_reason: WorkEndReason = WorkEndReason.SUPERSEDED,
 ) -> list[EventEnvelope]:
     """End the declarations attached to a task that has just stopped or finished.
 
@@ -291,6 +297,19 @@ async def end_for_task_tx(
     "Working: deploy the staging environment" against a task nobody held and
     nobody could claim — the board asserting activity that had been forbidden
     minutes earlier, which is worse than showing nothing.
+
+    **Called from every terminal path, not only the interesting one.** This was
+    wired into `stop` when the stop proof exposed it, and *not* into `complete` or
+    `cancel` — so a worker that finished normally left its card open until staleness
+    reaped it, and the room reported a busy worker between tasks. Found by the
+    ChatGPT participant watching a companion go idle and seeing `work.stale` instead
+    of `work.ended` (D-057). The lesson is that fixing a defect on the path that
+    surfaced it is half a fix: the bug was in the *lifecycle*, and the lifecycle has
+    four exits.
+
+    `end_reason` distinguishes them, because "finished" and "superseded by a human
+    stopping you" are different facts about the same card and a reader deciding
+    whether the work got done needs to tell them apart.
     """
     rows = await tx.fetch_all(
         "SELECT id, participant_id FROM work_declarations "
@@ -303,7 +322,7 @@ async def end_for_task_tx(
         await tx.execute(
             "UPDATE work_declarations SET ended_at = ?, end_reason = ?, updated_at = ? "
             "WHERE id = ? AND ended_at IS NULL",
-            (now, WorkEndReason.SUPERSEDED.value, now, row["id"]),
+            (now, end_reason.value, now, row["id"]),
         )
         events.append(
             await eventlog.append(
@@ -314,7 +333,7 @@ async def end_for_task_tx(
                 payload={
                     "work_id": row["id"],
                     "participant_id": row["participant_id"],
-                    "reason": WorkEndReason.SUPERSEDED.value,
+                    "reason": end_reason.value,
                     "detail": reason,
                     "task_id": task_id,
                 },
