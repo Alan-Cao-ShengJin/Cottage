@@ -12,6 +12,7 @@ import pytest
 
 from app.core import checkpoints, questions, store, tasks
 from app.core.errors import Forbidden, InvalidCommand, StaleFence
+from app.db import database as db
 from app.domain.commands import (
     AnswerQuestionCommand,
     AskQuestionCommand,
@@ -32,6 +33,25 @@ async def _claimed_task(room, member, *, title: str = "Deploy the thing"):
     )
     assert claimed.claim is not None
     return claimed
+
+
+async def test_question_retry_returns_original_without_a_second_event(make_room, join):
+    room = await make_room()
+    worker = await join(room, display_name="Worker")
+    command = AskQuestionCommand(command_id="cmd-question-retry", body="Which region?")
+
+    first = await questions.ask(participant=worker.participant, command=command)
+    seq_after_first = int(
+        await db.fetch_value("SELECT event_seq FROM rooms WHERE id = ?", (room.room.id,))
+    )
+    second = await questions.ask(participant=worker.participant, command=command)
+
+    assert second.id == first.id
+    assert await db.fetch_value("SELECT COUNT(*) FROM questions WHERE id = ?", (first.id,)) == 1
+    assert (
+        await db.fetch_value("SELECT event_seq FROM rooms WHERE id = ?", (room.room.id,))
+        == seq_after_first
+    )
 
 
 async def test_asking_needs_no_administrative_grant(make_room, join):

@@ -202,7 +202,7 @@ async def create(*, participant: Participant, command: CreateTaskCommand) -> Tas
     # On a replay the body never ran, so `task_id` above refers to nothing. The
     # receipt holds the id the original attempt created — an idempotent command must
     # return the original entity, not a phantom.
-    return await store.load_task(str(outcome.result.get("task_id", task_id)))
+    return await store.load_task_for_room(room.id, str(outcome.result.get("task_id", task_id)))
 
 
 # ---------------------------------------------------------------------------
@@ -270,8 +270,9 @@ async def _claim_tx(
     The WHERE clause is the whole concurrency control:
       * the task exists in this room and is not terminal;
       * and *either* nothing holds it, or what holds it has expired, or it is
-        already held by this same participant (idempotent re-claim).
+      already held by this same participant (idempotent re-claim).
     """
+    await store.load_task_for_room(room.id, task_id, tx=tx)
     row = await tx.fetch_one("SELECT * FROM tasks WHERE id = ? AND room_id = ?", (task_id, room.id))
     if row is None:
         raise NotFound("Task does not exist.", task_id=task_id)
@@ -345,7 +346,7 @@ async def _claim_tx(
         # rolls this transaction back, so anything appended would vanish. `claim`
         # records it afterwards, in its own committed transaction.
         holder_id = row["claim_participant_id"]
-        holder = await store.load_participant(holder_id) if holder_id else None
+        holder = await store.load_participant_for_room(room.id, holder_id) if holder_id else None
         raise LeaseConflict(
             "Another participant holds a valid lease on this task.",
             task_id=task_id,
@@ -354,7 +355,11 @@ async def _claim_tx(
             expires_at=row["claim_expires_at"],
         )
 
-    fence = int(await tx.fetch_value("SELECT fence FROM tasks WHERE id = ?", (task_id,)))
+    fence = int(
+        await tx.fetch_value(
+            "SELECT fence FROM tasks WHERE id = ? AND room_id = ?", (task_id, room.id)
+        )
+    )
     event = await eventlog.append(
         tx,
         room_id=room.id,
@@ -382,6 +387,11 @@ async def claim(*, participant: Participant, command: ClaimTaskCommand) -> Task:
     authz.require_scope(participant, Scope.TASK_CLAIM)
     authz.require_writable(room)
 
+    # Resolve caller-controlled ids through the tenant boundary before capability
+    # negotiation.  Otherwise a foreign id can produce a runtime-policy error while
+    # a missing id produces not_found, which is an existence oracle at both adapters.
+    before = await store.load_task_for_room(room.id, command.task_id)
+
     executor = await presence.resolve_executor(
         participant=participant, connection_id=command.connection_id
     )
@@ -397,8 +407,6 @@ async def claim(*, participant: Participant, command: ClaimTaskCommand) -> Task:
     # Snapshot the holder before attempting, so a lost race can be recorded as a
     # conflict in its own committed transaction rather than being rolled back with
     # the failed claim.
-    before = await store.load_task(command.task_id)
-
     async def body(tx: db.Tx) -> CommandOutcome:
         events = await _claim_tx(
             tx,
@@ -431,7 +439,7 @@ async def claim(*, participant: Participant, command: ClaimTaskCommand) -> Task:
             )
         raise
 
-    return await store.load_task(command.task_id)
+    return await store.load_task_for_room(room.id, command.task_id)
 
 
 async def _record_claim_race(
@@ -515,7 +523,7 @@ async def renew(*, participant: Participant, command: RenewClaimCommand) -> Task
         participant_id=participant.id,
         body=body,
     )
-    return await store.load_task(command.task_id)
+    return await store.load_task_for_room(room.id, command.task_id)
 
 
 async def release(*, participant: Participant, command: ReleaseClaimCommand) -> Task:
@@ -587,7 +595,7 @@ async def release(*, participant: Participant, command: ReleaseClaimCommand) -> 
         participant_id=participant.id,
         body=body,
     )
-    return await store.load_task(command.task_id)
+    return await store.load_task_for_room(room.id, command.task_id)
 
 
 async def release_all_claims_tx(
@@ -806,7 +814,10 @@ async def take_over_execution(
             )
 
         fence = int(
-            await tx.fetch_value("SELECT fence FROM tasks WHERE id = ?", (command.task_id,))
+            await tx.fetch_value(
+                "SELECT fence FROM tasks WHERE id = ? AND room_id = ?",
+                (command.task_id, room.id),
+            )
         )
         event = await eventlog.append(
             tx,
@@ -834,7 +845,7 @@ async def take_over_execution(
         participant_id=participant.id,
         body=body,
     )
-    return await store.load_task(command.task_id)
+    return await store.load_task_for_room(room.id, command.task_id)
 
 
 def require_not_halted(row, *, action: str) -> None:
@@ -1136,7 +1147,7 @@ async def update(*, participant: Participant, command: UpdateTaskCommand) -> Tas
         participant_id=participant.id,
         body=body,
     )
-    return await store.load_task(command.task_id)
+    return await store.load_task_for_room(room.id, command.task_id)
 
 
 async def complete(*, participant: Participant, command: CompleteTaskCommand) -> Task:
@@ -1194,7 +1205,10 @@ async def complete(*, participant: Participant, command: CompleteTaskCommand) ->
             (command.result, now, now, command.task_id, participant.id, now),
         )
         if affected == 0:
-            current = await tx.fetch_one("SELECT * FROM tasks WHERE id = ?", (command.task_id,))
+            current = await tx.fetch_one(
+                "SELECT * FROM tasks WHERE id = ? AND room_id = ?",
+                (command.task_id, room.id),
+            )
             if current is not None and current["status"] not in ("done", "cancelled"):
                 # The lease went away between the read and the write — expiry, or a
                 # reclaim by someone else. Re-deriving the reason from the row keeps
@@ -1242,7 +1256,7 @@ async def complete(*, participant: Participant, command: CompleteTaskCommand) ->
         participant_id=participant.id,
         body=body,
     )
-    return await store.load_task(command.task_id)
+    return await store.load_task_for_room(room.id, command.task_id)
 
 
 async def cancel(*, participant: Participant, command: CancelTaskCommand) -> Task:
@@ -1312,7 +1326,7 @@ async def cancel(*, participant: Participant, command: CancelTaskCommand) -> Tas
         participant_id=participant.id,
         body=body,
     )
-    return await store.load_task(command.task_id)
+    return await store.load_task_for_room(room.id, command.task_id)
 
 
 # ---------------------------------------------------------------------------

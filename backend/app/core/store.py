@@ -413,6 +413,21 @@ async def load_participant(participant_id: str, *, tx: db.Tx | None = None) -> P
     return to_participant(row, identity)
 
 
+async def load_participant_for_room(
+    room_id: str, participant_id: str, *, tx: db.Tx | None = None
+) -> Participant:
+    """Load a participant without revealing whether another room owns the id."""
+    row = await _one(
+        "SELECT * FROM participants WHERE id = ? AND room_id = ?",
+        (participant_id, room_id),
+        tx,
+    )
+    if row is None:
+        raise NotFound("Participant does not exist.", participant_id=participant_id)
+    identity = await load_identity_summary(row["agent_identity_id"], tx=tx)
+    return to_participant(row, identity)
+
+
 async def load_participant_by_token(token: str, *, tx: db.Tx | None = None) -> Participant:
     """Resolve a participant bearer token. Room-scoped and revocable by design.
 
@@ -557,6 +572,21 @@ async def load_task(task_id: str, *, tx: db.Tx | None = None) -> Task:
     return to_task(row)
 
 
+async def load_task_for_room(room_id: str, task_id: str, *, tx: db.Tx | None = None) -> Task:
+    """Load a task only through its room boundary.
+
+    Resource ids are caller-controlled.  Looking up an id globally and checking its
+    room afterwards turns the difference between "missing" and "belongs to another
+    tenant" into an existence oracle.  Commands use this loader inside their write
+    transaction, before any mutation, so both cases fail with the same ``not_found``
+    and the transaction (including its command receipt) rolls back cleanly.
+    """
+    row = await _one("SELECT * FROM tasks WHERE id = ? AND room_id = ?", (task_id, room_id), tx)
+    if row is None:
+        raise NotFound("Task does not exist.", task_id=task_id)
+    return to_task(row)
+
+
 async def list_tasks(room_id: str, *, tx: db.Tx | None = None) -> list[Task]:
     rows = await _all(
         "SELECT * FROM tasks WHERE room_id = ? ORDER BY priority DESC, created_at ASC",
@@ -568,6 +598,20 @@ async def list_tasks(room_id: str, *, tx: db.Tx | None = None) -> list[Task]:
 
 async def load_work(work_id: str, *, tx: db.Tx | None = None) -> WorkDeclaration:
     row = await _one("SELECT * FROM work_declarations WHERE id = ?", (work_id,), tx)
+    if row is None:
+        raise NotFound("Work declaration does not exist.", work_id=work_id)
+    return to_work(row)
+
+
+async def load_work_for_room(
+    room_id: str, work_id: str, *, tx: db.Tx | None = None
+) -> WorkDeclaration:
+    """Load a work declaration without disclosing whether another room owns its id."""
+    row = await _one(
+        "SELECT * FROM work_declarations WHERE id = ? AND room_id = ?",
+        (work_id, room_id),
+        tx,
+    )
     if row is None:
         raise NotFound("Work declaration does not exist.", work_id=work_id)
     return to_work(row)

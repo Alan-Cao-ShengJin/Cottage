@@ -520,6 +520,7 @@ async def claim_task(
     room_id: str, participant: ParticipantDep, command: ClaimTaskCommand
 ) -> dict[str, Any]:
     _assert_room(participant, room_id)
+    await store.load_task_for_room(room_id, command.task_id)
     task = await tasks.claim(participant=participant, command=command)
     return {"ok": True, "task": task.model_dump(mode="json")}
 
@@ -663,9 +664,7 @@ async def get_task(room_id: str, task_id: str, participant: ParticipantDep) -> d
     """
     _assert_room(participant, room_id)
     authz.require_scope(participant, Scope.TASK_READ)
-    task = await store.load_task(task_id)
-    if task.room_id != room_id:
-        raise Forbidden("That task is not in this room.", task_id=task_id)
+    task = await store.load_task_for_room(room_id, task_id)
     return {"ok": True, "task": task.model_dump(mode="json")}
 
 
@@ -679,8 +678,11 @@ async def list_checkpoints(
     """The latest N, oldest-first, with the total so truncation is visible (D-043)."""
     _assert_room(participant, room_id)
     authz.require_scope(participant, Scope.TASK_READ)
-    rows = await checkpoints.latest_for_task(task_id, recipient=participant, limit=limit)
-    total = await checkpoints.count_for_task(task_id)
+    await store.load_task_for_room(room_id, task_id)
+    rows = await checkpoints.latest_for_task(
+        task_id, recipient=participant, limit=limit, room_id=room_id
+    )
+    total = await checkpoints.count_for_task(task_id, room_id=room_id)
     return {
         "ok": True,
         "checkpoints": [c.model_dump(mode="json") for c in rows],

@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 from app.core import rooms, store
-from app.core.errors import Forbidden
+from app.core.errors import Forbidden, Unauthenticated
 from app.db import database as db
 from app.domain.capabilities import HostClass
 from app.domain.commands import CreateRoomCommand
@@ -136,6 +136,86 @@ async def test_a_human_principal_still_works_unchanged(fresh_db, org):
     )
     assert Scope.ROOM_ADMIN in created.participant.scopes
     assert created.room.org_id == org_id
+
+
+async def test_room_create_retry_uses_stable_creator_binding_and_rotates_tokens(fresh_db, org):
+    org_id, user_id = org
+    identity = await _identity(org_id, user_id)
+    principal = await _principal_for(identity)
+    command = CreateRoomCommand(command_id="cmd-room-create-retry", name="Only one room")
+
+    first = await rooms.create_room(principal=principal, command=command)
+    seq_after_first = first.room.event_seq
+    second = await rooms.create_room(principal=principal, command=command)
+
+    assert second.room.id == first.room.id
+    assert second.participant.id == first.participant.id
+    assert second.invitation_id == first.invitation_id
+    assert second.room.event_seq == seq_after_first
+    assert await db.fetch_value("SELECT COUNT(*) FROM rooms WHERE name = 'Only one room'") == 1
+    receipt = await db.fetch_one(
+        "SELECT * FROM command_receipts WHERE command_type = 'room.create'"
+    )
+    assert receipt is not None
+    assert receipt["room_id"] == org_id
+    assert receipt["participant_id"] == identity.id
+
+    with pytest.raises(Unauthenticated):
+        await store.load_participant_by_token(first.participant_token)
+    with pytest.raises(Unauthenticated):
+        await rooms.authenticate_invitation(first.join_token)
+    assert (
+        await store.load_participant_by_token(second.participant_token)
+    ).id == first.participant.id
+    assert (
+        await rooms.authenticate_invitation(second.join_token)
+    ).invitation.id == first.invitation_id
+
+
+async def test_room_create_matching_legacy_receipt_replays_for_same_creator(fresh_db, org):
+    org_id, user_id = org
+    identity = await _identity(org_id, user_id)
+    principal = await _principal_for(identity)
+    first = await rooms.create_room(
+        principal=principal, command=CreateRoomCommand(name="Legacy room")
+    )
+    await db.execute(
+        """
+        INSERT INTO command_receipts (
+            command_id, room_id, participant_id, command_type, seq, result, created_at
+        ) VALUES (?,?,?,?,?,?,?)
+        """,
+        (
+            "legacy-room-create",
+            first.room.id,
+            first.participant.id,
+            "room.create",
+            first.room.event_seq,
+            db.dumps(
+                {
+                    "room_id": first.room.id,
+                    "participant_id": first.participant.id,
+                    "invitation_id": first.invitation_id,
+                }
+            ),
+            "2026-08-16T00:00:00+00:00",
+        ),
+    )
+
+    replayed = await rooms.create_room(
+        principal=principal,
+        command=CreateRoomCommand(command_id="legacy-room-create", name="must not exist"),
+    )
+
+    assert replayed.room.id == first.room.id
+    assert replayed.participant.id == first.participant.id
+    assert await db.fetch_value("SELECT COUNT(*) FROM rooms") == 1
+    assert await db.fetch_value("SELECT COUNT(*) FROM command_receipts") == 1
+    with pytest.raises(Unauthenticated):
+        await store.load_participant_by_token(first.participant_token)
+    assert (
+        await store.load_participant_by_token(replayed.participant_token)
+    ).id == first.participant.id
 
 
 async def test_the_room_is_attributed_to_the_human_behind_the_agent(fresh_db, org):

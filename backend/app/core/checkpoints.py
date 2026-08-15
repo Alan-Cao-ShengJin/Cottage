@@ -36,7 +36,7 @@ from ..util import utcnow_iso
 from . import authz, eventlog, presence, privacy, store, tasks, work
 from .actors import actor_for
 from .dispatch import CommandOutcome, execute_command
-from .errors import NotFound
+from .errors import InvalidCommand, NotFound
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +88,7 @@ async def append(*, participant: Participant, command: AppendCheckpointCommand) 
     now = utcnow_iso()
 
     async def body(tx: db.Tx) -> CommandOutcome:
+        await store.load_task_for_room(room.id, command.task_id, tx=tx)
         row = await tx.fetch_one(
             "SELECT * FROM tasks WHERE id = ? AND room_id = ?", (command.task_id, room.id)
         )
@@ -182,7 +183,7 @@ async def append(*, participant: Participant, command: AppendCheckpointCommand) 
     # never ran, so the local id names a checkpoint that was never written. Returning
     # it would turn a safe retry into a confusing 404 — the failure this exact line
     # produced the first time it was tested.
-    return await load(outcome.result["checkpoint_id"], recipient=participant)
+    return await load_for_room(room.id, outcome.result["checkpoint_id"], recipient=participant)
 
 
 async def append_tx(
@@ -316,8 +317,33 @@ def _may_see_resume(row: Any, recipient: Participant | None) -> bool:
     return recipient.has(Scope.ROOM_ADMIN) and recipient.room_id == row["room_id"]
 
 
-async def load(checkpoint_id: str, *, recipient: Participant | None = None) -> Checkpoint:
-    row = await db.fetch_one("SELECT * FROM task_checkpoints WHERE id = ?", (checkpoint_id,))
+async def load(
+    checkpoint_id: str,
+    *,
+    recipient: Participant | None = None,
+    room_id: str | None = None,
+) -> Checkpoint:
+    scoped_room_id = room_id or (recipient.room_id if recipient is not None else None)
+    if scoped_room_id is None:
+        raise InvalidCommand("Checkpoint reads require a room or recipient binding.")
+    if recipient is not None and recipient.room_id != scoped_room_id:
+        raise NotFound("Checkpoint does not exist.", checkpoint_id=checkpoint_id)
+    return await load_for_room(scoped_room_id, checkpoint_id, recipient=recipient)
+
+
+async def load_for_room(
+    room_id: str,
+    checkpoint_id: str,
+    *,
+    recipient: Participant | None = None,
+    tx: db.Tx | None = None,
+) -> Checkpoint:
+    sql = "SELECT * FROM task_checkpoints WHERE id = ? AND room_id = ?"
+    row = await (
+        tx.fetch_one(sql, (checkpoint_id, room_id))
+        if tx is not None
+        else db.fetch_one(sql, (checkpoint_id, room_id))
+    )
     if row is None:
         raise NotFound("Checkpoint does not exist.", checkpoint_id=checkpoint_id)
     return _to_checkpoint(row, include_resume=_may_see_resume(row, recipient))
@@ -328,6 +354,7 @@ async def latest_for_task(
     *,
     recipient: Participant | None = None,
     limit: int = DEFAULT_LATEST,
+    room_id: str | None = None,
     tx: db.Tx | None = None,
 ) -> list[Checkpoint]:
     """The most recent checkpoints, oldest-first within the window.
@@ -338,16 +365,27 @@ async def latest_for_task(
     makes a progress record read as a countdown.
     """
     limit = max(1, min(int(limit), MAX_PAGE))
-    sql = "SELECT * FROM task_checkpoints WHERE task_id = ? ORDER BY seq DESC LIMIT ?"
-    rows = await (
-        tx.fetch_all(sql, (task_id, limit)) if tx else db.fetch_all(sql, (task_id, limit))
+    scoped_room_id = room_id or (recipient.room_id if recipient is not None else None)
+    if scoped_room_id is None:
+        raise InvalidCommand("Checkpoint reads require a room or recipient binding.")
+    if recipient is not None and recipient.room_id != scoped_room_id:
+        raise NotFound("Task does not exist.", task_id=task_id)
+    sql = (
+        "SELECT * FROM task_checkpoints WHERE task_id = ? AND room_id = ? ORDER BY seq DESC LIMIT ?"
     )
+    args = (task_id, scoped_room_id, limit)
+    rows = await (tx.fetch_all(sql, args) if tx else db.fetch_all(sql, args))
     out = [_to_checkpoint(r, include_resume=_may_see_resume(r, recipient)) for r in reversed(rows)]
     return out
 
 
-async def count_for_task(task_id: str, *, tx: db.Tx | None = None) -> int:
+async def count_for_task(
+    task_id: str, *, room_id: str | None = None, tx: db.Tx | None = None
+) -> int:
     """So a truncated list can say it truncated (D-043)."""
-    sql = "SELECT COUNT(*) FROM task_checkpoints WHERE task_id = ?"
-    value = await (tx.fetch_value(sql, (task_id,)) if tx else db.fetch_value(sql, (task_id,)))
+    if room_id is None:
+        raise InvalidCommand("Checkpoint counts require an explicit room binding.")
+    sql = "SELECT COUNT(*) FROM task_checkpoints WHERE task_id = ? AND room_id = ?"
+    args = (task_id, room_id)
+    value = await (tx.fetch_value(sql, args) if tx else db.fetch_value(sql, args))
     return int(value or 0)

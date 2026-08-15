@@ -44,6 +44,31 @@ async def _admin(room, join):
     )
 
 
+async def test_directive_retry_returns_original_without_a_second_event(make_room, join):
+    room = await make_room()
+    admin = await _admin(room, join)
+    worker = await join(room, display_name="Worker")
+    command = IssueDirectiveCommand(
+        command_id="cmd-directive-retry",
+        target_participant_id=worker.participant.id,
+        action=DirectiveAction.INPUT,
+        reason="Use the staged value.",
+    )
+
+    first = await directives.issue(participant=admin.participant, command=command)
+    seq_after_first = int(
+        await db.fetch_value("SELECT event_seq FROM rooms WHERE id = ?", (room.room.id,))
+    )
+    second = await directives.issue(participant=admin.participant, command=command)
+
+    assert second.id == first.id
+    assert await db.fetch_value("SELECT COUNT(*) FROM directives WHERE id = ?", (first.id,)) == 1
+    assert (
+        await db.fetch_value("SELECT event_seq FROM rooms WHERE id = ?", (room.room.id,))
+        == seq_after_first
+    )
+
+
 async def _worker(room, join, label: str = "worker"):
     member = await join(room, display_name="Worker", connect=False)
     negotiated = await presence.connect(

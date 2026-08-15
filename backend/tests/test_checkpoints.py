@@ -226,7 +226,7 @@ async def test_a_retry_does_not_double_the_record(make_room, join):
     second = await checkpoints.append(participant=worker.participant, command=command)
 
     assert first.id == second.id
-    assert await checkpoints.count_for_task(task.id) == 1
+    assert await checkpoints.count_for_task(task.id, room_id=room.room.id) == 1
 
 
 async def test_nothing_in_the_codebase_can_edit_a_checkpoint():
@@ -267,7 +267,7 @@ async def test_the_latest_window_keeps_the_newest_and_returns_them_in_order(make
 
     window = await checkpoints.latest_for_task(task.id, recipient=worker.participant, limit=3)
     assert [c.summary for c in window] == ["step 5", "step 6", "step 7"]
-    assert await checkpoints.count_for_task(task.id) == 7
+    assert await checkpoints.count_for_task(task.id, room_id=room.room.id) == 7
 
 
 async def test_hydration_carries_your_own_progress_and_not_someone_elses(make_room, join):

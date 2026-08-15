@@ -68,12 +68,7 @@ async def issue(*, participant: Participant, command: IssueDirectiveCommand) -> 
         what=f"{command.action.value} another participant's work",
     )
 
-    target = await store.load_participant(command.target_participant_id)
-    if target.room_id != room.id:
-        raise NotFound(
-            "That participant is not in this room.",
-            target_participant_id=command.target_participant_id,
-        )
+    target = await store.load_participant_for_room(room.id, command.target_participant_id)
     if command.action in CONTROL_ACTIONS and command.task_id is None:
         raise InvalidCommand(
             "A control directive needs a task. Pausing or stopping 'in general' is "
@@ -91,6 +86,8 @@ async def issue(*, participant: Participant, command: IssueDirectiveCommand) -> 
 
     async def body(tx: db.Tx) -> CommandOutcome:
         events: list[EventEnvelope] = []
+        if command.task_id is not None:
+            await store.load_task_for_room(room.id, command.task_id, tx=tx)
         if applies_now and command.task_id is not None:
             events += await tasks.apply_steering_tx(
                 tx,
@@ -147,14 +144,14 @@ async def issue(*, participant: Participant, command: IssueDirectiveCommand) -> 
         )
         return CommandOutcome(result={"directive_id": directive_id}, events=events)
 
-    await execute_command(
+    outcome = await execute_command(
         command_id=command.command_id,
         command_type="directive.issue",
         room_id=room.id,
         participant_id=participant.id,
         body=body,
     )
-    return await load(directive_id)
+    return await load_for_room(room.id, str(outcome.result.get("directive_id", directive_id)))
 
 
 async def acknowledge(
@@ -225,18 +222,32 @@ async def acknowledge(
         )
         return CommandOutcome(result={"directive_id": command.directive_id}, events=[event])
 
-    await execute_command(
+    outcome = await execute_command(
         command_id=command.command_id,
         command_type="directive.acknowledge",
         room_id=room.id,
         participant_id=participant.id,
         body=body,
     )
-    return await load(command.directive_id)
+    return await load_for_room(
+        room.id, str(outcome.result.get("directive_id", command.directive_id))
+    )
 
 
 async def load(directive_id: str) -> Directive:
     row = await db.fetch_one("SELECT * FROM directives WHERE id = ?", (directive_id,))
+    if row is None:
+        raise NotFound("Directive does not exist.", directive_id=directive_id)
+    return store.to_directive(row)
+
+
+async def load_for_room(room_id: str, directive_id: str, *, tx: db.Tx | None = None) -> Directive:
+    sql = "SELECT * FROM directives WHERE id = ? AND room_id = ?"
+    row = await (
+        tx.fetch_one(sql, (directive_id, room_id))
+        if tx is not None
+        else db.fetch_one(sql, (directive_id, room_id))
+    )
     if row is None:
         raise NotFound("Directive does not exist.", directive_id=directive_id)
     return store.to_directive(row)

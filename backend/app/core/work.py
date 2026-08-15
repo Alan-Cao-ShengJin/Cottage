@@ -58,6 +58,8 @@ async def declare(*, participant: Participant, command: DeclareWorkCommand) -> W
     now = utcnow_iso()
 
     async def body(tx: db.Tx) -> CommandOutcome:
+        if command.task_id is not None:
+            await store.load_task_for_room(room.id, command.task_id, tx=tx)
         await tx.execute(
             """
             INSERT INTO work_declarations (
@@ -118,7 +120,7 @@ async def declare(*, participant: Participant, command: DeclareWorkCommand) -> W
     )
     # A replay must return the declaration the first attempt created; `work_id` above
     # was generated for a body that never ran.
-    return await store.load_work(str(outcome.result.get("work_id", work_id)))
+    return await store.load_work_for_room(room.id, str(outcome.result.get("work_id", work_id)))
 
 
 async def update(*, participant: Participant, command: UpdateWorkCommand) -> WorkDeclaration:
@@ -126,37 +128,36 @@ async def update(*, participant: Participant, command: UpdateWorkCommand) -> Wor
     authz.require_scope(participant, Scope.WORK_DECLARE)
     authz.require_writable(room)
 
-    existing = await store.load_work(command.work_id)
-    if existing.room_id != room.id:
-        raise InvalidCommand("That work declaration belongs to another room.")
-    # Ownership is checked separately from scope: holding `work.declare` does not
-    # let you rewrite someone else's declaration, which would forge attribution.
-    authz.require_owns(participant, existing.participant_id, what="work declarations")
-    if existing.ended_at:
-        raise InvalidCommand("That work declaration has already ended.")
-
     privacy.inspect_content(command.headline or "", command.note or "", command.targets or [])
 
-    headline = command.headline if command.headline is not None else existing.headline
-    note = command.note if command.note is not None else existing.note
-    status = command.status or existing.status
-    targets = (
-        _normalized_targets(command.targets) if command.targets is not None else existing.targets
-    )
-    expected = (
-        command.expected_done_by
-        if command.expected_done_by is not None
-        else existing.expected_done_by
-    )
-    now = utcnow_iso()
-
     async def body(tx: db.Tx) -> CommandOutcome:
+        existing = await store.load_work_for_room(room.id, command.work_id, tx=tx)
+        # Ownership is checked separately from scope: holding `work.declare` does not
+        # let you rewrite someone else's declaration, which would forge attribution.
+        authz.require_owns(participant, existing.participant_id, what="work declarations")
+        if existing.ended_at:
+            raise InvalidCommand("That work declaration has already ended.")
+
+        headline = command.headline if command.headline is not None else existing.headline
+        note = command.note if command.note is not None else existing.note
+        status = command.status or existing.status
+        targets = (
+            _normalized_targets(command.targets)
+            if command.targets is not None
+            else existing.targets
+        )
+        expected = (
+            command.expected_done_by
+            if command.expected_done_by is not None
+            else existing.expected_done_by
+        )
+        now = utcnow_iso()
         await tx.execute(
             """
             UPDATE work_declarations
             SET headline = ?, status = ?, targets = ?, note = ?,
                 expected_done_by = ?, updated_at = ?, heartbeat_at = ?, progress_at = ?
-            WHERE id = ? AND ended_at IS NULL
+            WHERE id = ? AND room_id = ? AND ended_at IS NULL
             """,
             (
                 headline,
@@ -171,6 +172,7 @@ async def update(*, participant: Participant, command: UpdateWorkCommand) -> Wor
                 # say "yes, really, still moving" when a step is unusually long.
                 now,
                 command.work_id,
+                room.id,
             ),
         )
         event = await eventlog.append(
@@ -196,29 +198,30 @@ async def update(*, participant: Participant, command: UpdateWorkCommand) -> Wor
             )
         return CommandOutcome(result={"work_id": command.work_id}, events=events)
 
-    await execute_command(
+    outcome = await execute_command(
         command_id=command.command_id,
         command_type="work.update",
         room_id=room.id,
         participant_id=participant.id,
         body=body,
     )
-    return await store.load_work(command.work_id)
+    return await store.load_work_for_room(
+        room.id, str(outcome.result.get("work_id", command.work_id))
+    )
 
 
 async def end(*, participant: Participant, command: EndWorkCommand) -> WorkDeclaration:
     room = await store.load_room(participant.room_id)
     authz.require_scope(participant, Scope.WORK_DECLARE)
 
-    existing = await store.load_work(command.work_id)
-    authz.require_owns(participant, existing.participant_id, what="work declarations")
-
     async def body(tx: db.Tx) -> CommandOutcome:
+        existing = await store.load_work_for_room(room.id, command.work_id, tx=tx)
+        authz.require_owns(participant, existing.participant_id, what="work declarations")
         affected = await tx.execute(
             """
             UPDATE work_declarations
             SET ended_at = ?, end_reason = ?, status = ?, updated_at = ?, note = ?
-            WHERE id = ? AND ended_at IS NULL
+            WHERE id = ? AND room_id = ? AND ended_at IS NULL
             """,
             (
                 utcnow_iso(),
@@ -227,6 +230,7 @@ async def end(*, participant: Participant, command: EndWorkCommand) -> WorkDecla
                 utcnow_iso(),
                 command.note or existing.note,
                 command.work_id,
+                room.id,
             ),
         )
         if affected == 0:
@@ -248,14 +252,16 @@ async def end(*, participant: Participant, command: EndWorkCommand) -> WorkDecla
         )
         return CommandOutcome(result={"work_id": command.work_id}, events=[event])
 
-    await execute_command(
+    outcome = await execute_command(
         command_id=command.command_id,
         command_type="work.end",
         room_id=room.id,
         participant_id=participant.id,
         body=body,
     )
-    return await store.load_work(command.work_id)
+    return await store.load_work_for_room(
+        room.id, str(outcome.result.get("work_id", command.work_id))
+    )
 
 
 async def end_all_open_tx(

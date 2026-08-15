@@ -113,14 +113,8 @@ async def ask(*, participant: Participant, command: AskQuestionCommand) -> Quest
             task_id=command.task_id,
         )
 
-    target = None
     if command.to_participant_id is not None:
-        target = await store.load_participant(command.to_participant_id)
-        if target.room_id != room.id:
-            raise NotFound(
-                "That participant is not in this room.",
-                to_participant_id=command.to_participant_id,
-            )
+        await store.load_participant_for_room(room.id, command.to_participant_id)
 
     # Room-public even when addressed: addressing says who is *expected* to answer.
     # Restricting the body would mean an unanswered question is invisible to the one
@@ -137,6 +131,8 @@ async def ask(*, participant: Participant, command: AskQuestionCommand) -> Quest
 
     async def body(tx: db.Tx) -> CommandOutcome:
         events: list[EventEnvelope] = []
+        if command.task_id is not None:
+            await store.load_task_for_room(room.id, command.task_id, tx=tx)
         asking = await _speaking_runtime(participant, command.connection_id, tx=tx)
         if command.blocking:
             events += await _park_task_tx(
@@ -186,14 +182,14 @@ async def ask(*, participant: Participant, command: AskQuestionCommand) -> Quest
         )
         return CommandOutcome(result={"question_id": question_id}, events=events)
 
-    await execute_command(
+    outcome = await execute_command(
         command_id=command.command_id,
         command_type="question.ask",
         room_id=room.id,
         participant_id=participant.id,
         body=body,
     )
-    return await load(question_id)
+    return await load_for_room(room.id, str(outcome.result.get("question_id", question_id)))
 
 
 async def _park_task_tx(
@@ -404,14 +400,14 @@ async def answer(*, participant: Participant, command: AnswerQuestionCommand) ->
             )
         return CommandOutcome(result={"answer_id": answer_id}, events=events)
 
-    await execute_command(
+    outcome = await execute_command(
         command_id=command.command_id,
         command_type="question.answer",
         room_id=room.id,
         participant_id=participant.id,
         body=body,
     )
-    return await load_answer(answer_id)
+    return await load_answer_for_room(room.id, str(outcome.result.get("answer_id", answer_id)))
 
 
 async def _unpark_task_tx(
@@ -455,8 +451,32 @@ async def load(question_id: str) -> Question:
     return store.to_question(row)
 
 
+async def load_for_room(room_id: str, question_id: str, *, tx: db.Tx | None = None) -> Question:
+    sql = "SELECT * FROM questions WHERE id = ? AND room_id = ?"
+    row = await (
+        tx.fetch_one(sql, (question_id, room_id))
+        if tx is not None
+        else db.fetch_one(sql, (question_id, room_id))
+    )
+    if row is None:
+        raise NotFound("Question does not exist.", question_id=question_id)
+    return store.to_question(row)
+
+
 async def load_answer(answer_id: str) -> Answer:
     row = await db.fetch_one("SELECT * FROM answers WHERE id = ?", (answer_id,))
+    if row is None:
+        raise NotFound("Answer does not exist.", answer_id=answer_id)
+    return store.to_answer(row)
+
+
+async def load_answer_for_room(room_id: str, answer_id: str, *, tx: db.Tx | None = None) -> Answer:
+    sql = "SELECT * FROM answers WHERE id = ? AND room_id = ?"
+    row = await (
+        tx.fetch_one(sql, (answer_id, room_id))
+        if tx is not None
+        else db.fetch_one(sql, (answer_id, room_id))
+    )
     if row is None:
         raise NotFound("Answer does not exist.", answer_id=answer_id)
     return store.to_answer(row)

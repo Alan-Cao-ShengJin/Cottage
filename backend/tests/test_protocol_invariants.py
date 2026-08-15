@@ -324,6 +324,103 @@ async def test_i3_concurrent_duplicate_command_ids_execute_once(make_room, join)
     assert len(rows) == 1
 
 
+async def test_i3_same_client_id_is_independent_across_rooms(make_room):
+    first_room = await make_room(name="Receipt room A")
+    second_room = await make_room(name="Receipt room B")
+    command_id = "client-local-id"
+
+    first = await tasks.create(
+        participant=first_room.owner,
+        command=CreateTaskCommand(command_id=command_id, title="Room A task"),
+    )
+    second = await tasks.create(
+        participant=second_room.owner,
+        command=CreateTaskCommand(command_id=command_id, title="Room B task"),
+    )
+
+    assert first.room_id == first_room.room.id
+    assert second.room_id == second_room.room.id
+    assert first.id != second.id
+    receipts = await db.fetch_all(
+        "SELECT command_id, room_id FROM command_receipts WHERE command_type = 'task.create'"
+    )
+    scoped = [r for r in receipts if r["room_id"] in {first.room_id, second.room_id}]
+    assert len(scoped) == 2
+    assert all(r["command_id"].startswith("receipt:v2:") for r in scoped)
+
+
+async def test_i3_same_client_id_is_independent_across_participants_and_types(make_room, join):
+    room = await make_room()
+    alice = await join(room, display_name="Alice")
+    bob = await join(room, display_name="Bob")
+    command_id = "shared-client-counter"
+
+    alice_message = await messages.post(
+        participant=alice.participant,
+        command=PostMessageCommand(command_id=command_id, body="from Alice"),
+    )
+    bob_message = await messages.post(
+        participant=bob.participant,
+        command=PostMessageCommand(command_id=command_id, body="from Bob"),
+    )
+    task = await tasks.create(
+        participant=alice.participant,
+        command=CreateTaskCommand(command_id=command_id, title="not a replayed message"),
+    )
+
+    assert alice_message["message_id"] != bob_message["message_id"]
+    assert task.title == "not a replayed message"
+    assert (
+        await db.fetch_value(
+            "SELECT COUNT(*) FROM command_receipts WHERE room_id = ?",
+            (room.room.id,),
+        )
+        == 3
+    )
+
+
+async def test_i3_matching_legacy_raw_receipt_replays_but_foreign_binding_does_not(
+    make_room,
+):
+    first_room = await make_room(name="Legacy A")
+    second_room = await make_room(name="Legacy B")
+    original = await tasks.create(
+        participant=first_room.owner,
+        command=CreateTaskCommand(title="Legacy original"),
+    )
+    before = await eventlog.current_seq(first_room.room.id)
+    await db.execute(
+        """
+        INSERT INTO command_receipts (
+            command_id, room_id, participant_id, command_type, seq, result, created_at
+        ) VALUES (?,?,?,?,?,?,?)
+        """,
+        (
+            "legacy-raw-id",
+            first_room.room.id,
+            first_room.owner.id,
+            "task.create",
+            before,
+            db.dumps({"task_id": original.id}),
+            "2026-08-16T00:00:00+00:00",
+        ),
+    )
+
+    replayed = await tasks.create(
+        participant=first_room.owner,
+        command=CreateTaskCommand(command_id="legacy-raw-id", title="must not be created"),
+    )
+    independent = await tasks.create(
+        participant=second_room.owner,
+        command=CreateTaskCommand(command_id="legacy-raw-id", title="independent room"),
+    )
+
+    assert replayed.id == original.id
+    assert await eventlog.current_seq(first_room.room.id) == before
+    assert independent.room_id == second_room.room.id
+    assert independent.title == "independent room"
+
+
 # ===========================================================================
 # I4 — reconnect from seq=N cannot silently miss authorized events
 # ===========================================================================
