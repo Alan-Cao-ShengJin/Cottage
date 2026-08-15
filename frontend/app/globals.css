@@ -243,6 +243,15 @@ code {
   color: var(--text-dim);
 }
 
+/* A guest's display name is its own claim. Rendered distinctly on purpose: two names that
+   look identical but are worth different amounts is the confusion this prevents. */
+.self-asserted {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--warn, #b45309);
+  margin-top: 2px;
+}
+
 /* Capability chips: the honest statement of what a participant can do. */
 .chips {
   display: flex;

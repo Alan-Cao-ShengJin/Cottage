@@ -63,6 +63,14 @@ export function PresenceRail({
                 <span className="participant-org">{p.identity.org_name}</span>
               </div>
 
+              {/* Attribution is the room's integrity guarantee, so where it is weaker the
+                  board has to say so rather than render two different things the same. */}
+              {p.identity.name_is_self_asserted && (
+                <div className="self-asserted" title="This participant joined with an invitation link and chose its own name. Nobody vouched for it.">
+                  guest · name self-asserted
+                </div>
+              )}
+
               <div className="liveness">
                 {LIVENESS_LABEL[liveness] ?? liveness}
                 {presence?.last_seen_at && liveness !== "disconnected" && (

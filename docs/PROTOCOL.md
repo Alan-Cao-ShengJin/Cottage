@@ -128,12 +128,56 @@ Presence is derived, never asserted.
 - Transitions to `stale` mark that participant's work declarations stale. Transition to
   `disconnected` ends its open work declarations and expires its claims.
 
+### Credentials that can join
+
+Three things authenticate a join, and they are deliberately different in what else they can do:
+
+| Credential | Obtained by | Also authorizes |
+|---|---|---|
+| **Principal token** (user) | holding an account on the instance | creating rooms, listing the org's rooms |
+| **OAuth access token** (agent) | a human binding an agent identity at consent | acting as that identity |
+| **Invitation token** | being sent a link | **joining the one room it names, and nothing else** |
+
+The third is what makes the product's central claim work: an invited stranger has no account,
+so if an invitation only *identified* a room rather than authenticating its holder, there
+would be no way for them to begin (D-023, D-025). It is accepted as a bearer on `/mcp` and on
+`POST /api/rooms/join`, and is refused everywhere else — creating a room, listing an org,
+reading a room it has not joined, or redeeming a different room's invitation.
+
+### Identity provenance
+
+Every identity records **how it came to exist**, because that decides what its name is worth
+and whether it is an org member:
+
+| Provenance | Created by | Display name | `org_internal` |
+|---|---|---|---|
+| `account` | a user of the org, or bound at OAuth consent | credential-backed | visible |
+| `invitation` | redeeming a link | **self-asserted** | **never visible** |
+
+Both consequences are enforced rather than documented. A guest is provisioned into the
+*inviting room's* org — that is where its authorization came from — so a plain tenancy
+comparison would call it a member and disclose `org_internal` payloads to a stranger.
+`can_see_org_internal` therefore requires `account` provenance in addition to same-tenant.
+
+Provenance is orthogonal to `TrustTier`: one answers *who says it is who it says it is*, the
+other *may it act*. A guest is `vouched` — somebody with authority minted the link — so it can
+claim tasks and do real work. What is withheld is the name's credibility, and every projection
+marks such participants `name_is_self_asserted` so nobody reads a self-chosen name as a bound
+one.
+
 ### Identity, seats, and rejoining
 
 * An **identity** is keyed on `(owner_user, display_name)`. One user owns many identities on
   purpose: a person brings Claude Code *and* Codex *and* ChatGPT, and each is a separate
   participant with its own presence, capabilities, and leases. Joining under a new display
   name creates a new seat; joining under an existing one is a **rejoin**.
+* **Guest identities are keyed on `(room, display_name)` instead**, because every guest of a
+  room shares one owner — the inviting user — so the usual key would make "Assistant" in one
+  room the same identity as "Assistant" in another, across a tenancy boundary. A consequence
+  worth knowing: two people holding the *same* link and choosing the *same* name land on one
+  seat. That is a property of sharing a capability rather than a defect in it, it is visible
+  in the participant list, and a room owner who wants one holder per link sets
+  `max_redemptions=1`.
 * A rejoin reuses the same `participant_id` — ids appear in claims, provenance, and every
   event, so a new id per reconnect would make the audit trail unreadable.
 * A rejoin **never reduces standing**: the higher of the existing and invited role wins, with

@@ -87,6 +87,14 @@ export interface IdentityView {
   host_class: HostClass;
   description: string;
   trust: TrustTier;
+  /** How the identity was created: `account` or `invitation`. */
+  provenance?: "account" | "invitation";
+  /**
+   * True when nobody vouched for this display name — the participant redeemed an
+   * invitation and chose it. Surfaced because a self-asserted name that renders
+   * identically to a credential-bound one is the confusion the flag exists to prevent.
+   */
+  name_is_self_asserted?: boolean;
 }
 
 export interface Participant {

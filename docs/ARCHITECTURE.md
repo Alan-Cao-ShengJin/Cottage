@@ -159,6 +159,12 @@ own **no** business rules and hold **no** state that the core needs.
   exposes `await_events(since_seq, timeout)` implemented on `bus.wait_for_seq`; this is documented to
   the model as a poll, not an event listener. Session→participant binding lives in the adapter; every
   tool also accepts an explicit participant token so a recycled session recovers.
+
+  That binding is keyed on the **transport's `mcp-session-id`**, never on object identity. It was
+  `id(ctx.session)` once, and CPython reuses addresses after GC — so a new session could inherit a
+  finished one's participant token and act as it, with correct-looking provenance on every event
+  (D-024). No session id now yields no key at all rather than a shared bucket, so the caller must
+  present its own token.
 - **A2A adapter — external autonomous-agent adapter.** Publishes an agent card, accepts inbound task
   and message deliveries, and pushes room events outbound to the remote agent's endpoint. Inbound A2A
   identities are `untrusted` by default (see `docs/SECURITY.md §5`).
@@ -176,6 +182,13 @@ abstraction is wrong — fix it rather than special-casing.
   room is verified first. No global list endpoints over content.
 - Org boundary: cross-org rooms strip org-internal identity detail and refuse `org_internal`
   payloads. An `org_internal` write into a `cross_org` room is an error, not a downgrade.
+- **Same-tenant is not the same as org member.** An invited guest is provisioned into the
+  inviting room's org, so `participant.org_id == room.org_id` is true for someone who holds
+  nothing but a link. `authz.can_see_org_internal` therefore also requires `account`
+  provenance, and both read-side filters — `privacy.visible_to` and
+  `projections._visible_record` — delegate to it rather than comparing org ids themselves.
+  They each used to inline the comparison, which meant fixing the shared predicate changed no
+  behaviour at all; two copies of a rule diverge, one cannot (D-025).
 - Scopes are checked in `core`, so every transport inherits them identically.
 - Secrets never enter the domain: there is no field for a prompt, key, or memory anywhere in
   `domain/`. The disclosure guard is defense in depth, not the primary control.
