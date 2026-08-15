@@ -2024,3 +2024,60 @@ same read transaction, so an event cannot be *missed* — but under an isolation
 SQLite's snapshot reads, a later row may appear alongside an earlier cursor. The guarantee is now
 stated as **no missed event, with replay possible**, and consumers must be idempotent — which the
 fence and `command_id` receipts already require of them.
+
+---
+
+## D-043 — A count that can truncate must say so, and the guarantee belongs in a test
+
+_2026-08-15. Second round of the outside code review. Both findings real._
+
+### The count was capped by the page
+
+D-042 made `addressed_since_cursor` count messages newer than the caller's cursor — by taking
+`len()` of the returned list. That list is capped at `MAX_HYDRATION_MESSAGES`, so with 200 messages
+waiting it reported 25.
+
+> The compact payload can truncate; the count cannot silently truncate.
+
+Exactly right, and the reason it matters is what hydration is becoming: a cold-start primitive
+whose numbers a controller treats as decision state. An **exact-looking wrong number** is worse
+than an admitted approximation, because nothing downstream can tell it is wrong.
+
+The count is now a `COUNT(*)` in the database, capped by nothing, and the page cap is left to cap
+only the page.
+
+### Cursor validity, three cases
+
+- **Ahead of the room** — a client bug. `invalid_cursor` propagates, because reporting zero unseen
+  would hide it.
+- **Below the retained floor** — legitimate truncation. `await_room_events` raises `resume_gap`
+  here, which is right for a stream; hydration is what a *lost* surface calls, so refusing to
+  answer would be the wrong end of the trade. It returns everything else with
+  `history_truncated: true`, the retained boundary, and `addressed_since_cursor: null` — unknown
+  rather than understated.
+- **No cursor** — `null`, unchanged. Not knowing and zero are different, and must not render alike.
+
+`eventlog.validate_cursor` already separated the first two cases for the stream, so hydration
+reuses it rather than growing a second opinion about what a cursor means.
+
+### The meta-test, which is the more valuable half
+
+D-042 fixed `extra="forbid"` on four nested models known to be reachable from a command. That is a
+list, and the next nested request model will not be on it.
+
+> This is exactly the class-level guarantee you originally thought inheritance gave you; make the
+> test provide that guarantee instead.
+
+`tests/test_command_schema_invariants.py` now walks every `CommandMeta` subclass, follows field
+annotations recursively through `Optional`, unions and containers, and asserts every reachable
+`BaseModel` forbids unknown fields — or appears in an `EXEMPT` map with a written reason. It walks
+21 commands and reaches 24 models; a second test asserts exemptions are still reachable, so a stale
+one cannot rot in place.
+
+Verified it fails for the right reason rather than passing vacuously: with `Disclosure` temporarily
+reverted to default config the walk reports exactly `['Disclosure']`. A meta-test that silently
+traverses nothing is worse than no meta-test, since it looks like coverage.
+
+**The pattern worth keeping:** three times now a fix has been applied at the layer where the defect
+was noticed rather than wherever the defect could exist (D-042, and twice before it). The remedy is
+not more care — it is converting the fix into an invariant a test enforces over the whole graph.

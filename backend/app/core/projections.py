@@ -23,7 +23,8 @@ from ..domain.identity import IdentityProvenance
 from ..domain.room import Participant, PrivacyClass, Room, Scope
 from ..domain.task import ConflictStatus
 from ..util import from_iso, utcnow
-from . import authz, presence, privacy, store
+from . import authz, eventlog, presence, privacy, store
+from .errors import ResumeGap
 
 log = logging.getLogger(__name__)
 
@@ -234,9 +235,38 @@ async def hydrate(
     event, with replay possible**; consumers must be idempotent, which the fence and
     `command_id` receipts already require of them.
     """
+    truncated = False
+    if since_seq is not None:
+        # An *ahead* cursor is a client bug and stays an error: quietly reporting zero
+        # unseen would hide it. A cursor below the retained floor is a legitimate
+        # consequence of truncation, and hydration is precisely what a lost surface
+        # calls — so it still gets its state, with the count marked unknown rather
+        # than understated (D-043).
+        try:
+            await eventlog.validate_cursor(room_id, since_seq)
+        except ResumeGap:
+            truncated = True
+
     async with db.transaction(write=False) as tx:
         room = await store.load_room(room_id, tx=tx)
         cursor = int(await tx.fetch_value("SELECT event_seq FROM rooms WHERE id = ?", (room_id,)))
+        # Counted by the database, never by len() of the returned page. The payload is
+        # capped at MAX_HYDRATION_MESSAGES; the count is not, and deriving one from the
+        # other would report "50 waiting" when 200 were waiting — an exact-looking
+        # wrong number, which is worse than an admitted approximation because a
+        # controller treats it as decision state (D-043).
+        addressed_since = (
+            int(
+                await tx.fetch_value(
+                    "SELECT COUNT(*) FROM messages WHERE room_id = ? AND to_participant_id = ? "
+                    "AND seq > ?",
+                    (room_id, recipient.id, since_seq),
+                )
+                or 0
+            )
+            if since_seq is not None and not truncated
+            else None
+        )
         tasks = await store.list_tasks(room_id, tx=tx)
         work_rows = await tx.fetch_all(
             "SELECT * FROM work_declarations WHERE room_id = ? AND participant_id = ? "
@@ -319,14 +349,6 @@ async def hydrate(
         if c.status is ConflictStatus.OPEN and recipient.id in c.participant_ids
     ]
 
-    # Messages count toward `needs_you` only when the caller supplied the cursor it
-    # last saw. Without one there is no way to know what it has already read, and the
-    # earlier version counted every recent addressed message forever — so a single
-    # message from last week kept reporting work waiting until it aged out of the
-    # window. The room stores no read state and this does not invent any: the cursor
-    # is a fact the returning surface already holds (D-042).
-    unread = [m for m in addressed if since_seq is not None and m["seq"] > since_seq]
-
     return {
         "type": "hydration",
         "protocol": "arp/1",
@@ -352,14 +374,19 @@ async def hydrate(
         # not your unread ones — the room keeps no read state, so calling them unread
         # would be a claim the data cannot support.
         "recent_addressed_to_you": addressed,
-        "addressed_since_cursor": len(unread) if since_seq is not None else None,
+        # Counted by the database, capped by nothing. `null` means "not knowable from
+        # what you gave me" — no cursor, or a cursor below the retained floor — which
+        # is different from zero and must not be rendered as it.
+        "addressed_since_cursor": addressed_since,
+        "history_truncated": truncated,
+        "retained_from_seq": room.retained_from_seq if truncated else None,
         "blocking_you": involving_me,
         # Said explicitly rather than left to be inferred from empty lists, because a
         # cold surface has no way to tell "nothing is waiting" from "nothing loaded".
         # Counts only objectively unresolved state, plus messages newer than a cursor
         # the caller supplied. An open proposal and an open conflict are waiting on you
         # by their own status; a message is only waiting if you have not seen it.
-        "needs_you": len(proposals) + len(involving_me) + len(unread),
+        "needs_you": len(proposals) + len(involving_me) + (addressed_since or 0),
         "is_conversation_history": False,
     }
 

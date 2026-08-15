@@ -14,6 +14,8 @@ import pytest
 from app.core import messages as message_service
 from app.core import projections, tasks
 from app.core import work as work_service
+from app.core.errors import RoomError
+from app.db import database as db
 from app.domain.commands import (
     ClaimTaskCommand,
     CreateTaskCommand,
@@ -230,3 +232,81 @@ async def test_the_escape_hatch_parameter_stays_forward_compatible():
     assert detail.get("type") == "string"
     assert "enum" not in detail, "a closed enum here is unreachable from a cached client"
     assert "const" not in detail
+
+
+async def test_the_unseen_count_is_not_capped_by_the_returned_page(room_with_two):
+    """An exact-looking wrong number is worse than an admitted approximation.
+
+    `recent_addressed_to_you` is deliberately capped — it is spent context. The count
+    is not, and deriving one from the other would report "25 waiting" when 30 were
+    waiting. Hydration is being positioned as the cold-start primitive, so a controller
+    treats that number as decision state; truncation has to be represented rather than
+    hidden (D-043).
+    """
+    room, worker, peer = room_with_two
+    to_worker = Disclosure(audience=Audience.PARTICIPANT, to_participant_id=worker.participant.id)
+
+    before = await projections.hydrate(room_id=room.room.id, recipient=worker.participant)
+    cursor = before["cursor"]
+
+    sent = projections.MAX_HYDRATION_MESSAGES + 5
+    for i in range(sent):
+        await message_service.post(
+            participant=peer.participant,
+            command=PostMessageCommand(body=f"message {i}", disclosure=to_worker),
+        )
+
+    state = await projections.hydrate(
+        room_id=room.room.id, recipient=worker.participant, since_seq=cursor
+    )
+
+    assert len(state["recent_addressed_to_you"]) == projections.MAX_HYDRATION_MESSAGES
+    assert state["addressed_since_cursor"] == sent, "the count must come from the database"
+    assert state["needs_you"] >= sent
+
+
+async def test_a_cursor_ahead_of_the_room_is_an_error_not_a_quiet_zero(room_with_two):
+    """A future cursor is a client bug. Reporting zero unseen would hide it."""
+    room, worker, _peer = room_with_two
+    state = await projections.hydrate(room_id=room.room.id, recipient=worker.participant)
+
+    with pytest.raises(RoomError) as refused:
+        await projections.hydrate(
+            room_id=room.room.id,
+            recipient=worker.participant,
+            since_seq=state["cursor"] + 1000,
+        )
+    assert refused.value.code == "invalid_cursor"
+
+
+async def test_a_cursor_below_the_retained_floor_admits_it_does_not_know(room_with_two):
+    """Truncated history returns state with the count unknown, not understated.
+
+    `await_room_events` raises `resume_gap` here, which is right for a stream. Hydration
+    is what a lost surface calls, so refusing to answer would be the wrong end of the
+    trade: it still gets everything else, with `addressed_since_cursor` null rather than
+    a number it cannot stand behind.
+    """
+    room, worker, peer = room_with_two
+    await message_service.post(
+        participant=peer.participant,
+        command=PostMessageCommand(
+            body="before the floor",
+            disclosure=Disclosure(
+                audience=Audience.PARTICIPANT, to_participant_id=worker.participant.id
+            ),
+        ),
+    )
+    head = (await projections.hydrate(room_id=room.room.id, recipient=worker.participant))["cursor"]
+    await db.execute("UPDATE rooms SET retained_from_seq = ? WHERE id = ?", (head, room.room.id))
+
+    state = await projections.hydrate(
+        room_id=room.room.id, recipient=worker.participant, since_seq=1
+    )
+
+    assert state["history_truncated"] is True
+    assert state["retained_from_seq"] == head
+    assert state["addressed_since_cursor"] is None
+    # Everything else still arrives: this is a resume payload, not a refusal.
+    assert state["you"]["participant_id"] == worker.participant.id
+    assert state["cursor"] == head
