@@ -2612,3 +2612,53 @@ That a companion runtime is anybody's chat session, or shares its context. It is
 Cottage identity with **bounded shared task state**: the executor sees its own task and
 its own history and nothing else. Implying otherwise would misdescribe the one boundary
 the executor exists to hold.
+
+---
+
+## D-055 — "You cannot answer your own question" was scoped to the wrong thing
+
+_2026-08-15. `core/questions._same_runtime`, `questions.asked_by_attachment_id`.
+Found by the first live run with a real model, not by the suite that shipped it._
+
+D-051 refused an answer from the participant that asked, so that a worker could not
+unblock itself. Correct in intent, and wrong at the boundary it chose: **a person's chat
+surface and their companion worker are one participant** (D-044). Scoped to the seat, the
+rule blocked the party most obviously entitled to answer — the human whose worker had
+just stood down and asked them something.
+
+Observed exactly that way. A Codex-backed worker was told to draft a release note and
+then state which environment it shipped to, which it had no way to know. It declined to
+guess and asked. The task parked, the lease released, and the only participant who could
+answer was the *other* participant in the room, who was not the one being asked.
+
+The refusal is now scoped to the **runtime**: a different runtime of the same seat may
+answer; the runtime that asked may not.
+
+### How much this guarantee is worth, stated rather than implied
+
+A worker determined to unblock itself could attach a second runtime and answer itself.
+That is worth being plain about — and it is also nearly pointless for the worker, which
+could simply never have blocked in the first place. Blocking is voluntary, so a rule
+against self-answering was never holding back an adversary; it was keeping *"blocked"*
+meaningful.
+
+So the enforcement is attribution, not prevention, which is the line this project already
+holds on display names (D-025): the answering runtime is stamped on the event and
+`same_seat` is published, so a reader deciding how much independent input a worker
+actually received can tell.
+
+### Unidentifiable runtimes permit rather than refuse
+
+Where either side has no resolvable runtime the check does not fire. An unknown runtime is
+not evidence of self-answering, and refusing on an absence would make the check bite
+hardest against the clients that declare least — the opposite of the incentive this
+project wants everywhere else.
+
+### The pattern, again
+
+This is the third defect in two days whose shape is *a rule applied at the seat when it
+belonged at the runtime* — after `runtime_policy_for` lending a worker's standing to its
+chat surface (D-044) and executor affinity itself. Once a seat can hold two runtimes,
+every existing check has to be re-read with the question "does this mean the participant,
+or the process?", and the default answer of the code written before that distinction
+existed is always "the participant".
