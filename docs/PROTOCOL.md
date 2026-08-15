@@ -98,6 +98,11 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 | `task.steered` | task_id, directive (`running` \| `paused` \| `stopped`), previous, reason, priority, steered_by_participant_id, holder_participant_id, executor_attachment_id, executor_connection_id |
 | `task.executor_changed` | task_id, participant_id, fence, previous_executor_ref, previous_executor_live, executor_attachment_id, executor_connection_id, reason |
 | `task.claim_expired` | task_id, participant_id, fence, expired_at, executor_attachment_id, executor_connection_id, reason — actor is the room, not a participant |
+| `task.checkpointed` | checkpoint_id, task_id, participant_id, attachment_id, fence, summary, has_resume_state — the room-visible half; `has_resume_state` is public because "there is state you cannot see" is not itself a secret |
+| `task.resume_state_recorded` | checkpoint_id, task_id, resume_state — **restricted to the seat that wrote it.** An event has one audience, so a record with two audiences is two events |
+| `question.asked` | question_id, task_id, to_participant_id, body, blocking |
+| `question.answered` | question_id, answer_id, task_id, asked_by_participant_id, body, asked_at_seq |
+| `task.awaiting_input` | task_id, question_id, participant_id, fence, released — the holder stood down; distinct from `task.steered`, where somebody else halted it |
 | `task.blocked` | task_id, blocking_task_ids, note |
 | `task.unblocked` | task_id, note |
 | `dependency.added` | from_task_id, to_task_id, kind |

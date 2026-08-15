@@ -24,7 +24,9 @@ from ..domain.room import Participant, PrivacyClass, Room, Scope
 from ..domain.task import TERMINAL_TASK_STATUSES, ConflictStatus, Steering, TaskStatus
 from ..util import from_iso, utcnow
 from . import authz, eventlog, presence, privacy, store
+from . import checkpoints as checkpoints_svc
 from . import directives as directives_svc
+from . import questions as questions_svc
 from .errors import ResumeGap
 
 log = logging.getLogger(__name__)
@@ -119,6 +121,14 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
             (room_id, MAX_SNAPSHOT_MESSAGES),
         )
         conflicts = await store.list_conflicts(room_id, tx=tx)
+        # Room-wide, not per-recipient: an unanswered question is coordination state
+        # the whole room needs to see. Restricting it to the addressee is how a
+        # question that one person could have answered goes stale unseen (D-051).
+        open_question_rows = await tx.fetch_all(
+            "SELECT * FROM questions WHERE room_id = ? AND answered_at IS NULL "
+            "ORDER BY created_seq ASC LIMIT ?",
+            (room_id, questions_svc.MAX_OPEN_QUESTIONS),
+        )
 
     presences = await presence.presence_for_room(room)
     now = utcnow()
@@ -213,6 +223,9 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
         "work": work,
         "tasks": visible_tasks,
         "messages": messages,
+        "open_questions": [
+            store.to_question(r).model_dump(mode="json") for r in open_question_rows
+        ],
         "conflicts": [c.model_dump(mode="json") for c in conflicts],
     }
 
@@ -299,7 +312,22 @@ async def hydrate(
             "ORDER BY seq DESC LIMIT ?",
             (room_id, recipient.id, MAX_HYDRATION_MESSAGES),
         )
+        open_questions = await questions_svc.open_for(recipient.id, room_id=room_id, tx=tx)
         conflicts = await store.list_conflicts(room_id, tx=tx)
+        # Only for work this participant currently holds. A resuming runtime needs
+        # where *it* got to; every other task's history is the board's business and
+        # is one call away. Read inside the same transaction as the cursor, so the
+        # progress and the resume point cannot disagree.
+        held_ids = [
+            t.id for t in tasks if t.claim is not None and t.claim.participant_id == recipient.id
+        ]
+        checkpoint_state = {
+            task_id: [
+                c.model_dump(mode="json")
+                for c in await checkpoints_svc.latest_for_task(task_id, recipient=recipient, tx=tx)
+            ]
+            for task_id in held_ids
+        }
 
     now = utcnow()
     by_id = {t.id: t for t in tasks}
@@ -417,6 +445,14 @@ async def hydrate(
         "cursor": cursor,
         "your_work": [store.to_work(r).model_dump(mode="json") for r in work_rows],
         "your_leases": leases,
+        # Keyed by task id, oldest-first within each. The resume payload is present
+        # only on this participant's own checkpoints — a room admin reading someone
+        # else's hydration is not a path that exists, so there is nothing to widen
+        # here (D-050).
+        "checkpoints": checkpoint_state,
+        # Both directions in one list: what is waiting on you, and what you are
+        # waiting on. Split into two and one of them stops being read.
+        "open_questions": [q.model_dump(mode="json") for q in open_questions],
         "claimable": claimable,
         "proposed_to_you": proposals,
         # Named for what it is. These are the most recent messages addressed to you,
@@ -435,7 +471,16 @@ async def hydrate(
         # Counts only objectively unresolved state, plus messages newer than a cursor
         # the caller supplied. An open proposal and an open conflict are waiting on you
         # by their own status; a message is only waiting if you have not seen it.
-        "needs_you": len(proposals) + len(involving_me) + (addressed_since or 0),
+        # A question addressed to you is unresolved state by its own status, exactly
+        # like a proposal — so it counts. One you asked does not: waiting on someone
+        # else is not something you can act on, and counting it would tell a worker
+        # it has work when what it has is patience.
+        "needs_you": (
+            len(proposals)
+            + len(involving_me)
+            + (addressed_since or 0)
+            + sum(1 for q in open_questions if q.asked_by_participant_id != recipient.id)
+        ),
         "is_conversation_history": False,
     }
 

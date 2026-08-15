@@ -17,14 +17,27 @@
       "Bash(cd \"D:/Code/Collab\" && sed -n '/^    return {/,/^        \"your_work\"/p' backend/app/core/projections.py | tail -25)",
       "Bash(cd \"D:/Code/Collab\" && sed -n '/^from ..domain.commands import/,/^\\)/p' backend/app/api/routes.py && grep -n \"SetParticipantRoleCommand\" backend/app/api/routes.py backend/app/core/rooms.py | head)",
       "Bash(cd \"D:/Code/Collab\" && grep -n \"your_leases\\\\|leases = \\\\|work_rows\" backend/app/core/projections.py | head -12 && sed -n '/^    async with db.transaction\\(write=False\\) as tx:/,/^        proposals/p' backend/app/core/projections.py | sed -n '1,60p' | tail -40)",
-      "Bash(cd \"D:/Code/Collab\" && sed -n '112,140p' backend/app/config.py && echo \"=== grade_connection ===\" && sed -n '/^def grade_connection/,/^def grade\\(/p' backend/app/core/presence.py | head -40)"
+      "Bash(cd \"D:/Code/Collab\" && sed -n '112,140p' backend/app/config.py && echo \"=== grade_connection ===\" && sed -n '/^def grade_connection/,/^def grade\\(/p' backend/app/core/presence.py | head -40)",
+      "Bash(sed -n '/^class Scope/,/^COLLABORATOR_SCOPES/p' backend/app/domain/room.py)",
+      "Bash(sed -n '/^COLLABORATOR_SCOPES/,/^ROLE_SCOPES\\\\|^OWNER_SCOPES/p' backend/app/domain/room.py)",
+      "Bash(cd d:/Code/Collab && grep -n \"def \\\\|audience\\\\|restricted\" backend/app/core/privacy.py | head -40 && echo \"--- EventEnvelope ---\" && sed -n '/^class EventEnvelope/,/^class /p' backend/app/domain/events.py | head -60)",
+      "Bash(cd d:/Code/Collab && sed -n '1,60p' backend/app/domain/commands.py && echo \"=== ids ===\" && cat backend/app/domain/ids.py && echo \"=== events enum tail ===\" && sed -n '/TASK_STEERED\\\\|TASK_EXECUTOR/,/^class /p' backend/app/domain/events.py | head -40)",
+      "Bash(cd d:/Code/Collab && sed -n '/^async def append/,/^    \"\"\"/p' backend/app/core/eventlog.py | head -30 && grep -n \"def append\" -A 18 backend/app/core/eventlog.py | head -30)",
+      "Bash(cd d:/Code/Collab && sed -n '/^class DisclosureDecision/,/^class \\\\|^def /p' backend/app/domain/disclosure.py | head -40 && echo \"=== check_disclosure sig ===\" && sed -n '202,240p' backend/app/core/privacy.py)",
+      "Bash(cd d:/Code/Collab && sed -n '/tasks\\\\/complete/,/^@router.post..\\\\/rooms\\\\/{room_id}\\\\/tasks\\\\/cancel/p' backend/app/api/routes.py | head -50 && echo \"=== imports ===\" && sed -n '1,60p' backend/app/api/routes.py)",
+      "Bash(cd d:/Code/Collab && grep -n \"^from ...core import\\\\|^from ...domain.commands import\\\\|^from ...domain\" backend/app/adapters/mcp/server.py | head -20 && sed -n '/^from \\\\.\\\\.\\\\.core import/,/^\\)/p' backend/app/adapters/mcp/server.py)"
     ],
     "additionalDirectories": [
       "D:\\Code\\Collab\\backend\\.venv\\Lib\\site-packages\\uvicorn",
       "D:\\Code\\Collab\\docs",
       "D:\\Code\\Collab\\backend\\app\\db",
       "D:\\Code\\Collab\\backend\\app\\core",
-      "D:\\Code\\Collab\\backend\\app\\api"
+      "D:\\Code\\Collab\\backend\\app\\api",
+      "D:\\Code\\Collab\\backend\\app\\domain",
+      "d:\\Code\\Collab\\backend\\app\\domain",
+      "d:\\Code\\Collab\\backend\\app\\core",
+      "d:\\Code\\Collab\\backend\\app\\api",
+      "D:\\Code\\Collab\\backend\\app\\adapters\\mcp"
     ]
   }
 }

@@ -35,6 +35,9 @@ ARTIFACT: Final = "art"
 CONFLICT: Final = "cft"
 DIRECTIVE: Final = "dir"
 CREDENTIAL: Final = "cred"
+CHECKPOINT: Final = "ckp"
+QUESTION: Final = "qst"
+ANSWER: Final = "ans"
 COMMAND: Final = "cmd"
 
 

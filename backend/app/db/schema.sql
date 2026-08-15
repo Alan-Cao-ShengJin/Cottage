@@ -515,6 +515,87 @@ CREATE TABLE IF NOT EXISTS task_proposals (
 CREATE INDEX IF NOT EXISTS idx_proposals_room ON task_proposals(room_id, resolution);
 CREATE INDEX IF NOT EXISTS idx_proposals_to ON task_proposals(to_participant_id, resolution);
 
+-- Durable progress on a task (D-050). Append-only in the strong sense: nothing in
+-- the codebase updates or deletes a row here, because a checkpoint that could be
+-- edited would be a claim about the past the past does not support.
+CREATE TABLE IF NOT EXISTS task_checkpoints (
+    id                  TEXT PRIMARY KEY,
+    room_id             TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    task_id             TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    -- The seat, never the runtime: a companion worker and the chat surface sharing
+    -- one participant are one accountable party.
+    participant_id      TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    -- Which runtime of that seat wrote it, when there is a durable one. NULL means
+    -- an ephemeral runtime, not an unknown one.
+    attachment_id       TEXT REFERENCES attachments(id) ON DELETE SET NULL,
+    -- The lease generation this was written under. History from a superseded
+    -- generation stays true; the fence says which run it belongs to.
+    fence               INTEGER NOT NULL,
+    -- Room-visible outcome. Bounded so a transcript pasted here is conspicuous.
+    summary             TEXT NOT NULL,
+    -- The same-seat bookmark, or NULL. Never returned to another participant by any
+    -- projection; the log frame carrying it is restricted to the writing seat.
+    resume_state        TEXT,
+    seq                 INTEGER NOT NULL,
+    created_at          TEXT NOT NULL,
+    CHECK (fence >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON task_checkpoints(task_id, seq);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_participant
+    ON task_checkpoints(participant_id, seq);
+
+-- Worker -> human, which the control plane cannot express by construction: a
+-- directive requires room.admin so a worker cannot manufacture instructions, so a
+-- question cannot be a directive with the ends swapped (D-051).
+CREATE TABLE IF NOT EXISTS questions (
+    id                        TEXT PRIMARY KEY,
+    room_id                   TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    -- Required when blocking: blocking means "this task cannot proceed", and a task
+    -- is the only thing the room knows how to halt.
+    task_id                   TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    asked_by_participant_id   TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    -- NULL means the room at large. Addressing narrows who is *expected* to reply,
+    -- never who may: a question nobody answers is worse than one answered by the
+    -- wrong person.
+    to_participant_id         TEXT REFERENCES participants(id) ON DELETE SET NULL,
+    body                      TEXT NOT NULL,
+    -- Whether the asker released its work to wait. Opt-in, because a worker that
+    -- halts on every uncertainty cannot work unattended.
+    blocking                  INTEGER NOT NULL DEFAULT 0,
+    created_seq               INTEGER NOT NULL,
+    created_at                TEXT NOT NULL,
+    answered_at               TEXT,
+    answered_by_participant_id TEXT,
+    answer_id                 TEXT,
+    CHECK (blocking = 0 OR task_id IS NOT NULL),
+    -- Answered is all-or-nothing, so "answered by nobody" is unrepresentable.
+    CHECK (
+        (answered_at IS NULL AND answered_by_participant_id IS NULL AND answer_id IS NULL)
+        OR (answered_at IS NOT NULL AND answered_by_participant_id IS NOT NULL
+            AND answer_id IS NOT NULL)
+    )
+);
+
+-- Drives "what is waiting on me" and "what is my worker blocked on" without a scan.
+CREATE INDEX IF NOT EXISTS idx_questions_open ON questions(room_id, answered_at);
+CREATE INDEX IF NOT EXISTS idx_questions_to ON questions(to_participant_id, answered_at);
+CREATE INDEX IF NOT EXISTS idx_questions_task ON questions(task_id, answered_at);
+
+-- Its own row, not a column on the question: an answer has its own author and its
+-- own place in the log, and collapsing it would make the first reply the only one.
+CREATE TABLE IF NOT EXISTS answers (
+    id                        TEXT PRIMARY KEY,
+    room_id                   TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    question_id               TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+    answered_by_participant_id TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    body                      TEXT NOT NULL,
+    seq                       INTEGER NOT NULL,
+    created_at                TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_answers_question ON answers(question_id, seq);
+
 CREATE TABLE IF NOT EXISTS conflicts (
     id               TEXT PRIMARY KEY,
     room_id          TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,

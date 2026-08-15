@@ -26,11 +26,13 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from ...config import settings
 from ...core import (
+    checkpoints,
     directives,
     eventlog,
     messages,
     presence,
     projections,
+    questions,
     rooms,
     store,
     tasks,
@@ -40,8 +42,12 @@ from ...core.bus import bus
 from ...core.errors import RoomError, Unauthenticated
 from ...db import database as db
 from ...domain.capabilities import Capability, HostClass
+from ...domain.checkpoint import ResumeState
 from ...domain.commands import (
     AcknowledgeDirectiveCommand,
+    AnswerQuestionCommand,
+    AppendCheckpointCommand,
+    AskQuestionCommand,
     ClaimTaskCommand,
     CompleteTaskCommand,
     ConnectCommand,
@@ -1120,6 +1126,125 @@ async def complete_task(
             ),
         )
         return {"ok": True, "task": task.model_dump(mode="json")}
+    except RoomError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+async def record_checkpoint(
+    task_id: str,
+    fence: int,
+    summary: str,
+    phase: str = "",
+    next_action: str = "",
+    completed_step_ids: list[str] | None = None,
+    artifact_refs: list[str] | None = None,
+    pending_tool_calls: list[str] | None = None,
+    participant_token: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Record durable progress on a task you hold, so a restart is not an amnesia.
+
+    `summary` is **read by the whole room**: what you did, what it means, what is
+    next. It is a progress record, not a scratchpad — never put your reasoning, your
+    prompt, your private context or anything a human said to you privately in it.
+
+    The remaining fields are your own bookmark and are returned only to you: enough
+    to pick the work back up after a restart, and nothing about how you were
+    thinking. Use ids and short labels, not narratives.
+
+    Checkpoint **after each step rather than only at the end**. A `stop` releases
+    your lease, so your last checkpoint is the last thing written before you were
+    interrupted — which is exactly what makes the interruption recoverable.
+    """
+    try:
+        participant = await _participant(ctx, participant_token)
+        resume = None
+        if phase or next_action or completed_step_ids or artifact_refs or pending_tool_calls:
+            resume = ResumeState(
+                phase=phase,
+                next_action=next_action,
+                completed_step_ids=completed_step_ids or [],
+                artifact_refs=artifact_refs or [],
+                pending_tool_calls=pending_tool_calls or [],
+            )
+        checkpoint = await checkpoints.append(
+            participant=participant,
+            command=AppendCheckpointCommand(
+                task_id=task_id, fence=fence, summary=summary, resume_state=resume
+            ),
+        )
+        return {"ok": True, "checkpoint": checkpoint.model_dump(mode="json")}
+    except RoomError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+async def ask_question(
+    body: str,
+    to_participant_id: str | None = None,
+    task_id: str | None = None,
+    blocking: bool = False,
+    fence: int | None = None,
+    checkpoint_summary: str = "",
+    participant_token: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Ask something you cannot work out for yourself, of a participant or the room.
+
+    Asking needs no special authority — that is the difference between a question
+    and a directive, and the reason you can raise one while a directive can only be
+    issued to you.
+
+    **`blocking` costs you the work.** By default nothing changes: keep your lease
+    and carry on with whatever you can still do, because stopping at every
+    uncertainty is how an unattended worker becomes useless. Set `blocking=True`
+    only when you genuinely cannot proceed and would otherwise guess at something
+    consequential — then present your `fence`, and the room writes a checkpoint,
+    parks the task as `waiting_input` and releases your lease in one step. You are
+    free to work on other tasks; this one returns to `open` when someone answers.
+
+    You may not answer your own question.
+    """
+    try:
+        participant = await _participant(ctx, participant_token)
+        question = await questions.ask(
+            participant=participant,
+            command=AskQuestionCommand(
+                body=body,
+                to_participant_id=to_participant_id,
+                task_id=task_id,
+                blocking=blocking,
+                fence=fence,
+                checkpoint_summary=checkpoint_summary,
+            ),
+        )
+        return {"ok": True, "question": question.model_dump(mode="json")}
+    except RoomError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+async def answer_question(
+    question_id: str,
+    body: str,
+    participant_token: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Answer someone's question, releasing whatever work it parked.
+
+    Any participant may answer — this is a reply, not an exercise of authority, and
+    routing it through the control plane would mean only room admins could ever
+    unblock a worker. If the question was blocking, its task returns to `open` and
+    the worker re-claims it through the normal path.
+    """
+    try:
+        participant = await _participant(ctx, participant_token)
+        answer = await questions.answer(
+            participant=participant,
+            command=AnswerQuestionCommand(question_id=question_id, body=body),
+        )
+        return {"ok": True, "answer": answer.model_dump(mode="json")}
     except RoomError as exc:
         return _err(exc)
 

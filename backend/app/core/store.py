@@ -29,6 +29,7 @@ from ..domain.identity import (
     TrustTier,
     User,
 )
+from ..domain.question import Answer, Question
 from ..domain.room import (
     RUNTIME_SCOPES,
     Connection,
@@ -192,6 +193,35 @@ def to_directive(row: Any) -> Directive:
         applied_at=row["applied_at"],
         acknowledged_at=row["acknowledged_at"],
         acknowledged_by_participant_id=row["acknowledged_by_participant_id"],
+    )
+
+
+def to_question(row: Any) -> Question:
+    return Question(
+        id=row["id"],
+        room_id=row["room_id"],
+        task_id=row["task_id"],
+        asked_by_participant_id=row["asked_by_participant_id"],
+        to_participant_id=row["to_participant_id"],
+        body=row["body"],
+        blocking=bool(row["blocking"]),
+        created_seq=int(row["created_seq"]),
+        created_at=row["created_at"],
+        answered_at=row["answered_at"],
+        answered_by_participant_id=row["answered_by_participant_id"],
+        answer_id=row["answer_id"],
+    )
+
+
+def to_answer(row: Any) -> Answer:
+    return Answer(
+        id=row["id"],
+        room_id=row["room_id"],
+        question_id=row["question_id"],
+        answered_by_participant_id=row["answered_by_participant_id"],
+        body=row["body"],
+        seq=int(row["seq"]),
+        created_at=row["created_at"],
     )
 
 

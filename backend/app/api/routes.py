@@ -17,12 +17,14 @@ from fastapi.responses import StreamingResponse
 from ..config import settings
 from ..core import (
     authz,
+    checkpoints,
     directives,
     eventlog,
     messages,
     presence,
     privacy,
     projections,
+    questions,
     rooms,
     store,
     tasks,
@@ -33,6 +35,9 @@ from ..core.errors import Forbidden, ResumeGap
 from ..domain.capabilities import SUGGESTED_CAPABILITIES, Capability
 from ..domain.commands import (
     AcknowledgeDirectiveCommand,
+    AnswerQuestionCommand,
+    AppendCheckpointCommand,
+    AskQuestionCommand,
     CancelTaskCommand,
     ClaimTaskCommand,
     CompleteTaskCommand,
@@ -634,6 +639,64 @@ async def complete_task(
     _assert_room(participant, room_id)
     task = await tasks.complete(participant=participant, command=command)
     return {"ok": True, "task": task.model_dump(mode="json")}
+
+
+@router.post("/rooms/{room_id}/tasks/checkpoint", status_code=201)
+async def append_checkpoint(
+    room_id: str, participant: ParticipantDep, command: AppendCheckpointCommand
+) -> dict[str, Any]:
+    """Record durable progress on work you hold (D-050)."""
+    _assert_room(participant, room_id)
+    checkpoint = await checkpoints.append(participant=participant, command=command)
+    return {"ok": True, "checkpoint": checkpoint.model_dump(mode="json")}
+
+
+@router.get("/rooms/{room_id}/tasks/{task_id}/checkpoints")
+async def list_checkpoints(
+    room_id: str,
+    task_id: str,
+    participant: ParticipantDep,
+    limit: int = Query(default=checkpoints.DEFAULT_LATEST, ge=1, le=checkpoints.MAX_PAGE),
+) -> dict[str, Any]:
+    """The latest N, oldest-first, with the total so truncation is visible (D-043)."""
+    _assert_room(participant, room_id)
+    authz.require_scope(participant, Scope.TASK_READ)
+    rows = await checkpoints.latest_for_task(task_id, recipient=participant, limit=limit)
+    total = await checkpoints.count_for_task(task_id)
+    return {
+        "ok": True,
+        "checkpoints": [c.model_dump(mode="json") for c in rows],
+        "total": total,
+        "truncated": total > len(rows),
+    }
+
+
+@router.post("/rooms/{room_id}/questions", status_code=201)
+async def ask_question(
+    room_id: str, participant: ParticipantDep, command: AskQuestionCommand
+) -> dict[str, Any]:
+    """Ask, optionally standing down from the work until it is answered (D-051)."""
+    _assert_room(participant, room_id)
+    question = await questions.ask(participant=participant, command=command)
+    return {"ok": True, "question": question.model_dump(mode="json")}
+
+
+@router.post("/rooms/{room_id}/questions/answer", status_code=201)
+async def answer_question(
+    room_id: str, participant: ParticipantDep, command: AnswerQuestionCommand
+) -> dict[str, Any]:
+    _assert_room(participant, room_id)
+    answer = await questions.answer(participant=participant, command=command)
+    return {"ok": True, "answer": answer.model_dump(mode="json")}
+
+
+@router.get("/rooms/{room_id}/questions")
+async def list_open_questions(room_id: str, participant: ParticipantDep) -> dict[str, Any]:
+    """Unanswered questions this participant should act on, or is waiting on."""
+    _assert_room(participant, room_id)
+    authz.require_scope(participant, Scope.ROOM_READ)
+    rows = await questions.open_for(participant.id, room_id=room_id)
+    return {"ok": True, "questions": [q.model_dump(mode="json") for q in rows]}
 
 
 @router.post("/rooms/{room_id}/tasks/cancel")

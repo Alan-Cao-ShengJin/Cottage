@@ -223,6 +223,37 @@ def _require_may_claim(runtime) -> None:
         )
 
 
+async def _require_not_awaiting_input(tx: db.Tx, row) -> None:
+    """Refuse to hand parked work to a claimant who will hit the same wall (D-051).
+
+    A task in `waiting_input` was stood down from by its own holder, not steered by
+    anyone — so `require_not_halted` says nothing about it. Letting the next worker
+    claim it would just churn holders through an unanswered question, each one
+    discovering the same missing information.
+
+    Once the question is answered the task returns to `open` and claiming is normal
+    again. The check is on the *question*, not merely the status, so a task left in
+    `waiting_input` with nothing outstanding is claimable rather than stuck.
+    """
+    if row["status"] != TaskStatus.WAITING_INPUT.value:
+        return
+    outstanding = await tx.fetch_one(
+        "SELECT id, body FROM questions WHERE task_id = ? AND answered_at IS NULL "
+        "AND blocking = 1 ORDER BY created_seq ASC LIMIT 1",
+        (row["id"],),
+    )
+    if outstanding is None:
+        return
+    raise InvalidCommand(
+        "This task is waiting on an unanswered question, so claiming it now would "
+        "leave you blocked on the same thing its last holder was. Answer the "
+        "question and it returns to open.",
+        task_id=row["id"],
+        question_id=outstanding["id"],
+        question=outstanding["body"],
+    )
+
+
 async def _claim_tx(
     tx: db.Tx,
     *,
@@ -247,7 +278,8 @@ async def _claim_tx(
         raise InvalidCommand(
             "That task is already finished.", task_id=task_id, status=row["status"]
         )
-    _require_not_halted(row, action="claim")
+    require_not_halted(row, action="claim")
+    await _require_not_awaiting_input(tx, row)
 
     # The idempotent re-claim branch below matches on participant, which is the seat
     # rather than the runtime. Without this check a chat surface could re-claim its
@@ -258,7 +290,7 @@ async def _claim_tx(
         and not is_past(row["claim_expires_at"])
         and row["claim_participant_id"] == participant.id
     ):
-        await _require_executor_or_dead(
+        await require_executor_or_dead(
             tx, row, participant=participant, executor=executor, action="re-claim"
         )
 
@@ -441,7 +473,7 @@ async def renew(*, participant: Participant, command: RenewClaimCommand) -> Task
         )
         if row is None:
             raise NotFound("Task does not exist.", task_id=command.task_id)
-        _assert_fence(row, command.fence)
+        assert_fence(row, command.fence)
 
         affected = await tx.execute(
             """
@@ -495,7 +527,7 @@ async def release(*, participant: Participant, command: ReleaseClaimCommand) -> 
         )
         if row is None:
             raise NotFound("Task does not exist.", task_id=command.task_id)
-        _assert_fence(row, command.fence)
+        assert_fence(row, command.fence)
         # D-035 reversed the earlier position that release is harmless. Giving work
         # up while another runtime is still doing it frees a third party to start
         # the same external action, which is the same end state as seizing it.
@@ -504,7 +536,7 @@ async def release(*, participant: Participant, command: ReleaseClaimCommand) -> 
                 participant, command.reason, what="release another runtime's work"
             )
         else:
-            await _require_executor_or_dead(
+            await require_executor_or_dead(
                 tx,
                 row,
                 participant=participant,
@@ -608,7 +640,7 @@ async def release_all_claims_tx(
 # ---------------------------------------------------------------------------
 
 
-def _assert_fence(row, fence: int | None) -> None:
+def assert_fence(row, fence: int | None) -> None:
     """Reject a mutation that does not present the task's current fence.
 
     Held tasks require a fence. Unheld tasks accept `None`, because there is no
@@ -656,7 +688,7 @@ def _assert_holder(row, participant: Participant) -> None:
     )
 
 
-def _require_live_lease(row, participant: Participant) -> None:
+def require_live_lease(row, participant: Participant) -> None:
     """The full precondition for an operation that only a holder may perform.
 
     Three parts, and the third is the one D-026 left out: an *active* lease, held by
@@ -735,8 +767,8 @@ async def take_over_execution(
         )
         if row is None:
             raise NotFound("Task does not exist.", task_id=command.task_id)
-        _assert_fence(row, command.fence)
-        _require_live_lease(row, participant)
+        assert_fence(row, command.fence)
+        require_live_lease(row, participant)
 
         previous = await presence.executor_of(row, tx=tx)
         if previous.ref == executor.ref:
@@ -804,7 +836,7 @@ async def take_over_execution(
     return await store.load_task(command.task_id)
 
 
-def _require_not_halted(row, *, action: str) -> None:
+def require_not_halted(row, *, action: str) -> None:
     """Refuse progress on work a human has paused or stopped.
 
     Checked at `claim`, `complete` and `update` rather than returned as a field the
@@ -949,7 +981,7 @@ async def apply_steering_tx(
     return events
 
 
-async def _caller_executor(
+async def caller_executor(
     participant: Participant, connection_id: str | None, *, tx: db.Tx | None = None
 ) -> presence.Executor:
     """The caller's runtime, or nothing if it has no open connection.
@@ -966,7 +998,7 @@ async def _caller_executor(
         return presence.Executor(attachment_id=None, connection_id=None, connections=())
 
 
-async def _require_executor_or_dead(
+async def require_executor_or_dead(
     tx: db.Tx,
     row,
     *,
@@ -996,7 +1028,7 @@ async def _require_executor_or_dead(
     if current.ref is None or not current.is_live:
         return
     if executor is None:
-        executor = await _caller_executor(participant, connection_id, tx=tx)
+        executor = await caller_executor(participant, connection_id, tx=tx)
     if current.ref == executor.ref:
         return
     raise ExecutorConflict(
@@ -1025,10 +1057,10 @@ async def update(*, participant: Participant, command: UpdateTaskCommand) -> Tas
         )
         if row is None:
             raise NotFound("Task does not exist.", task_id=command.task_id)
-        _assert_fence(row, command.fence)
+        assert_fence(row, command.fence)
         _assert_holder(row, participant)
-        _require_not_halted(row, action="update")
-        await _require_executor_or_dead(
+        require_not_halted(row, action="update")
+        await require_executor_or_dead(
             tx,
             row,
             participant=participant,
@@ -1128,15 +1160,15 @@ async def complete(*, participant: Participant, command: CompleteTaskCommand) ->
             raise NotFound("Task does not exist.", task_id=command.task_id)
         if row["status"] == "done":
             return CommandOutcome(result={"task_id": command.task_id})
-        _assert_fence(row, command.fence)
+        assert_fence(row, command.fence)
         # Steering is checked *before* the lease, and the order is the whole point of
         # the message. `stop` releases the hold, so a stopped worker asking to finish
         # has no lease — and would be told "claim it first", which is true, useless,
         # and one round trip away from being told the actual reason. The room knows
         # exactly why the lease went away; it should say so first.
-        _require_not_halted(row, action="complete")
-        _require_live_lease(row, participant)
-        await _require_executor_or_dead(
+        require_not_halted(row, action="complete")
+        require_live_lease(row, participant)
+        await require_executor_or_dead(
             tx,
             row,
             participant=participant,
@@ -1166,7 +1198,7 @@ async def complete(*, participant: Participant, command: CompleteTaskCommand) ->
                 # The lease went away between the read and the write — expiry, or a
                 # reclaim by someone else. Re-deriving the reason from the row keeps
                 # the message true rather than merely convenient.
-                _require_live_lease(current, participant)
+                require_live_lease(current, participant)
             raise InvalidCommand("That task is already finished.", task_id=command.task_id)
 
         event = await eventlog.append(

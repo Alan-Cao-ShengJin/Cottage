@@ -73,6 +73,20 @@ class EventType(str, Enum):
     DIRECTIVE_ISSUED = "directive.issued"
     #: The target observed it. Evidence, never permission: the effect already landed.
     DIRECTIVE_ACKNOWLEDGED = "directive.acknowledged"
+    #: Durable progress on a task: the room-visible half, carrying the summary and
+    #: metadata only. Whether a private bookmark accompanied it is stated as a
+    #: boolean, because "there is state you cannot see" is itself public (D-050).
+    TASK_CHECKPOINTED = "task.checkpointed"
+    #: The same-seat half. An event has exactly one audience, so a record with two
+    #: audiences is two events — this one is restricted to the seat that wrote it.
+    TASK_RESUME_STATE_RECORDED = "task.resume_state_recorded"
+    #: Worker → human. Carries no authority, which is why it needs no admin grant
+    #: and why it cannot be a directive with the ends swapped (D-051).
+    QUESTION_ASKED = "question.asked"
+    QUESTION_ANSWERED = "question.answered"
+    #: A blocking question released the lease and parked the task. Distinct from
+    #: `task.steered`: nobody steered it, its holder stood down and said why.
+    TASK_AWAITING_INPUT = "task.awaiting_input"
     TASK_BLOCKED = "task.blocked"
     TASK_UNBLOCKED = "task.unblocked"
 

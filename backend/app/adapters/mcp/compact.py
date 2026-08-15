@@ -103,8 +103,32 @@ def task(row: dict[str, Any]) -> dict[str, Any]:
         # mutation, the other says when the work becomes reclaimable.
         out["fence"] = claim["fence"]
         out["lease_expires_at"] = claim["expires_at"]
+    if row["status"] == "waiting_input":
+        # Same class of defect as the steering omission above: `waiting_input` with no
+        # claim would otherwise read like an ordinary unheld task to anything that
+        # only looks at holders, when in fact claiming it is refused (D-051).
+        out["claimable"] = False
     if row.get("result"):
         out["result"] = row["result"]
+    return out
+
+
+def question(row: dict[str, Any]) -> dict[str, Any]:
+    """An unanswered question, with the one fact that decides urgency.
+
+    `blocking` is what separates "somebody wondered something" from "a piece of work
+    is stopped until you reply", and it is the field a reader most needs first.
+    """
+    out = {
+        "question_id": row["id"],
+        "from": row["asked_by_participant_id"],
+        "body": row["body"],
+        "blocking": bool(row.get("blocking")),
+    }
+    if row.get("to_participant_id"):
+        out["asked_of"] = row["to_participant_id"]
+    if row.get("task_id"):
+        out["task_id"] = row["task_id"]
     return out
 
 
@@ -162,6 +186,14 @@ def room_state(
         "tasks": [task(t) for t in snapshot.get("tasks") or []],
     }
 
+    open_questions = snapshot.get("open_questions") or []
+    if open_questions:
+        # Second only to directives. A worker that stood down on a blocking question
+        # is stopped until somebody answers, and a coordination view that shows the
+        # parked task but not the reason makes the room look broken rather than
+        # waiting (D-051).
+        state["open_questions"] = [question(q) for q in open_questions]
+
     open_conflicts = [c for c in snapshot.get("conflicts") or [] if c.get("status") == "open"]
     if open_conflicts:
         state["open_conflicts"] = [conflict(c) for c in open_conflicts]
@@ -195,6 +227,10 @@ _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
     "task.completed": ("task_id", "participant_id", "result"),
     "task.cancelled": ("task_id", "reason"),
     "task.proposed": ("proposal_id", "task_id", "to_participant_id", "note"),
+    "task.checkpointed": ("task_id", "participant_id", "summary", "has_resume_state"),
+    "question.asked": ("question_id", "task_id", "to_participant_id", "body", "blocking"),
+    "question.answered": ("question_id", "task_id", "body", "asked_by_participant_id"),
+    "task.awaiting_input": ("task_id", "question_id", "participant_id"),
     "conflict.detected": ("conflict_id", "kind", "detail"),
     "conflict.resolved": ("conflict_id", "resolution"),
     "room.closed": ("reason",),

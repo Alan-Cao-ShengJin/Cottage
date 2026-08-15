@@ -11,9 +11,11 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from .capabilities import Capability, HostClass
+from .checkpoint import MAX_SUMMARY_CHARS, ResumeState
 from .directive import DirectiveAction
 from .disclosure import Disclosure, Provenance
 from .identity import PrincipalKind
+from .question import MAX_ANSWER_CHARS, MAX_QUESTION_CHARS
 from .room import (
     InvitationTargetKind,
     ParticipantRole,
@@ -333,6 +335,63 @@ class CompleteTaskCommand(CommandMeta):
 class CancelTaskCommand(CommandMeta):
     task_id: str
     reason: str = Field(default="", max_length=500)
+
+
+class AppendCheckpointCommand(CommandMeta):
+    """Record durable progress on work you hold (D-050).
+
+    `summary` is room-visible and must read as an outcome — what was done, what it
+    means, what is next. `resume_state` is the same-seat bookmark and is a closed
+    schema on purpose: the field an executor most wants to add is "everything I was
+    thinking", and that field must not exist.
+
+    Retry is safe: `command_id` makes a replay return the original checkpoint rather
+    than appending a second one, which matters because the natural moment to
+    checkpoint is also the moment a worker is most likely to be interrupted.
+    """
+
+    task_id: str
+    #: The lease generation the caller believes it holds. A checkpoint is a claim
+    #: about work in progress, so it is fenced like every other one.
+    fence: int
+    summary: str = Field(min_length=1, max_length=MAX_SUMMARY_CHARS)
+    resume_state: ResumeState | None = None
+
+
+class AskQuestionCommand(CommandMeta):
+    """Ask something, of a participant or of the room (D-051).
+
+    Carries no authority: this is why any participant that may speak may ask, and
+    why a question is not a directive with the ends swapped. Directives require
+    `room.admin` precisely so a worker cannot manufacture instructions, and a
+    reversed directive would hand back exactly that.
+    """
+
+    body: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
+    #: `None` addresses the room. Narrows who is expected to reply, never who may.
+    to_participant_id: str | None = None
+    task_id: str | None = None
+    #: Opt-in, and it costs the asker its lease: the room checkpoints the task,
+    #: parks it as `waiting_input`, and releases the claim. Default `False` because
+    #: a worker that halts on every uncertainty cannot work unattended.
+    blocking: bool = False
+    #: Required when blocking, since the checkpoint written on the way down is what
+    #: the next run resumes from.
+    fence: int | None = None
+    checkpoint_summary: str = Field(default="", max_length=MAX_SUMMARY_CHARS)
+    resume_state: ResumeState | None = None
+
+
+class AnswerQuestionCommand(CommandMeta):
+    """Reply to a question, releasing the asker's task if it was parked.
+
+    Also its own primitive rather than an `input` directive: answering is not an
+    exercise of authority, and routing it through the control plane would mean only
+    room admins could ever unblock a worker.
+    """
+
+    question_id: str
+    body: str = Field(min_length=1, max_length=MAX_ANSWER_CHARS)
 
 
 class AddDependencyCommand(CommandMeta):

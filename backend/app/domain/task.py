@@ -28,6 +28,10 @@ class TaskStatus(str, Enum):
     CLAIMED = "claimed"
     IN_PROGRESS = "in_progress"
     BLOCKED = "blocked"
+    #: Parked by its own holder on a blocking question, with the lease released
+    #: (D-051). Not claimable until answered — otherwise the next worker inherits
+    #: the same unanswered question and the room churns through holders.
+    WAITING_INPUT = "waiting_input"
     DONE = "done"
     CANCELLED = "cancelled"
 
