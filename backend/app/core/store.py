@@ -133,6 +133,32 @@ def to_invitation(row: Any) -> Invitation:
     )
 
 
+#: Scopes that were split out of a broader one, mapped child → parent. A participant
+#: that still holds the parent held the child's authority before the split, so it keeps
+#: it — otherwise splitting a scope silently *removes* a permission from everyone who
+#: joined before the change, which is a migration failure wearing a security fix's
+#: clothes.
+#:
+#: Found live, not in the suite (D-053): the runtime credential of a seat that joined
+#: before `task.progress` existed could claim work and then not report progress on it,
+#: because the clamp intersects with what the *seat* holds and the seat's stored scope
+#: list predated the split. Every unit test built its participant fresh, so every unit
+#: test had the new scope.
+#:
+#: Removable once no stored participant predates the split — but only with evidence,
+#: never on the assumption that everyone has rejoined.
+_SPLIT_SCOPE_PARENTS: dict[Scope, Scope] = {Scope.TASK_PROGRESS: Scope.TASK_PROPOSE}
+
+
+def _widen_split_scopes(scopes: list[Scope]) -> list[Scope]:
+    held = set(scopes)
+    for child, parent in _SPLIT_SCOPE_PARENTS.items():
+        if parent in held and child not in held:
+            scopes = [*scopes, child]
+            held.add(child)
+    return scopes
+
+
 def to_participant(row: Any, identity: IdentitySummary) -> Participant:
     """Map a participant row.
 
@@ -151,7 +177,7 @@ def to_participant(row: Any, identity: IdentitySummary) -> Participant:
         agent_identity_id=row["agent_identity_id"],
         org_id=row["org_id"],
         role=ParticipantRole(row["role"]),
-        scopes=[Scope(s) for s in db.str_list(row["scopes"])],
+        scopes=_widen_split_scopes([Scope(s) for s in db.str_list(row["scopes"])]),
         trust=TrustTier(row["trust"]),
         state=MembershipState(row["state"]),
         identity=identity,

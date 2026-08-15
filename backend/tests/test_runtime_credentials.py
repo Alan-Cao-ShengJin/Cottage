@@ -33,8 +33,9 @@ pytestmark = pytest.mark.asyncio
 
 
 async def _mint(member, **kwargs):
+    participant = getattr(member, "participant", member)
     return await rooms.mint_runtime_credential(
-        participant=member.participant,
+        participant=participant,
         command=MintCredentialCommand(**kwargs),
     )
 
@@ -241,6 +242,36 @@ async def test_listing_never_returns_tokens(make_room, join):
     listed = await rooms.list_runtime_credentials(participant=member.participant)
     assert [c.id for c in listed] == [issued.credential.id]
     assert "token" not in listed[0].model_dump()
+
+
+async def test_a_seat_that_predates_the_scope_split_can_still_report_progress(make_room, join):
+    """The defect a live run found and this suite could not (D-053).
+
+    `task.progress` was split out of `task.propose`. Every test here builds its
+    participant fresh, so every test had the new scope — while a participant stored
+    before the split did not, and its runtime credential could therefore claim work
+    and then be refused when it tried to say how that work was going. Splitting a
+    scope had silently removed a permission from everyone already in a room.
+
+    Simulated by writing the pre-split scope list straight to the row, because that
+    is exactly the state the deployed database was in.
+    """
+    room = await make_room()
+    member = await join(room, display_name="Worker seat")
+    old_scopes = [s.value for s in member.participant.scopes if s is not Scope.TASK_PROGRESS]
+    await db.execute(
+        "UPDATE participants SET scopes = ? WHERE id = ?",
+        (db.dumps(old_scopes), member.participant.id),
+    )
+
+    reloaded = await store.load_participant(member.participant.id)
+    assert Scope.TASK_PROGRESS in reloaded.scopes, "the parent scope carries the child"
+
+    issued = await _mint(reloaded_holder := reloaded, label="companion")
+    runtime = await store.load_participant_by_token(issued.token)
+    assert Scope.TASK_PROGRESS in runtime.scopes
+    assert Scope.TASK_PROPOSE not in runtime.scopes, "and the parent still does not travel"
+    assert reloaded_holder.id == runtime.id
 
 
 async def test_a_guest_can_run_a_worker_without_holding_the_seat_token(make_room, join):
