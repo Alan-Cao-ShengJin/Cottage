@@ -152,3 +152,35 @@ async def test_hydration_does_not_claim_to_be_conversation_history(room_with_two
     # Room-wide conversation is not in here. It is in the room, deliberately.
     assert "messages" not in state
     assert state["addressed_to_you"] == []
+
+
+async def test_hydration_is_reachable_without_discovering_a_new_tool(room_with_two):
+    """A capability nobody can discover is a capability nobody has (D-040).
+
+    The live ChatGPT connector reported still seeing the old 15-tool list after
+    `resume_here` shipped — the server exposed 16, so its schemas are cached per
+    connector rather than refreshed. That makes a *new tool* the one delivery mechanism
+    an already-connected attended client cannot receive, which is exactly the client
+    hydration exists to help.
+
+    So the same projection is reachable through a parameter on a tool that already
+    shipped. This test is the guard: if the two paths ever diverge, the fallback that
+    attended clients depend on silently becomes a different feature.
+    """
+    from app.adapters.mcp import server as mcp_tools
+
+    room, worker, _peer = room_with_two
+
+    direct = await projections.hydrate(room_id=room.room.id, recipient=worker.participant)
+    via_existing_tool = await mcp_tools.get_room_state(
+        detail="resume", participant_token=worker.token
+    )
+
+    assert via_existing_tool["ok"] is True
+    assert via_existing_tool["type"] == "hydration"
+    assert via_existing_tool["you"]["participant_id"] == direct["you"]["participant_id"]
+    assert via_existing_tool["is_conversation_history"] is False
+
+    # And it is still the small payload, not the board wearing a different name.
+    assert "participants" not in via_existing_tool
+    assert "tasks" not in via_existing_tool

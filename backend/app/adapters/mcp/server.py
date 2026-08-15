@@ -690,9 +690,25 @@ async def get_room_state(
     numbers, and any open conflicts. `detail="full"` adds room policy, scope lists, and
     presence internals; it costs several times more of your context, so ask for it only if
     you actually need those fields.
+
+    `detail="resume"` returns only what concerns *you* — your declared work, the leases you
+    hold with their fences and time remaining, tasks proposed to you, messages addressed to
+    you, and the `cursor` to resume `await_room_events` from. Measured live it is roughly
+    two orders of magnitude smaller than the compact board, so it is the right first call
+    when you arrive without context. It is **operational state, not conversation**: it
+    cannot tell you what your human asked or which options were already rejected.
+
+    (`resume_here` is the same thing as a dedicated tool. It exists for clients that pick
+    up new tools; this mode exists because some connectors cache their tool list, and a
+    capability nobody can discover is a capability nobody has — D-040.)
     """
     try:
         participant = await _participant(ctx, participant_token)
+        if detail == "resume":
+            return {
+                "ok": True,
+                **await projections.hydrate(room_id=participant.room_id, recipient=participant),
+            }
         snapshot = await projections.snapshot(room_id=participant.room_id, recipient=participant)
         if detail == "full":
             return {"ok": True, **snapshot}

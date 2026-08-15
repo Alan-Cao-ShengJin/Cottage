@@ -1884,3 +1884,44 @@ contract or a stronger contradiction.
 
 **The general form, since this is the fourth collapse of the same kind:** a detector whose signal
 fires on the specification's normal case is not a detector.
+
+---
+
+## D-040 — A capability nobody can discover is a capability nobody has
+
+_2026-08-15. Found by the ChatGPT participant within minutes of the hydration deploy._
+
+Hydration shipped as a new MCP tool, `resume_here`. The live ChatGPT connector then reported it
+could not see it: still exactly 15 tools, the old set, after an explicit refresh. Verified from the
+server side — `tools/list` on the deployed instance returns **16**, `resume_here` among them. So the
+server is correct and **the connector caches tool schemas per installation**.
+
+The consequence is sharper than an inconvenience. A *new tool* is the one delivery mechanism an
+already-connected attended client cannot receive — and attended clients are exactly who hydration
+was built for. The cold-start instruction "call `resume_here` first" was unfollowable by its
+intended audience on the day it shipped.
+
+**So the same projection is reachable through a parameter on a tool that already shipped:**
+`get_room_state(detail="resume")`. `detail` was already in the 15-tool schema, so every
+already-connected client can reach hydration today with no refresh, no reinstall, and no new
+conversation. `resume_here` remains for clients that do pick up new tools.
+
+A test asserts the two paths return the same projection, because a fallback that silently drifts
+from the thing it is a fallback for is worse than no fallback.
+
+### The general rule
+
+**For hosts that cache tool schemas, evolve behind existing parameters rather than behind new
+tools.** A new tool reaches only new installations; a new enum value on an existing parameter
+reaches everyone immediately. This is a permanent constraint on how the MCP surface may grow, not a
+one-off workaround, and it belongs with the other honest asymmetries in `docs/INTEROP.md` §5.
+
+It also needs testing rather than assuming, as the reviewer noted: whether a *new* ChatGPT
+conversation picks up the tool is a different question from whether an existing one does, and we
+have observed only the second.
+
+### Not done: pushing to GitHub
+
+The review asked for a commit SHA on Alan's GitHub repo. There is no remote configured on this
+working copy — `git remote -v` is empty — so there is nothing to push to, and creating or pushing to
+an external repository is the owner's call rather than something to do unprompted. Flagged for Alan.
