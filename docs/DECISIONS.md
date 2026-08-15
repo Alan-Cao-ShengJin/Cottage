@@ -1206,3 +1206,87 @@ log is a second UI with worse ergonomics.
 Per-attachment cursors, stable event ids, ordering and dedupe, and *marking history unavailable
 rather than pretending sync succeeded* are all good requirements. They apply unchanged to the
 hydration projection, which is built on the event log where those properties already hold.
+
+---
+
+## D-031 — Disclosure and custody are different rules; arbitration settled
+
+_2026-08-15. Rebuttal to D-030 and answer to the arbitration question, both from the ChatGPT
+participant in-room._
+
+### Conceded: D-030 overstated hydration
+
+D-030 claimed the hydration projection was *"strictly better for the stated purpose, not merely
+safer."* That is wrong, and the rebuttal is right:
+
+> a blocker/task projection cannot tell a new attachment what the human asked, what tradeoffs
+> were discussed, or what answer the agent already gave.
+
+Work state and conversational continuity are different things. Hydration delivers the first and
+cannot deliver the second. The requirement is legitimate and remains unmet.
+
+### The counter-design, and the rule it does not reach
+
+The proposal: a **private logical-agent context stream**, readable only by that agent's own
+attachments and its owning human, never by peers; plus ingress secret-detection with redaction to
+typed handles; plus `privacy_class = agent_private`. Room coordination stays explicit-share only.
+
+This is a real improvement and it solves the problem D-030 actually measured: nothing crosses a
+*room* boundary, so principle 7 is intact. But it relocates the conflict rather than dissolving
+it, because two different rules are in play:
+
+- **Disclosure** — *only explicitly shared information enters a room.* The counter-design
+  satisfies this.
+- **Custody** — *never accept, store, log, or relay ... private agent memory ... or unrelated
+  context.* It does not. "Accept" and "store" are server-side verbs. A per-agent conversational
+  stream is private agent memory by definition, and we would be holding it.
+
+Custody is not a lesser rule. It sets the blast radius of a breach: today a compromise of this
+database leaks coordination metadata; with a context stream it leaks the working conversations of
+every connected agent. It also inverts the product's position — *we host coordination, not
+inference; agents stay privately owned* — by making this the most sensitive system in a
+customer's stack rather than the least.
+
+And redaction is a mitigation, not a boundary. It is detection-based, and detection fails open and
+fails silently. D-030's own measurement found five distinct credential formats in one transcript;
+a detector tuned to those five is a detector that misses the sixth. This project has now shipped
+four defects of exactly that shape (D-023, D-024, D-026, D-027), every one of them a control that
+looked correct and permitted the thing it existed to prevent.
+
+### What gets built for continuity instead
+
+**Now — agent-authored continuity notes.** The agent writes a compact, deliberate handoff for its
+own future attachments: what the human asked, decisions taken, open questions, tradeoffs
+considered and rejected. Explicit, authored, small, and never raw transcript. It extends the
+existing decision/blocker vocabulary to narrative context, and it puts the disclosure judgement
+exactly where this architecture puts every other one — with the agent, per item, at the moment of
+sharing. For the stated purpose it is also *better* than a transcript: two hundred words of "here
+is what happened and why" beats seventeen megabytes of chat, and `docs/INTEROP.md` §4 already
+holds that context economy is part of interop.
+
+**If that proves insufficient — client-side encrypted continuity.** The agent owner holds the key;
+the server stores ciphertext it cannot read and never indexes. That is the principled version of
+the counter-design: it delivers continuity across one owner's control surfaces while leaving
+custody with the owner, which is the only arrangement that satisfies both rules at once. Not built
+now because key management is a product decision, not a patch, and the authored-notes path should
+be shown to be inadequate before we take on the harder one.
+
+**Still refused: bulk ingestion of raw transcripts, room-wide or agent-private.**
+
+### Arbitration: settled, with the rebuttal's refinement adopted
+
+The step-3 proposal was right on four points and better than ours on the fifth:
+
+1. `executor_connection_id` as **soft affinity**; `participant_id` remains the lease owner. Agreed.
+2. Disconnect clears affinity but keeps the lease while another attachment preserves agent
+   liveness. Agreed.
+3. Human steering events are delivered ahead of ordinary work events. Agreed.
+4. Human-originated `take_over` is permitted **at any time** — the human owns the agent and must
+   be able to preempt without waiting out a timeout. Agreed, and this was the open question.
+5. **Autonomous, attachment-to-attachment `take_over` is not the same case**, and we had not
+   separated it. Default: only when the current executor is non-live or stale; otherwise it
+   requires an explicit `force_take_over` carrying a reason. Without that split, two healthy
+   unattended runtimes of one agent can thrash each other indefinitely. Adopted.
+
+The distinction that carries this is that a human preempting their own agent and one runtime
+seizing work from another are different acts wearing the same verb.
