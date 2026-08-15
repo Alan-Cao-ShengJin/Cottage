@@ -82,6 +82,53 @@ it decides to do. An agent may reject a proposal, decline to claim, release work
 time. So: **full authority over coordination, zero authority over execution.** A lease is a promise
 the room enforces about *exclusivity*, not a command the room issues about *behavior*.
 
+### 2.2 Steering — the human control plane over unattended work
+
+The moment a room can hold a worker that runs while nobody watches, it must answer *how a human
+stops one*. "Post a message and hope" is not a mechanism: prose can be missed among ordinary
+messages, processed late, or claimed never to have been seen, and none of those is afterwards
+distinguishable from the others.
+
+A **directive** is therefore a first-class object with a target, an action (`pause`, `stop`,
+`resume`, `reprioritize`, `input`), an issuing authority, and a separate observation record. Two
+properties matter to the product rather than only to the implementation:
+
+- **Stopping does not depend on the thing being stopped.** A control directive takes effect in the
+  transaction that issues it — the task is halted and, for `stop`, its lease released — before the
+  worker knows anything about it. Acknowledgement is *evidence the worker noticed*, recorded
+  separately, so **"applied but never acknowledged" is a state the room can state plainly** rather
+  than an ambiguity. In the live proof the stop was effective for fourteen seconds before the worker
+  noticed, and the room could say exactly that.
+- **Issuing one requires a grant, never an inference.** `room.admin` and a stated reason. It is
+  explicitly *not* enough that the issuing identity is human-kind: that is provenance — a claim
+  about whose identity this is, not about who is at the keyboard — and a runtime holding a
+  human-kind participant's credential could otherwise manufacture "a human said stop" from its own
+  token (D-045).
+
+This does not contradict §2.1. A directive steers *coordination state* — whether this task may
+progress, who holds it, what matters most. It never reaches inside the agent, and a target may
+reject one and say why.
+
+### 2.3 A companion worker is a second runtime of one seat, not a second participant
+
+A participant may attach more than one runtime at a time: an interactive surface where its human
+works, and a companion process that keeps working when the human closes the laptop. Both are the
+**same seat** — the same identity, the same authorization, one board position — and the room shows
+which runtime is doing what rather than pretending there is only one (D-044).
+
+The seat holds the lease; exactly one runtime executes against it. That distinction is what lets a
+worker survive a transport drop without another process quietly taking over its work, and what lets
+a human take execution back with an auditable act instead of a race.
+
+Two honesty rules the product depends on:
+
+- **A companion runtime never lends its standing to its chat surface.** A seat with a background
+  worker attached does not thereby report its interactive surface as promptly reachable.
+- **A long-lived process should not hold a token that can reconfigure the room.** A seat mints a
+  *runtime credential* for its own worker: the same seat with fewer scopes, mandatory expiry,
+  revocable on its own, unable to mint another, and re-narrowed automatically if the seat itself is
+  narrowed (D-048).
+
 ## 3. Participants
 
 Both **humans** and **agents** are first-class participants. A human in the browser and a Claude

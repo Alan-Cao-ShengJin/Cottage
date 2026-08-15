@@ -2154,3 +2154,210 @@ executor's own connections when one is given.
 `backend/tests/test_executor_affinity.py`: 27 tests over the state axis, written alongside per
 D-033 — including capabilities changing on resume, a stale-but-open socket, and the assertion that
 absence of a recorded executor imposes no affinity, since every pre-existing lease has NULL there.
+
+---
+
+## D-045 — The control plane: a directive must not depend on the thing it directs
+
+_2026-08-15. Slice 3 of M2.4. `backend/app/domain/directive.py`, `backend/app/core/directives.py`,
+`apply_steering_tx` in `core/tasks.py`. 19 tests in `backend/tests/test_directives.py`._
+
+An unattended worker was now possible (D-044) and immediately raised the question that makes it
+either a product or a liability: **how does a human stop one?** Until this slice the honest answer
+was "post a message and hope", which is not a mechanism. The argument that settled the shape came
+from the ChatGPT participant in the room and is about falsifiability rather than taste: prose can be
+missed among ordinary messages, processed late, or claimed never to have been seen, and afterwards
+none of those three is distinguishable from the others. A directive has a target, an action, an
+issuing authority and an observation record, so *"the worker never saw it"* becomes something the
+room can state rather than something nobody can check.
+
+### Effect and observation are orthogonal, and that is the whole design
+
+A control action — `pause`, `stop`, `resume`, `reprioritize` — **applies in the transaction that
+issues it**. Nothing waits for the target. Waiting for acknowledgement would make stopping a runaway
+worker depend on the cooperation of the runaway worker, which is precisely the failure the feature
+exists to prevent. Acknowledgement is recorded separately as evidence that the target noticed, which
+makes *applied but never acknowledged* a real, nameable state instead of an awkward gap in a
+lifecycle enum. There is deliberately no single status field mixing the two.
+
+`input` is the one exception: there is no room state to halt, so nothing can apply until the target
+consumes it. It stays `PENDING`. Waiting there is intrinsic rather than a control failure — and
+because it is the only such action, the exception does not erode the rule.
+
+`stop` does more than mark: it releases the lease and ends the work declarations linked to the task.
+A task whose holder has been told to stop, but who still holds it, is worse than either state alone.
+
+### Authority is a grant, never an inference — and the hole was in code I had already written
+
+`require_override_authority` demands `room.admin` plus a stated reason. The first implementation
+accepted `identity.kind == HUMAN`, reasoning that provenance is stamped server-side and cannot be
+forged by a caller. The ChatGPT participant flagged the class of error and the instance was mine.
+
+Unforgeable is not the property required. `kind` attests *whose identity this is*, never *who is at
+the keyboard*. An unattended runtime holding a human-kind participant's credential could therefore
+manufacture "a human said stop" out of its own token — and every check would pass, because every
+check was true. **Provenance is attribution, not verification** (`docs/SECURITY.md`), and the
+distinction only bites where a decision, rather than a display, is made from it. Human-ness is now
+recorded where claims about who acted belong, and is never sufficient on its own.
+
+### The grant nobody could make
+
+Requiring `room.admin` exposed that there was no way to *become* an admin after joining: roles were
+fixed at join. So the first thing the control plane proved was that the control plane was
+unreachable. `rooms.set_participant_role` closes it — admin-only, narrowing rules intact, reason
+required, event stamped. 7 tests in `backend/tests/test_participant_roles.py`.
+
+### Observed, not merely tested — the stop proof
+
+Run in the live cross-vendor room `room_01M022GNSYC29CSPWDDYBC` against `agent-rooms.fly.dev`, with
+seq evidence, because a preemption mechanism asserted only by its author's unit tests is exactly the
+kind of claim this project has been wrong about before:
+
+| seq | what |
+|---|---|
+| — | task `tsk_01M026VN9229H0WKV6HGM4` claimed by unattended attachment `att_01M022XV0A6VW8W7ZFSGPD`, fence 1 |
+| 46 | lease renewed after ~37s — the worker was genuinely mid-work, not idle |
+| 47 | owner issues `stop`; `task.steered=stopped` |
+| 48 | claim force-released, same transaction |
+| 49 | `directive.issued`, `effect_status=applied` — applied *before* any acknowledgement |
+| 50 | worker acknowledges, ~14.8s later |
+
+The task never completed. The gap between 49 and 50 is the point: the stop was already effective for
+fourteen seconds during which the worker had not yet noticed.
+
+---
+
+## D-046 — The front door: the gate is account provenance, not human-ness
+
+_2026-08-15. `core/rooms.create_room`, `api/oauth.py`. 9 tests in
+`backend/tests/test_room_creation_front_door.py`._
+
+The ChatGPT participant tried to start a room and could not. `create_room` required a *user*
+principal, so an agent identity — the exact thing this product exists to connect — was structurally
+incapable of opening the front door. The product claim is that anyone starts a room and invites
+someone over the internet; it was false for half of the possible starters.
+
+`create_room` now takes `user=None, principal=None` and gates on **account provenance**: the caller
+belongs to an authenticated account in an org. Whether that account's identity is human-kind or
+agent-kind is descriptive, and reusing it as an authorization gate is the same error corrected in
+D-045, found twice in one day in two unrelated call sites. That repetition is the argument for
+writing it down rather than fixing it locally: `kind` reads like a permission and is not one.
+
+Two defects rode along, both in the OAuth path and both invisible to the gate:
+
+- An OAuth caller was being asked for a credential it had already presented. The token was right
+  there in the request; the code wanted a second one.
+- I widened the guard and its docstring but not the call site — `principal.user` was still being
+  passed where `principal` was now expected. The adapter had **zero test coverage**, which is why a
+  green gate said nothing. An MCP-tool-level test now exists; the general lesson is recorded in
+  D-049.
+
+---
+
+## D-047 — A poll-only worker described as attended is a dishonest capability
+
+_2026-08-15. `POST /connect`, `api/routes.py`._
+
+The room reported the unattended worker as `attended`. Nothing in the capability derivation was
+wrong — the connect route hardcoded `transport="sse"`, and the negotiation, correctly intersecting
+declared capabilities with transport reality, stripped `supports_poll` from a client that had
+declared it and could honour it.
+
+The client now declares its transport, and the intersection has something true to intersect with.
+Recorded because of what it nearly cost: **principle 5 (honest capabilities) was upheld by every
+line of the derivation and violated by the system**, since a hardcoded input made the honest
+computation produce a false answer. A guarantee enforced downstream of a lie is not enforced. Where
+negotiation intersects declared capability with transport reality, the transport must be *observed*,
+never assumed by the code doing the observing.
+
+---
+
+## D-048 — A credential narrow enough to leave on a machine
+
+_2026-08-15. `MintCredentialCommand` / `RevokeCredentialCommand`, `RuntimeCredential`,
+`core/store.load_participant_by_token`. 12 tests in `backend/tests/test_runtime_credentials.py`._
+
+Asked for by the ChatGPT participant, and the reasoning was right: running a companion worker meant
+copying the participant token into a daemon, and that token carries everything the seat can do —
+`room.admin` included, and the authority to mint more credentials. A process that only needs to take
+and finish its own work should not be able to reconfigure the room it works in.
+
+**A credential resolves to the same participant with fewer scopes, never to a different one.** That
+single property is what keeps every downstream authorization site unchanged: no ownership check has
+to learn what a credential is, and therefore none of them can forget. A second-participant design
+would have needed every such site audited, and the one missed would have been the hole.
+
+Four properties, each of which the design is worthless without:
+
+- **Re-clamped on every use**, not frozen at mint. Scopes are the intersection of requested, held,
+  and a fixed runtime allowlist, recomputed per request — so narrowing a seat narrows tokens already
+  sitting in daemons. Frozen scopes would mean revoking authority required hunting down every token
+  issued while the seat was broader, and the one you missed is the one that matters.
+- **A credential cannot mint another.** Without this the narrowing is decorative: any holder issues
+  itself a sibling and the chain is as strong as its weakest link rather than its first.
+- **Expiry is mandatory.** There is no forever option, and it is enforced on use.
+- **Revocation kills one runtime and leaves the seat alone** — the reason the machinery is worth
+  having. A lost laptop is one revocation, not a participant-token rotation that breaks everything
+  else using it.
+
+The grant is logged; the token never is, because a credential in the event log is a credential in
+every replay and export of that log.
+
+### The scope split this forced
+
+Marking a task `in_progress` went through `task.update`, which required `task.propose` — so one
+scope meant both *"may report progress on my own work"* and *"may create tasks and hand them to
+other people"*. A least-privilege token that could hand out work would not have deserved the name.
+`Scope.TASK_PROGRESS` is now separate and `update` requires it; the runtime allowlist carries the
+narrower one. Recorded first as a known coupling and stated in the room *before* it was fixed, which
+is the right order: the coupling was discovered by the credential work, and hiding it until a fix
+existed would have let "least privilege" be claimed while it was untrue.
+
+---
+
+## D-049 — A green gate is weakest exactly where this product is most exposed
+
+_2026-08-15. A pattern entry, not a feature. Written because it happened four times in one day._
+
+Every defect that reached a real client on 2026-08-15 was in an adapter, a projection, a route
+shape, or a deployment input — never in `core/`. `core/` has dense tests and they work. The failures
+were all at the boundary between a correct core and a real client:
+
+| What was wrong | Where | Why the gate could not see it |
+|---|---|---|
+| Hydrate offered proposals whose tasks were terminal | projection | Each row was valid; the *set* was unusable |
+| The front door refused an authenticated caller | adapter, untested | Zero coverage, so green meant nothing (D-046) |
+| A polling worker reported as `attended` | route input | Derivation correct, input hardcoded (D-047) |
+| A stopped task rendered as `open` in the compact board | projection | `status` alone reads as *available*; steering was omitted |
+
+The third row of that table is worth restating: **a stopped task shown as open says the opposite of
+the truth about the most consequential state a human can put a task into.** Stop clears the claim,
+so `status` alone reads "take me". The compact projection now carries `steering`, the reason, and
+`claimable: false`. A projection that omits a field renders a *different* state, not a partial one.
+
+Two more from the same day, both mine and both worth naming:
+
+- **A 405 I diagnosed wrong.** The route existed as `PATCH /tasks` while every sibling —
+  `claim`, `renew`, `release`, `complete`, `cancel`, `take_over`, `steer` — is `POST /tasks/<verb>`.
+  My worker followed the pattern its neighbours set and was refused. My first diagnosis, *"no route
+  exists"*, was wrong. The real defect is an API whose shape cannot be inferred from its own
+  siblings, which is a defect even when each individual route is defensible. `POST /tasks/update` is
+  canonical; `PATCH` stays for existing callers.
+- **A work card that outlived its task.** The stop proof left a declaration reading *"Working:
+  deploy the staging environment"* against a task nobody held and nobody could claim — the board
+  asserting activity that had been forbidden minutes earlier, which is worse than showing nothing.
+  Halting a task now ends its declarations with reason `superseded`.
+
+### The distinction this establishes, at the ChatGPT participant's request
+
+**Deterministic orchestration proof ≠ intelligent-worker proof.** The stop proof (D-045) establishes
+that the coordination mechanism works: a lease was held by an unattended runtime, preempted
+atomically by a remote human, and never completed. It establishes *nothing* about a worker that
+thinks, because the executor was a fixed handler counting steps. These are separate claims requiring
+separate evidence, and conflating them is the most available way to overstate this product. The
+deterministic proof must be re-run through the executor boundary — not the handler that produced it
+— before the intelligent claim is attempted at all.
+
+Three of the four table rows were found by the ChatGPT participant asking for evidence rather than
+accepting a claim. That is the argument for this product observed from inside it, and it is also the
+reason the standard here is a live run rather than a passing suite.

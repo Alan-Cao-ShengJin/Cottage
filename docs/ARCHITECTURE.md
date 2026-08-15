@@ -98,6 +98,15 @@ scripts/         check.py gate, dev utilities
   timestamps. Capabilities live here rather than on the identity because the same agent may attach
   from a pushable transport now and a poll-only one later, and coordination must react to what is
   true right now. **Presence is derived from connections, never stored as a mutable flag.**
+- **Attachment** — a durable *runtime* of a participant, keyed `UNIQUE (participant_id, label)`. One
+  seat may have several: an interactive surface and a companion worker. It outlives any single
+  connection, which is what makes "the same runtime came back after a dropped transport"
+  expressible at all; a client that declares no label is ephemeral and has no attachment row. See
+  D-037/D-038 for what an attachment does and does not attest.
+- **RuntimeCredential** — a narrow, expiring, individually revocable token for **one runtime of one
+  seat**. It resolves to the same participant with fewer scopes, never to a different participant,
+  which is what keeps every ownership check in the system unchanged (D-048). Stored hashed; the
+  model never carries the token.
 
 ### Work awareness
 - **WorkDeclaration** — "what I am doing right now": headline, `status`
@@ -115,6 +124,17 @@ scripts/         check.py gate, dev utilities
 - **TaskClaim** — an exclusive **lease**: `lease_id`, monotonic `fence` per task, `expires_at`,
   `heartbeat_interval_s`. Mutations to a claimed task require the current fence. Expiry is enforced
   lazily on read *and* by a background reaper, so a dead claimant cannot park work.
+  A claim also records its **executor** — `executor_attachment_id`, or `executor_connection_id` for
+  an ephemeral runtime. The seat holds the lease; one runtime executes against it. Executor liveness
+  is *derived* from that runtime's currently-open connections on every read, never stored, so there
+  is no clearing branch to forget when a worker dies silently (D-044).
+- **Steering** — `running` | `paused` | `stopped` on a task, orthogonal to `status` and to the
+  claim. Set by a control directive; consulted by `claim`, `update` and `complete`. `complete`
+  checks it **before** the lease so a stopped worker is told why rather than told it lost its lease.
+- **Directive** — the control plane (D-045). Target, action, issuing authority, reason, and a
+  separately recorded acknowledgement. Control actions apply in the issuing transaction; `input` is
+  the sole action that legitimately stays `pending`, because it has no room state to halt. Effect
+  and observation are two fields precisely so *applied but unacknowledged* is representable.
 
 ### Shared state & artifacts
 - **StateEntry** — `(room_id, key)` → JSON value, with `revision` (monotonic per key),
@@ -246,6 +266,37 @@ semantic the domain relies on. PostgreSQL compatibility must be established befo
 **ADR-008 — Notify-then-read bus.** The bus carries only `(room_id, seq)`. Consumers re-read the log.
 This makes the fanout path lossless-by-construction and lets a slow consumer degrade to latency
 rather than data loss.
+
+**ADR-011 — Execution affinity binds to the attachment, not the connection** (D-044). A seat may
+have several runtimes; a runtime may have several connections and may lose all of them without
+dying. Keying affinity on the connection would force a guess whenever a runtime holds more than one
+— and would have broken the MCP path, where a connector calling `join_room` twice legitimately has
+two. Where the executor genuinely cannot be determined, the server returns `ambiguous_executor`
+rather than picking. Cost accepted: an ephemeral client that declares no attachment label gets
+connection-scoped affinity and therefore weaker recovery.
+
+**ADR-012 — Control effect is transactional; acknowledgement is evidence** (D-045). A directive's
+effect lands in the transaction that issues it, so halting a runaway worker never depends on the
+runaway worker. Acknowledgement is stored as a separate observation rather than a lifecycle stage,
+which makes *applied but never acknowledged* a representable state instead of a gap. Rejected: a
+single status enum spanning both, which would have made the room unable to distinguish "the worker
+ignored it" from "the worker never got it". `input` is the sole action that waits, because it is the
+sole action with no room state to change.
+
+**ADR-013 — Authority is a grant; provenance is attribution** (D-045, D-046). No authorization
+decision reads `identity.kind`. Human-ness is stamped server-side and unforgeable *by a caller*, but
+it attests whose identity this is, not who is at the keyboard — so an unattended runtime holding a
+human-kind participant's credential could otherwise manufacture human authority from its own token.
+Room-scoped power comes from `room.admin` plus a stated reason; room *creation* gates on account
+provenance. This was violated twice in one day in unrelated call sites, which is why it is an ADR
+rather than a comment.
+
+**ADR-014 — A narrow credential is the same principal with fewer scopes** (D-048). Rejected: a
+second participant per runtime, which would have required every ownership check in the system to
+learn what a credential is — and the one that forgot would have been the hole. Scopes are the
+intersection of requested, held, and a fixed runtime allowlist, **recomputed on every request** so
+that narrowing a seat narrows tokens already deployed. Cost accepted: one extra join on the
+authentication path.
 
 ## 8. Known seams / scaling
 

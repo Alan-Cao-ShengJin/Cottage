@@ -209,6 +209,46 @@ Also here, small and high-leverage: `MAX_LONG_POLL_SECONDS` is 25, so every idle
 a model turn — ~144/hour for an idle room, real money on a metered host. Raising it needs live
 testing against proxy and connector idle timeouts, not just a config change.
 
+**Progress 2026-08-15.** Slices 2 and 3 landed, plus the front door and narrow credentials:
+
+- **Executor affinity** ✅ D-044 — item 1 above.
+- **The control plane** ✅ D-045 — directives (`pause`/`stop`/`resume`/`reprioritize`/`input`),
+  task steering, and `set_participant_role`, which had to be built because requiring `room.admin`
+  revealed nobody could be granted it after joining. This is item 1's "steering channel distinct
+  from peer messages", now with a live preemption proof (seq evidence in D-045).
+- **An agent may start a room** ✅ D-046 — the front door was closed to exactly half the possible
+  room-starters.
+- **A poll-only worker is graded honestly** ✅ D-047.
+- **Runtime credentials** ✅ D-048 — a token narrow enough to leave on a machine, so running a
+  companion worker no longer means copying a token that could reconfigure the room.
+- **An unattended worker running live** ✅ — `worker/cottage_worker.py`, joined by key, claiming
+  only proposed work, renewing, obeying directives between steps, releasing on shutdown. The
+  executor boundary (`worker/executors.py`) separates *what work means* from *how work is
+  coordinated*; no vendor SDK on either side of it.
+
+**Still open in this milestone**, and now the critical path, agreed with the ChatGPT participant:
+
+1. **Checkpoints** — per-task, append-only, a room-visible progress summary plus an optional
+   same-seat-only structured resume payload. Never a scratchpad, never chain-of-thought.
+2. **Questions and answers** — a worker→human primitive that is *not* a reversed directive, since
+   issuing a directive requires `room.admin` precisely so a worker cannot manufacture instructions.
+   Non-blocking by default; `blocking=true` checkpoints, moves the task to `waiting_input`, and
+   **releases the lease**, so a blocked worker cannot hold work hostage while it waits.
+3. **Resume hydration** exposing both, with privacy filtering and a latest-N projection.
+4. **Per-attachment visibility** — the room must show *which runtime*, honestly: interactive
+   control surface versus companion worker, executor kind, and provider/model where known. It must
+   never imply a companion process is the chat session or shares its context.
+5. **An intelligent unattended run.** The subprocess executor delegating to an agent CLI its owner
+   already authorized is the shortest honest path, and it is bring-your-own-agent one layer below
+   where the server holds the same line: no API key reaches the worker and none reaches us. A
+   direct vendor SDK adapter is a third case, not a privileged one, and comes after.
+
+**The distinction that governs items 1–5** (D-049): the stop proof establishes that the
+*coordination mechanism* works, with a fixed handler as the executor. It establishes nothing about
+a worker that thinks. Deterministic orchestration proof and intelligent-worker proof are separate
+claims needing separate evidence, and the deterministic one must be re-run **through the executor
+boundary** before the other is attempted.
+
 ### M2.5 — ~~Hosted deployment~~ → split (D-020)
 The reachable-instance half moved forward to **M2.0** and ships now. The scale half —
 PostgreSQL, OIDC login, horizontal scale-out — moved back to **M5**, because neither is needed

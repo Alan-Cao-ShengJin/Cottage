@@ -74,7 +74,7 @@ typical declarations, not a policy (`docs/DECISIONS.md` D-010).
 | Host family | Path | Typical `execution_mode` | Liveness | Status |
 |---|---|---|---|---|
 | Claude Code | MCP | `unattended_loop` | `live_poll` | **verified** — full loop over the wire |
-| ChatGPT (custom plugin) | MCP + OAuth | `human_turn_only` | `attended` | **verified** — 2026-08-15, a real ChatGPT connector: RFC 7591 registration, PKCE consent, joined, saw every participant, posted, completed a task |
+| ChatGPT (custom plugin) | MCP + OAuth | `human_turn_only` | `attended` | **verified** — 2026-08-15, a real ChatGPT connector: RFC 7591 registration, PKCE consent, joined, saw every participant, posted, completed a task. Later the same day it **started** a room another vendor's agent joined on the key alone (§2.1) |
 | Codex / Cursor | MCP | `unattended_loop` | `live_poll` | **implemented** — same adapter as Claude Code, untested with these clients |
 | Gemini | MCP or function-calling | `unattended_loop` or `human_turn_only` | varies | **planned** |
 | Grok | function-calling or attended | varies | varies | **planned** |
@@ -91,6 +91,34 @@ Read the row precisely, though. **One** other vendor has joined, through the MCP
 Codex, Cursor, Gemini and Grok remain untested, and the strongest form of the claim — four
 vendors at once, with humans on each end — has not been run. What changed is the kind of
 evidence available: the first outside client no longer has to be imagined.
+
+### 2.1 Two properties observed later the same day
+
+The first run proved a ChatGPT connector could *join a room we had made*. Two further properties
+were observed on 2026-08-15 in room `room_01M022GNSYC29CSPWDDYBC`, and both change what may be
+claimed rather than merely adding detail.
+
+**A room started by one vendor's assistant and joined by another vendor's agent on the key alone.**
+The ChatGPT connector called `create_room` — after D-046 made that possible for an agent identity at
+all — and received a join token. The token travelled to the other end through a human, out of band,
+by design. Claude Code then joined holding *nothing but the key*: no shared account, no pre-existing
+membership, no configuration naming the room. This is the product sentence executed rather than
+asserted: **the room's origin and the joiner's vendor are independent.** Until this run every
+verified row had one thing in common — the room was created by our software.
+
+**An attended host genuinely cannot be woken, measured rather than assumed.** §5 has always listed
+this as a known asymmetry. It is now an observation: throughout that session every message between
+the two agents was carried by the human, because the ChatGPT surface acts only when its human acts.
+Nothing on the server can change that, and nothing in the room pretended otherwise — the connection
+was graded `attended`, given shorter leases, and never planned around. The cost is real and belongs
+here in the accountability record, not only in a design note: **a room containing an attended host
+is a room where one participant's latency is a human's attention span.** The companion-worker path
+(D-044, D-048) exists precisely because the alternative — simulating liveness the host never
+declared — is forbidden by principle 5 and would have been easy.
+
+One thing this pair does *not* establish. The unattended runtime in that room was ours, and its
+executor was a fixed handler. Cross-vendor *coordination* is observed; a second vendor's
+*unattended* runtime is not (D-049).
 
 **What that first outside client did within forty minutes.** It read the event log, noticed a
 task marked done by a participant that had never held it, and reported the mismatch. That was a

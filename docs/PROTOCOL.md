@@ -137,13 +137,24 @@ Presence is derived, never asserted.
 
 ### Credentials that can join
 
-Three things authenticate a join, and they are deliberately different in what else they can do:
+Four things authenticate a caller, and they are deliberately different in what else they can do:
 
 | Credential | Obtained by | Also authorizes |
 |---|---|---|
 | **Principal token** (user) | holding an account on the instance | creating rooms, listing the org's rooms |
-| **OAuth access token** (agent) | a human binding an agent identity at consent | acting as that identity |
+| **OAuth access token** (agent) | a human binding an agent identity at consent | acting as that identity, **including creating rooms** (D-046) |
 | **Invitation token** | being sent a link | **joining the one room it names, and nothing else** |
+| **Runtime credential** | a seat minting one for its own runtime | **the same seat with fewer scopes** — never `room.admin`, never minting another (D-048) |
+
+Room creation gates on **account provenance**, never on whether the identity is human-kind. An
+agent identity backed by an authenticated account may open the front door; that is required by the
+product claim, since half the possible room-starters are agents.
+
+The runtime credential exists so a long-lived process need not hold a token that could reconfigure
+the room. It resolves to the *same participant* with a narrower scope set — the intersection of
+requested, held, and a fixed runtime allowlist, **recomputed on every use** so narrowing a seat
+narrows tokens already sitting in daemons. Expiry is mandatory; revocation kills one runtime and
+leaves the seat intact. `credential.minted` records the grant and never the token.
 
 The third is what makes the product's central claim work: an invited stranger has no account,
 so if an invitation only *identified* a room rather than authenticating its holder, there
@@ -243,6 +254,44 @@ The exclusivity primitive. Rules:
 Lease TTL by host class (defaults, overridable by room policy):
 `native_remote_a2a` 900s · `persistent_local` 900s · `browser_human` 600s ·
 `interactive_client` 300s and only if `allow_interactive_claims`.
+
+### 4.1 Executor affinity — the seat holds the lease, one runtime does the work
+
+A participant may have several runtimes attached at once: a chat surface and a companion worker
+share one seat. The lease belongs to the **seat**; execution belongs to **one runtime of it** (D-044).
+
+- `task.claimed` records `executor_attachment_id` (and `executor_connection_id` for an ephemeral
+  runtime with no attachment). Affinity keys on the **attachment** whenever there is one, so a
+  restart across a lost transport is the same executor and a second process is not.
+- `update`, `complete` and `release` refuse a caller of the right seat that is **not the live
+  executor** → `executor_conflict`, deliberately distinct from `lease_conflict` because the caller
+  *does* hold the lease. Re-claim is guarded identically: the idempotent branch matches on
+  participant, so without the check the cheapest takeover would also be the most invisible one.
+- `renew` is exempt. It changes duration, never who executes, and a sibling extending its own seat's
+  lease cannot produce two runtimes acting at once.
+- **Liveness of the executor is derived, never stored.** The recorded executor is resolved to its
+  currently-open connections and graded on read, so a runtime that dies silently stops being live
+  the moment its heartbeat lapses, with no clearing branch anyone can forget.
+- Where the executor cannot be determined without guessing — several connections, no attachment,
+  no named connection — the server returns `ambiguous_executor` rather than picking one.
+- Two escape hatches, because nothing may hold work hostage. `task.take_over_execution` moves
+  execution between runtimes of one seat and **increments the fence**, so the displaced runtime's
+  next mutation fails as stale rather than landing late. `release(force=true)` is the human override:
+  `room.admin` only, never without a reason, stamped `forced` on the event.
+
+### 4.2 Steering — halting work without waiting for the worker
+
+A task carries `steering` (`running` | `paused` | `stopped`) alongside its status, set by a control
+directive (§2, D-045). It is orthogonal to the lease and to the claim:
+
+- `pause` halts progress and **keeps** the lease. `stop` halts progress, **force-releases** the
+  lease, and ends the work declarations linked to the task.
+- Both apply in the transaction that issues them. Neither waits for the target to acknowledge.
+- `claim`, `complete` and `update` all refuse a halted task. `complete` checks steering **before**
+  the lease, so a worker that was stopped is told *why* rather than told it lost its lease.
+- **A halted task is not claimable, and any projection that shows status without steering is
+  wrong.** Stop clears the claim, so `status` alone reads `open`, which means *take me* — the
+  opposite of what happened (D-049). Projections carry `steering`, its reason, and `claimable`.
 
 ## 5. Reconnect & replay
 
