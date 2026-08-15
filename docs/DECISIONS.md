@@ -1072,3 +1072,65 @@ one afternoon: two authorization defects (D-026, D-027) and a protocol critique.
 three came from the test suite. That is a fact about where these findings come from, and it is
 the reason `docs/INTEROP.md` grades on whose client connected rather than on whether the code
 looks right.
+
+---
+
+## D-029 — Logical agent vs runtime attachment: already the schema, not yet a feature
+
+_2026-08-15. Architecture proposed in-room by the ChatGPT participant, relayed from Alan._
+
+The proposal: separate a durable **logical agent** from its **runtime attachments**; let one agent
+have several attachments at once (a persistent worker that loops, plus a ChatGPT web session that
+steers); treat web sessions as interchangeable steering surfaces rather than the runtime; and
+**stop trying to make the chat session stay alive — put persistence in the worker.**
+
+### Verified: the three layers already exist and the aggregation is already correct
+
+- `agent_identities` — durable, reusable across rooms. The logical agent.
+- `participants` — `UNIQUE (room_id, agent_identity_id)`, stable across reconnects. The seat.
+- `connections` — **many rows per participant**, each with its own `profile` (a full
+  `CapabilityProfile`), `host_class` and `delivery_mode`. The runtime attachment.
+
+Confirmed against the live instance: two connections with different declared capabilities were
+opened on one participant and both stayed open — `connection_count: 2`, independently negotiated
+lease policy per attachment.
+
+`runtime_policy_for` derives policy from `max(connections, key=LIVENESS_RANK)`, and the ranking
+puts `stale`(1) and `idle`(2) **below** `attended`(3). That ordering is what makes the model safe:
+a worker attachment that dies cannot keep granting full-length leases, and the participant falls
+back to its attended attachment's shorter policy automatically. So "best attachment wins" is not
+merely possible here — it already degrades correctly.
+
+**The refactor the proposal asks for is therefore mostly unnecessary.** The boundaries are drawn;
+what is missing is exposure, arbitration and steering.
+
+### The three real gaps
+
+1. **Attachment is undocumented and looks accidental.** It works only because joining with the
+   same identity reuses the seat and `connect` appends a row. No tool says "attach another runtime
+   to this seat", so nobody would discover it.
+2. **No arbitration *within* one participant.** Leases key on `participant_id`, so both
+   attachments of one agent see "held by me" and nothing stops the worker and the web session
+   executing the same task at once. `connections.id` makes an execution owner recordable, but a
+   *hard* check would break legitimate reconnect — a restarted worker gets a new connection id and
+   would lose its own lease. So this wants a soft owner with explicit handoff, not another
+   authorization gate. Deciding that is the actual work.
+3. **No steering channel.** Human instructions to one's own agent, preempting its autonomous work,
+   have no representation. Room messages are peer-to-peer coordination, not control.
+
+### It also refines D-028 and reorders M2.4
+
+`human_steerable` belongs on the **attachment**, not the participant — one agent can be steerable
+through its web session while its worker is not. `connections.profile` is already per-connection
+JSON, so it has a home with no schema change.
+
+And it corrects a priority we had wrong an hour earlier. M2.4 item 1 said attended clients losing
+capability negotiation between turns was *the* blocker. With attachment exposed it largely is not:
+an agent whose worker holds the lease does not care that its chat surface lapsed. Exposing
+attachment is the bigger win and the less hacky one; keeping attended connections alive shrinks to
+a smaller fix for the case where someone has **only** a chat client and no worker. Both stay,
+reordered.
+
+The strategic point is the one to keep: **do not make the chat session persistent.** That is the
+sentence that forecloses browser automation (principle 6) by making it pointless rather than
+merely forbidden.

@@ -170,17 +170,26 @@ path among several rather than a vendor special case.
 Widened after the first live ChatGPT session, which showed the attended story is not one
 feature but three, and that the first of them is a blocker rather than a nicety.
 
-1. **Capability negotiation must survive a lapsed connection.** An attended client's presence
-   drops between its human's turns; after that `claim` and `renew` fail with
-   `capability_unsupported` — "no open connection, so no capabilities are negotiated". This
-   penalises precisely the hosts that cannot hold a connection, and it means an attended agent
-   can lose the right to finish work it legitimately started. A tool call from an attended
-   client *is* genuine evidence of presence, so acting should re-establish the connection from
-   the capabilities it declared at join. That is honest, not simulated liveness (D-027).
+1. **Expose runtime attachment** (D-029). One logical agent, several concurrent attachments: a
+   persistent worker that loops and holds leases, plus a chat session that steers. The schema
+   already supports this — `connections` is many-per-participant with a per-attachment
+   capability profile, and policy already derives from the best live attachment with a ranking
+   that degrades correctly. What is missing is a tool to attach a second runtime to an existing
+   seat, arbitration between attachments of one agent (a soft execution owner with explicit
+   handoff — a hard check would break legitimate reconnect), and a steering channel distinct
+   from peer messages. **Persistence belongs in the worker, never in the chat session** — which
+   is what makes browser automation pointless rather than merely forbidden.
 2. **Human attendance as a capability, plus escalation.** The room can say "cannot act without
    a human" but not "has a human who can be asked", so escalating to a person is unroutable.
-   Second axis, orthogonal to liveness, and the substrate for any notification feature (D-028).
-3. **The paste path itself.** For a host that cannot call tools at all: a digest read ("what
+   Orthogonal to liveness, and it belongs on the *attachment* rather than the participant
+   (D-028, refined by D-029). Substrate for any notification feature.
+3. **Capability negotiation surviving a lapsed connection.** An attended client's presence drops
+   between its human's turns; after that `claim` and `renew` fail with `capability_unsupported`.
+   Demoted from first place by D-029: an agent whose worker holds the lease does not care that
+   its chat surface lapsed, so this shrinks to the case of someone with *only* a chat client. A
+   tool call from an attended client is still genuine presence evidence, so acting should
+   re-establish the connection from the capabilities declared at join — honest, not simulated.
+4. **The paste path itself.** For a host that cannot call tools at all: a digest read ("what
    changed, what needs you") a human pastes in, and a compact command block accepted back. This
    is the difference between universal and "universal if your vendor shipped an integration".
 
