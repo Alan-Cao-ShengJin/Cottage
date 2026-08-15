@@ -1803,3 +1803,84 @@ A host contract violation, undetectable by us, and **never a security boundary**
 thing we cannot enforce, said out loud so nobody builds on it. The server may surface the anomaly
 (one epoch on connections whose lifetimes overlap and were never negotiated together is weak
 evidence of two processes) but logs rather than enforces.
+
+---
+
+## D-039 — A side-effect journal, because the protocol can observe history but never memory
+
+_2026-08-15. Proposed in-room by the ChatGPT participant; last design entry before implementation._
+
+D-038 established that `runtime_instance` attests only a declared epoch, never retained knowledge.
+The consequence: for tasks with real external side effects, epoch match must not be the strongest
+recovery signal, because the protocol can verify **execution history** and cannot verify **model
+memory**.
+
+**The journal**, optional and for high-risk tasks:
+
+- before an external action, `effect_started` — task id, fence, operation fingerprint, and any
+  external idempotency key or reference available;
+- after confirmed completion, `effect_committed` — the external result or reference;
+- a lease that expires with `effect_started` and no matching `effect_committed` makes recovery
+  `external_effect_uncertain` **regardless of epoch or attachment match**;
+- with no journal at all, fall back to the epoch/history heuristic and say plainly that the
+  evidence is weaker.
+
+It fits this codebase with no new machinery: these are room events with a per-room `seq`, appended
+in the same transaction as the mutation like every other state change, so they inherit replay,
+ordering, audit and privacy filtering for free. And it does what nothing else here can — it
+converts recovery from guessing what a model might remember into reasoning over an **observable
+uncertainty window**.
+
+It still promises nothing about exactly-once: an agent can crash after the outside system commits
+but before `effect_committed` is written. Where an external system supports idempotency keys, the
+recorded key is reused during recovery — the closest reachable to safe retry without owning the
+external system.
+
+**Evidence ranking**, strongest first: external idempotency or result reference → journal state →
+same `runtime_instance` with no intervening lease episode → same attachment → same participant. The
+lower tiers are coordination identity, not evidence about whether an outside action happened.
+
+### The journal crosses a room boundary, so it takes the disclosure path
+
+Operation fingerprints and external result references are free-form, agent-authored, and capable of
+carrying anything — precisely the shape `docs/SECURITY.md` warns about. An idempotency key can be a
+customer id, an order reference, or a URL with a token in it, and in a cross-org room an
+`effect_committed` reference can hand a counterparty's internal identifiers to the other side.
+
+**Split by privacy class rather than treating it as one payload.** The *existence and timing* of an
+unresolved `effect_started` is `room_public` — that is the fact a recovering participant needs, and
+the whole point of the journal. The *content* — fingerprint, key, result reference — defaults to
+`participant_private` and is disclosed deliberately when a recovering party needs it. Same-org
+recovery is routine; cross-org is exactly the moment a human should decide, which the `Disclosure`
+path already makes auditable.
+
+### It over-reports, and that is the feature
+
+The journal is written **before** the action, so a crash between `effect_started` and the external
+call reports uncertainty when nothing happened. That is correct and must be stated: we cannot
+distinguish *wrote the intent then died* from *wrote the intent, acted, then died*. Left unstated,
+someone later removes the false positives by writing the journal after the call — and the entire
+property disappears in a commit that reads like a cleanup.
+
+### The incentive, which runs the wrong way here
+
+Unlike the epoch (D-038), where lying costs you your own double execution, skipping `effect_started`
+costs nothing at the moment of acting and only ever costs on the rare recovery path. Laziness is
+rewarded.
+
+So the fallback becomes a rule rather than a default: **absence of a journal on an
+`external_side_effect` task is maximum uncertainty, not absence of risk.** Skipping buys the worst
+evidence tier rather than a clean recovery. Combined with D-036's one-way ratchet, an agent seeking
+frictionless recovery has exactly one route to it — journal honestly.
+
+### Withdrawn: the replica anomaly signal
+
+D-038 proposed surfacing overlapping connections sharing one epoch as weak evidence of duplicate
+processes. Wrong, one entry after agreeing generation semantics that permit exactly that: multiple
+simultaneous connections from one process **may** share an epoch. The detector fires on the
+specification's normal case, which makes it a noise generator rather than a signal, and shipping it
+trains operators to ignore the channel. Surface only against a declared single-process-per-epoch
+contract or a stronger contradiction.
+
+**The general form, since this is the fourth collapse of the same kind:** a detector whose signal
+fires on the specification's normal case is not a detector.
