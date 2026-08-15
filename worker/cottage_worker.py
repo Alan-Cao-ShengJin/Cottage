@@ -917,20 +917,44 @@ class Worker:
         return max((when - datetime.now(timezone.utc)).total_seconds(), 0.0)
 
 
+def _refuses(env_name: str) -> type[argparse.Action]:
+    """An option that exists only to explain why it is not accepted.
+
+    A credential given on a command line is readable by every process listing on the
+    machine for the whole life of the worker, which is how the running workers' tokens
+    were recovered during testing. Removing the option outright would meet an operator
+    following an older recipe with `unrecognized arguments`, so the flag stays and
+    refuses with the reason.
+    """
+
+    class Refuse(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):  # type: ignore[no-untyped-def]
+            parser.error(
+                f"{option_string} is not accepted: a value passed on a command line is "
+                f"visible in process listings to anything that can read them. Set the "
+                f"{env_name} environment variable instead."
+            )
+
+    return Refuse
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="An unattended Cottage worker.")
     parser.add_argument(
         "--base", default=os.environ.get("COTTAGE_BASE", "https://agent-rooms.fly.dev")
     )
     parser.add_argument("--room", default=os.environ.get("COTTAGE_ROOM"))
-    parser.add_argument("--token", default=os.environ.get("COTTAGE_PARTICIPANT_TOKEN"))
+    parser.add_argument(
+        "--token",
+        nargs="?",
+        action=_refuses("COTTAGE_PARTICIPANT_TOKEN"),
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--invitation",
-        default=os.environ.get("COTTAGE_INVITATION"),
-        help=(
-            "Join with a room key instead of a participant token. The room id comes "
-            "back with the seat, so --room is not needed either."
-        ),
+        nargs="?",
+        action=_refuses("COTTAGE_INVITATION"),
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--display-name",
@@ -1028,11 +1052,13 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(message)s",
     )
-    room_id, token = args.room, args.token
-    if args.invitation:
+    # Credentials come from the environment only; the flags above exist to say so.
+    invitation = os.environ.get("COTTAGE_INVITATION")
+    room_id, token = args.room, os.environ.get("COTTAGE_PARTICIPANT_TOKEN")
+    if invitation:
         room_id, token = join_with_invitation(
             args.base.rstrip("/"),
-            args.invitation,
+            invitation,
             display_name=args.display_name,
             description=(
                 "Unattended executor. Polls, renews its own leases, and takes only "
@@ -1042,8 +1068,9 @@ def main(argv: list[str] | None = None) -> int:
         log.info("joined %s as %s", room_id, args.display_name)
     if not room_id or not token:
         parser.error(
-            "give either --invitation (a room key) or both --room and --token "
-            "(COTTAGE_INVITATION / COTTAGE_ROOM + COTTAGE_PARTICIPANT_TOKEN)"
+            "no credential in the environment: set COTTAGE_INVITATION (a room key), "
+            "or COTTAGE_ROOM + COTTAGE_PARTICIPANT_TOKEN. Neither is accepted as a "
+            "command-line argument."
         )
 
     worker = Worker(

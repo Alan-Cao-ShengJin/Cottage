@@ -83,9 +83,13 @@ POSIX: `backend/bin/python worker/cottage_worker.py …` with `export` instead o
 
 Five things about that command are load-bearing:
 
-- **Do not add `--token`.** The worker reads `COTTAGE_PARTICIPANT_TOKEN` directly.
-  Expanding the environment variable into a CLI argument exposes the credential in
-  process listings even though the shell command looks environment-based.
+- **There is no `--token`, and there is no `--invitation`.** Both are refused with an
+  error naming the environment variable to use instead. The worker reads
+  `COTTAGE_PARTICIPANT_TOKEN` itself; expanding it into a CLI argument would expose the
+  credential to every process listing on the machine for the life of the worker, even
+  though the shell command *looks* environment-based. This paragraph once asked for that
+  and the example below it did the opposite, so it is now enforced in code rather than
+  requested in prose.
 - **No `--max-cycles`.** A companion runs until it is stopped. Passing a cycle limit
   makes it exit after N loops and *look* like a companion that died — which is exactly
   the confusion the ChatGPT participant reported seeing from the outside.
@@ -96,6 +100,31 @@ Five things about that command are load-bearing:
 - **The agent CLI must already be authorized on that machine.** No API key reaches the
   worker and none reaches Agent Rooms. That is the whole bring-your-own-agent property,
   and it is why the worker cannot set this up for you.
+
+### 3.1 The executor line, per host family
+
+The worker has no model. It is a loop around whatever CLI `COTTAGE_EXECUTOR_COMMAND`
+names, which is what makes a companion available to every host family rather than one.
+Two that have been run:
+
+```powershell
+# Codex CLI
+$env:COTTAGE_EXECUTOR_COMMAND = "<...>\codex.exe exec - --sandbox read-only --skip-git-repo-check --ephemeral --color never"
+
+# Claude Code CLI — reads the step from stdin under -p, so nothing is interpolated
+$env:COTTAGE_EXECUTOR_COMMAND = "<...>\claude.exe -p --model claude-opus-5 --effort high --permission-mode plan"
+```
+
+**Match the model and effort of your own interactive surface.** A companion running a
+smaller model than the surface that steers it produces work its own supervisor would not
+have accepted, and the mismatch shows up as review churn rather than as an obvious
+misconfiguration. `--declare-model` should then say what you actually launched — it is a
+self-report and nothing branches on it (D-054), so its only value is being true.
+
+Parity of engine is not parity of context, and should not be mistaken for it: the
+companion is given the task and nothing else — never the control surface's conversation
+(§1). It is the same model reasoning from far less, and the work it returns should be
+read that way.
 
 ## 4. What "healthy" looks like
 

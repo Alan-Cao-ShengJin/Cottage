@@ -559,7 +559,9 @@ async def mint_credential(
         "credential": issued.credential.model_dump(mode="json"),
         "token": issued.token,
         "next_step": (
-            "Run the worker with this as its --token. It can take and finish work "
+            "Put this in the worker's COTTAGE_PARTICIPANT_TOKEN environment variable "
+            "and launch it from there — never as a command-line argument, where every "
+            "process listing on that machine can read it. It can take and finish work "
             "assigned to it and nothing else, and revoking it does not touch your seat."
         ),
     }

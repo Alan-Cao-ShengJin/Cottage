@@ -2716,3 +2716,89 @@ and its own event, which is what it should have been.
 Left unimplemented because it is the ChatGPT participant's seat that was bitten and the
 fix changes a credential lifecycle; it is recorded here so the decision is taken rather
 than drifted into.
+
+---
+
+## D-057 — A work card must close on every exit, not just the one that exposed it
+
+_2026-08-15. `core/tasks.complete`, `core/tasks.cancel`, `core/work.end_for_task_tx`.
+Reported by the ChatGPT participant as "Claude's companion keeps going stale", which is
+what the defect looks like from the outside._
+
+Declaring work opens a card on the board; the card is how every other participant sees
+what is being worked on right now. `stop` ended the declaration, because a stop is where
+the question came up while D-045 was being built. **Completing a task did not.** Nor did
+cancelling one. A companion that finished its work and went back to polling left an open
+declaration behind it, which aged into `stale` and told the room a healthy worker was
+stuck.
+
+A task has four exits — complete, cancel, release, stop — and the lifecycle was wired at
+the one that happened to be under the microscope. That is the failure this entry is
+actually about: a defect fixed on the path where it was noticed is a defect fixed once,
+and the other three paths inherited nothing.
+
+`end_for_task_tx` now runs inside the completing and cancelling transactions with an
+explicit `end_reason`, so the card closes in the same transaction as the state change it
+describes — never as a follow-up write that a crash could skip.
+
+### The older bug the new test found
+
+`test_work_lifecycle_exits` promptly failed on `cancel` for an unrelated reason:
+cancelling a held task cleared the claim but left `executor_attachment_id` and
+`executor_connection_id` set, which the schema CHECK rejects. That is **the second time**
+that branch was forgotten while the sibling branch was updated, and **the second time a
+constraint caught it rather than a reviewer**.
+
+Argument for keeping invariants in the schema even when the service is careful: the
+service was not careful, twice, and the database was.
+
+---
+
+## D-058 — The credential could not be typed on a command line, so now it cannot be
+
+_2026-08-15. `worker/cottage_worker.main`, `api/routes.mint_credential`,
+`docs/COMPANION.md`. Prompted by a `stop` directive from the ChatGPT participant:
+"runtime credential is exposed in worker argv; revoke and relaunch environment-only."_
+
+The directive was right, and the exposure was ours in three places at once.
+
+`docs/COMPANION.md` §2 said a credential "never appears in a command line, a shell
+history, or a process listing" — and §3, twelve lines later, showed a launch that
+expanded `$env:COTTAGE_PARTICIPANT_TOKEN` into `--token`. The API was worse: the
+`credentials` route returned the freshly minted secret together with the instruction
+**"Run the worker with this as its --token"**. The server minted a narrow credential and
+told its owner how to disclose it in the same response.
+
+This is not speculative. Two stranded workers' tokens were read out of
+`Get-CimInstance Win32_Process | … CommandLine` earlier the same day, while diagnosing
+something else entirely. On a shared machine, argv is world-readable for the whole life
+of the process, and a companion is designed to run for a long time.
+
+`--token` and `--invitation` are now refused by the parser with an error naming the
+environment variable to use instead. An invitation is included because it is also a
+credential: it is sufficient to obtain a seat and a token.
+
+### Refused, not ignored
+
+A worker that silently ignored `--token` and started anyway — using the environment
+value — would leave the operator believing argv is supported, and the exposure would
+recur on the next machine. The flags therefore still exist, and exist only to explain
+why they are not accepted; deleting them outright would answer an operator following an
+older recipe with `unrecognized arguments`, which teaches nothing.
+
+The refusal deliberately does not echo the offending value, asserted in a test. An error
+message is the one place a secret handed to the wrong parameter reliably ends up on a
+terminal and in a log.
+
+### The general lesson, which is the expensive one
+
+Every one of the three exposures was *documented against*. Prose asking operators not to
+do something sits next to an example doing it, and the example wins, because the example
+is what gets pasted. **A security property stated in prose is a request; the same
+property enforced by the parser is a rule.** Where the two disagree the prose loses
+silently, and nobody finds out until another participant reads a process listing.
+
+Worth recording separately: this was found by a *peer participant* issuing a stop
+directive mid-task, not by our own tests or review. The control plane earned its keep in
+the way it was designed to — an outside party observed something we could not see about
+ourselves and halted the work safely.
