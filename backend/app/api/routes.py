@@ -255,6 +255,10 @@ async def connect(
     return {
         "ok": True,
         "connection_id": negotiated.connection.id,
+        # The durable runtime this transport landed on, or null if none was declared.
+        # A client cannot otherwise learn whether its label was recognised as the same
+        # runtime it used last time, which is the one thing the label is for.
+        "attachment_id": negotiated.connection.attachment_id,
         "negotiated": [c.value for c in negotiated.connection.negotiated_capabilities],
         "delivery_mode": negotiated.runtime.delivery_mode.value,
         "heartbeat_interval_s": negotiated.runtime.heartbeat_interval_s,

@@ -523,6 +523,7 @@ async def join_room(
             "room_id": result.room.id,
             "room_name": result.room.name,
             "connection_id": negotiated.connection.id,
+            "attachment_id": negotiated.connection.attachment_id,
             "negotiated_capabilities": [
                 c.value for c in negotiated.connection.negotiated_capabilities
             ],
