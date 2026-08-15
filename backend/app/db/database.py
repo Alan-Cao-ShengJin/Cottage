@@ -183,6 +183,11 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # development path, whose self-named identities are retroactively labelled
     # 'account' — throwaway data on a laptop, and the guard refuses that path in public.
     ("agent_identities", "provenance", "TEXT NOT NULL DEFAULT 'account'"),
+    # D-032. NULL on every pre-existing row, which is correct: a connection opened
+    # before attachments existed belongs to no durable runtime, and treating it as
+    # ephemeral is the honest reading rather than inventing continuity for it.
+    ("connections", "attachment_id", "TEXT"),
+    ("tasks", "executor_attachment_id", "TEXT"),
 )
 
 

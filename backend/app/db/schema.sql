@@ -219,10 +219,37 @@ CREATE TABLE IF NOT EXISTS participants (
 
 CREATE INDEX IF NOT EXISTS idx_participants_room ON participants(room_id, state);
 
+-- A durable runtime attachment. One logical agent may attach several runtimes to
+-- one seat -- a worker that loops and a chat surface that steers -- and each keeps
+-- its identity across transport reconnects. The connection below is the ephemeral
+-- transport instance; the attachment is the runtime (D-032). Keyed on a label the
+-- client reuses, because a server-minted connection id is not stable across a chat
+-- host's turn boundary: one participant was observed against three connection ids
+-- in as many turns.
+CREATE TABLE IF NOT EXISTS attachments (
+    id             TEXT PRIMARY KEY,
+    room_id        TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    participant_id TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    label          TEXT NOT NULL,
+    host_class     TEXT NOT NULL DEFAULT 'unknown',
+    -- False when the client could not supply a stable label. Such an attachment is
+    -- never resumed and its executor affinity is cleared rather than pretended
+    -- (principle 5: never simulate a continuity the host has not declared).
+    is_resumable   INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL,
+    last_seen_at   TEXT NOT NULL,
+    -- Stable identity is the whole point: the same runtime reattaching must land on
+    -- the same row, so affinity survives a transport reconnect.
+    UNIQUE (participant_id, label)
+);
+
+CREATE INDEX IF NOT EXISTS idx_attachments_participant ON attachments(participant_id);
+
 CREATE TABLE IF NOT EXISTS connections (
     id                   TEXT PRIMARY KEY,
     room_id              TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
     participant_id       TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    attachment_id        TEXT REFERENCES attachments(id) ON DELETE SET NULL,
     host_class           TEXT NOT NULL DEFAULT 'unknown',
     profile              TEXT NOT NULL DEFAULT '{}',   -- JSON CapabilityProfile
     delivery_mode        TEXT NOT NULL,

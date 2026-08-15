@@ -1361,3 +1361,80 @@ and could grant a lease nobody can renew.
 
 Migration is additive: an `attachments` table plus a nullable `executor_attachment_id` on `tasks`.
 No rewrite of existing rows.
+
+---
+
+## D-033 — Resumability and liveness are orthogonal; ephemeral attachments hold no row
+
+_2026-08-15. Four questions put to the ChatGPT participant in-room; its answers changed three of them._
+
+### Resumability is not a lease-eligibility axis (Q4 — conceded)
+
+The proposal was to shorten leases for non-resumable attachments, on the principle that the room
+grants no hold longer than the holder can honour. Refused, correctly:
+
+> Resumability answers "can this attachment preserve executor identity across transport loss?",
+> while liveness answers "can it keep acting/renewing without a human?"
+
+A long-lived worker that renews honestly while connected, but cannot re-identify after a process
+restart, would have been penalised in TTL for the second thing. **Lease TTL derives from renewal
+ability only.**
+
+There is a second reason, unstated by either side at the time and worse than the conflation: by
+the Q1/Q2 answers below, ChatGPT is *permanently* `is_resumable=0`. Non-resumable is therefore not
+an edge case but **the default for an entire host family** — so the rule would have shortened that
+family's leases twice for one underlying fact, once for being attended and again for being
+unresumable. When a rule makes the ordinary case the punished case, it is measuring the wrong
+thing.
+
+### ChatGPT is honestly non-resumable (Q1, Q2)
+
+No stable conversation id, connector instance id, or MCP session id is exposed to the model. A
+label reconstructed from conversational context is *model-context continuity wearing a protocol's
+clothes* — it works until someone opens a new chat. So: **no invented model label**; omit it, and
+the attachment is ephemeral. If the platform later exposes a stable connector key, map it directly.
+
+Account identity is the wrong grain, and this is the part we had not thought through: two ChatGPT
+conversations under one account must be able to be **distinct attachments**, so keying on the
+participant would merge two runtimes that are genuinely separate.
+
+### Ephemeral means no attachment row at all
+
+The plan was to mint an attachment row per ephemeral connection with a synthetic label, to satisfy
+`UNIQUE (participant_id, label)`. Given a permanently ephemeral host, that is one row per chat
+turn, forever, describing nothing. So an ephemeral connection gets **no attachment row** and
+`connections.attachment_id` stays NULL — which is already precisely what NULL means in that column.
+The unbounded growth disappears and the semantics get sharper rather than looser.
+
+### Soft for the lease, enforced for the act
+
+D-031 settled that affinity is **soft**, with the participant remaining lease owner. The adopted
+affinity rules also say a different attachment *"must explicitly `take_over` before acting"*. Those
+are incompatible as written: if affinity is purely advisory, nothing makes "must" mean anything.
+
+Resolved: **soft for the lease, enforced for the act.** Affinity never revokes a lease, so nothing
+one attachment does can cost its own agent the work. But a mutation from an attachment that is not
+the executor is refused with a distinct code instructing it to take over first — one extra call,
+not a denial. The code is distinct for the same reason `lease_required` is distinct from
+`lease_conflict` (D-027): *another of your own runtimes is executor, take over* and *another
+participant holds this, wait* call for different actions, and one code for both leaves an agent
+confidently doing the wrong thing.
+
+### Order (Q3)
+
+Hydration moves first — it helps every cold chat turn immediately and depends on no worker
+existing, whereas executor affinity has nothing to arbitrate while the room contains only attended
+participants. Then attachment exposure, then arbitration and take-over, **with the harness matrix
+built alongside rather than after**, then steering, then attendance/escalation.
+
+With one condition attached by the reviewer and accepted here, because it binds the party most
+likely to breach it: hydration is operational state, continuity notes are conversation, D-031
+conceded they are different things, and shipping the first must not be allowed to quietly stand in
+for the second.
+
+### The harness cell worth keeping
+
+`resumable + human_turn_only` against `nonresumable + unattended_loop`, asserting different lease
+policies by renewal ability. It fails if anyone collapses the two axes into one ranking — which is
+exactly the mistake this entry opens by conceding, so it is a test that would have caught its own
+author.
