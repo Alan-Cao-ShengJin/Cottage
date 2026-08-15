@@ -319,6 +319,26 @@ class RuntimeCredential(BaseModel):
     last_used_at: str | None = None
 
 
+class RuntimeRole(str, Enum):
+    """What a runtime of a seat is *for*. Descriptive, never a permission.
+
+    A seat may have a surface where its human works and a process that keeps working
+    when they close the laptop. Both are the same participant with the same
+    authority; the difference is who is watching, and the room should say which is
+    which rather than leave a reader to infer it from a host label (D-054).
+
+    Nothing branches on this. Behaviour comes from negotiated capabilities and
+    nothing else (principle 4) — a room that started routing work by `role` would
+    have reinvented vendor labels with extra steps.
+    """
+
+    #: Somebody is at the keyboard, at least intermittently.
+    CONTROL_SURFACE = "control_surface"
+    #: Runs on its own. Nobody is watching, by design.
+    COMPANION = "companion"
+    UNSPECIFIED = "unspecified"
+
+
 class Attachment(BaseModel):
     """A durable runtime identity, between the seat and the transport (D-032).
 
@@ -342,6 +362,11 @@ class Attachment(BaseModel):
     #: Descriptive; recorded for display and telemetry only.
     host_class: HostClass
     is_resumable: bool = False
+    #: What this runtime says it is for, and how it says it does the work. Recorded,
+    #: never verified, and never consulted for a behaviour decision (D-054).
+    runtime_role: RuntimeRole = RuntimeRole.UNSPECIFIED
+    executor_kind: str = ""
+    executor_model: str = ""
     created_at: str
     last_seen_at: str
 
@@ -370,6 +395,51 @@ class Connection(BaseModel):
         return self.profile.to_capabilities()
 
 
+class RuntimeDeclaration(BaseModel):
+    """What a runtime says about itself. The room records it and checks none of it."""
+
+    role: RuntimeRole = RuntimeRole.UNSPECIFIED
+    #: How this runtime performs work: `human`, `echo`, `subprocess`, a model adapter.
+    #: A free label on purpose — the room must not need editing when a new kind of
+    #: executor appears, and it never branches on this value.
+    executor_kind: str = ""
+    #: Provider or model, when the runtime chooses to say. Often absent, and absent
+    #: is the honest default: a worker that shells out to a CLI frequently does not
+    #: know which model answered.
+    model: str = ""
+    host_class: HostClass = HostClass.UNKNOWN
+    is_resumable: bool = False
+
+
+class RuntimeView(BaseModel):
+    """One runtime of one seat, as the room may describe it.
+
+    Split between what the room *derived* and what the client *declared*, because
+    those are worth different amounts and merging them would hide which is which.
+    `liveness` is computed from open connections and cannot be asserted; everything
+    under `declared` is the client's own account of itself.
+
+    What this deliberately does not say: that a companion runtime is the human's
+    session, or shares its context. It is the same Cottage identity with bounded
+    shared task state — the executor sees its own task and its own history and
+    nothing else — and implying otherwise would misdescribe the one boundary the
+    executor exists to hold (`docs/SECURITY.md`).
+    """
+
+    #: `attachment_id` for a durable runtime, else the connection id.
+    ref: str
+    is_attachment: bool
+    label: str = ""
+    liveness: Liveness
+    connection_count: int
+    delivery_modes: list[DeliveryMode] = Field(default_factory=list)
+    last_seen_at: str | None = None
+    #: Self-reported and unverifiable, which is why it is nested under a name that
+    #: says so. Attribution, not verification — the same rule as a display name from
+    #: an invitation (D-025).
+    declared: RuntimeDeclaration = Field(default_factory=RuntimeDeclaration)
+
+
 class PresenceView(BaseModel):
     """Derived, per participant. What the presence rail renders.
 
@@ -385,3 +455,8 @@ class PresenceView(BaseModel):
     negotiated_capabilities: list[Capability]
     runtime: RuntimePolicy | None = None
     last_seen_at: str | None = None
+    #: Per runtime, because "this seat is live" answers the wrong question when a
+    #: seat is a chat window plus a background worker. A human deciding whether to
+    #: expect a prompt reply, and a worker deciding whether a sibling is executing,
+    #: both need to know *which* runtime is live rather than that one of them is.
+    runtimes: list[RuntimeView] = Field(default_factory=list)

@@ -22,6 +22,7 @@ from .room import (
     RetentionPolicy,
     RoomPolicy,
     RoomVisibility,
+    RuntimeRole,
     Scope,
 )
 from .task import DependencyKind
@@ -125,6 +126,21 @@ class ConnectCommand(CommandMeta):
     #: `sse` and never opens the stream simply stops being heard from, and heartbeat
     #: grading takes it from there.
     transport: str | None = None
+    #: What this runtime is *for*: a surface a human works at, or a process that
+    #: keeps working when they close it (D-054). Descriptive only — no behaviour
+    #: derives from it, because behaviour derives from negotiated capabilities and
+    #: nothing else (principle 4). It exists so the room can say *which* runtime of
+    #: a seat is live rather than only that one of them is.
+    runtime_role: RuntimeRole = RuntimeRole.UNSPECIFIED
+    #: How this runtime performs work — `human`, `echo`, `subprocess`, a model
+    #: adapter. Free-form on purpose: the room must not need editing when a new kind
+    #: of executor appears, and it never branches on the value.
+    executor_kind: str = Field(default="", max_length=60)
+    #: Provider or model, if this runtime chooses to say. Absent is the honest
+    #: default and a common one: a worker delegating to an agent CLI usually does not
+    #: know which model answered, and inventing a value would be a claim about
+    #: someone else's system.
+    executor_model: str = Field(default="", max_length=120)
 
 
 class HeartbeatCommand(CommandMeta):

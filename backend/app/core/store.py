@@ -32,6 +32,7 @@ from ..domain.identity import (
 from ..domain.question import Answer, Question
 from ..domain.room import (
     RUNTIME_SCOPES,
+    Attachment,
     Connection,
     Invitation,
     InvitationTargetKind,
@@ -44,6 +45,7 @@ from ..domain.room import (
     RoomStatus,
     RoomVisibility,
     RuntimeCredential,
+    RuntimeRole,
     Scope,
 )
 from ..domain.task import (
@@ -509,6 +511,33 @@ async def list_open_connections(room_id: str, *, tx: db.Tx | None = None) -> lis
         tx,
     )
     return [to_connection(r) for r in rows]
+
+
+def to_attachment(row: Any) -> Attachment:
+    return Attachment(
+        id=row["id"],
+        room_id=row["room_id"],
+        participant_id=row["participant_id"],
+        label=row["label"],
+        host_class=HostClass(row["host_class"]),
+        is_resumable=bool(row["is_resumable"]),
+        runtime_role=RuntimeRole(row["runtime_role"]),
+        executor_kind=row["executor_kind"],
+        executor_model=row["executor_model"],
+        created_at=row["created_at"],
+        last_seen_at=row["last_seen_at"],
+    )
+
+
+async def list_attachments(room_id: str, *, tx: db.Tx | None = None) -> dict[str, Attachment]:
+    """Every durable runtime in the room, keyed by id.
+
+    A dict rather than a list because every caller is answering "what is this
+    connection's runtime?" — and a lookup that has to scan is the kind of thing that
+    quietly becomes O(n²) on the room's most-read projection.
+    """
+    rows = await _all("SELECT * FROM attachments WHERE room_id = ?", (room_id,), tx)
+    return {r["id"]: to_attachment(r) for r in rows}
 
 
 async def load_connection(connection_id: str, *, tx: db.Tx | None = None) -> Connection:

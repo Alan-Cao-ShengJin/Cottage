@@ -270,6 +270,15 @@ CREATE TABLE IF NOT EXISTS attachments (
     -- matters is recovery — "the same attachment came back" is evidence only if
     -- the client promised the label would mean that (D-036, D-038).
     is_resumable   INTEGER NOT NULL DEFAULT 0,
+    -- What this runtime is *for*, and how it does the work. Declared by the client
+    -- and never verified, which is why they are grouped under `declared` in every
+    -- projection: attribution, not verification (D-054). Nothing in the server
+    -- branches on these — behaviour comes from negotiated capabilities alone
+    -- (principle 4), and a room that started routing on `executor_kind` would have
+    -- reinvented vendor labels with extra steps.
+    runtime_role   TEXT NOT NULL DEFAULT 'unspecified',
+    executor_kind  TEXT NOT NULL DEFAULT '',
+    executor_model TEXT NOT NULL DEFAULT '',
     created_at     TEXT NOT NULL,
     last_seen_at   TEXT NOT NULL,
     -- Stable identity is the whole point: the same runtime reattaching must land on

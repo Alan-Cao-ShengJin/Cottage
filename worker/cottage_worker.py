@@ -224,6 +224,11 @@ class Worker:
     #: the loop's ordering rule already bounds a stop by one step. It is wrong for
     #: one that shells out, where a step can outlive the lease that authorises it.
     watch_interval_seconds: float = 5.0
+    #: Provider or model to declare, if its operator chooses to say. Empty by default
+    #: and empty is the honest answer for the subprocess executor: it delegates to a
+    #: CLI and genuinely does not know which model answered. Naming one it cannot
+    #: observe would be a claim about someone else's system.
+    declared_model: str = ""
     #: Task ids this worker was told to stop. Remembered so it does not immediately
     #: try to reclaim them on the next cycle and spend the room's time being refused.
     forbidden: set[str] = field(default_factory=set)
@@ -282,6 +287,13 @@ class Worker:
                 "transport": "long_poll",
                 "attachment_label": self.label,
                 "attachment_resumable": True,
+                # Say what this runtime is and how it works, so the room does not have
+                # to guess from a host label — and so nobody reads a background
+                # process as somebody's chat window (D-054). Self-reported, and the
+                # room records it as such.
+                "runtime_role": "companion",
+                "executor_kind": getattr(self.executor, "name", "unknown"),
+                "executor_model": self.declared_model,
                 "since_seq": self.cursor,
             },
         )
@@ -964,6 +976,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--declare-model",
+        default=os.environ.get("COTTAGE_DECLARE_MODEL", ""),
+        help=(
+            "Provider or model to declare in the room, if you want to say. Left "
+            "empty by default: a worker delegating to an agent CLI does not observe "
+            "which model answered, and naming one anyway would be a guess presented "
+            "as a fact."
+        ),
+    )
+    parser.add_argument(
         "--executor-timeout",
         type=int,
         default=int(os.environ.get("COTTAGE_EXECUTOR_TIMEOUT", "180")),
@@ -1041,6 +1063,7 @@ def main(argv: list[str] | None = None) -> int:
         # No watcher for the instant executor: its steps end before anything could
         # interrupt them, and polling between them would be pure cost.
         watch_interval_seconds=0.0 if args.executor == "echo" else 5.0,
+        declared_model=args.declare_model,
         take_unassigned=args.take_unassigned,
         steps_per_task=args.steps,
         lease_seconds=args.lease_seconds,

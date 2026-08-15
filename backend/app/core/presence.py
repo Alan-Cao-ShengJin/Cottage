@@ -41,12 +41,16 @@ from ..domain.room import (
     IDLE_AFTER_INTERVALS,
     LIVENESS_RANK,
     STALE_AFTER_INTERVALS,
+    Attachment,
     Connection,
     LeaveReason,
     Liveness,
     Participant,
     PresenceView,
     Room,
+    RuntimeDeclaration,
+    RuntimeRole,
+    RuntimeView,
 )
 from ..util import from_iso, is_past, utcnow, utcnow_iso
 from . import authz, eventlog, store
@@ -167,12 +171,15 @@ async def _resolve_attachment_tx(
     )
     if existing is not None:
         await tx.execute(
-            "UPDATE attachments SET last_seen_at = ?, host_class = ?, is_resumable = ? "
-            "WHERE id = ?",
+            "UPDATE attachments SET last_seen_at = ?, host_class = ?, is_resumable = ?, "
+            "runtime_role = ?, executor_kind = ?, executor_model = ? WHERE id = ?",
             (
                 now,
                 command.host_class.value,
                 1 if command.attachment_resumable else 0,
+                command.runtime_role.value,
+                command.executor_kind,
+                command.executor_model,
                 existing["id"],
             ),
         )
@@ -183,8 +190,8 @@ async def _resolve_attachment_tx(
         """
         INSERT INTO attachments (
             id, room_id, participant_id, label, host_class, is_resumable,
-            created_at, last_seen_at
-        ) VALUES (?,?,?,?,?,?,?,?)
+            runtime_role, executor_kind, executor_model, created_at, last_seen_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             attachment_id,
@@ -193,6 +200,9 @@ async def _resolve_attachment_tx(
             label,
             command.host_class.value,
             1 if command.attachment_resumable else 0,
+            command.runtime_role.value,
+            command.executor_kind,
+            command.executor_model,
             now,
             now,
         ),
@@ -213,6 +223,14 @@ async def _resolve_attachment_tx(
             "label": label,
             "host_class": command.host_class.value,
             "is_resumable": command.attachment_resumable,
+            # Grouped, and named for what it is worth. The room recorded these; it
+            # verified none of them, and a projection that mixed them in with derived
+            # facts would make a self-report look like an observation (D-054).
+            "declared": {
+                "role": command.runtime_role.value,
+                "executor_kind": command.executor_kind,
+                "model": command.executor_model,
+            },
         },
     )
     return attachment_id, event
@@ -498,6 +516,7 @@ async def _append_presence_changed(
 async def presence_for_room(room: Room) -> dict[str, PresenceView]:
     """Presence for every participant, derived fresh. Drives the presence rail."""
     connections = await store.list_open_connections(room.id)
+    attachments = await store.list_attachments(room.id)
     by_participant: dict[str, list[Connection]] = {}
     for conn in connections:
         by_participant.setdefault(conn.participant_id, []).append(conn)
@@ -527,8 +546,54 @@ async def presence_for_room(room: Room) -> dict[str, PresenceView]:
             ),
             runtime=runtime,
             last_seen_at=max((c.last_heartbeat_at for c in conns), default=None),
+            runtimes=_runtime_views(conns, attachments),
         )
     return views
+
+
+def _runtime_views(
+    connections: list[Connection], attachments: dict[str, Attachment]
+) -> list[RuntimeView]:
+    """One entry per runtime of this seat, graded individually.
+
+    "This seat is live" answers the wrong question once a seat is a chat window plus
+    a background worker: a human deciding whether to expect a reply and a worker
+    deciding whether a sibling is executing both need to know *which* runtime is
+    live, not that one of them is (D-054).
+
+    Connections with no attachment are their own runtime, which is the same rule
+    executor affinity already uses — NULL means "no durable runtime", never "no
+    runtime" (D-034).
+    """
+    grouped: dict[str, list[Connection]] = {}
+    for conn in connections:
+        grouped.setdefault(conn.attachment_id or conn.id, []).append(conn)
+
+    views: list[RuntimeView] = []
+    for ref, conns in grouped.items():
+        attachment = attachments.get(ref)
+        views.append(
+            RuntimeView(
+                ref=ref,
+                is_attachment=attachment is not None,
+                label=attachment.label if attachment else "",
+                # Derived here, never read from a column: a runtime that died without
+                # saying so must stop being live the moment its heartbeat lapses, and
+                # a stored flag would still say otherwise (D-044).
+                liveness=grade(conns),
+                connection_count=len(conns),
+                delivery_modes=sorted({c.delivery_mode for c in conns}, key=lambda m: m.value),
+                last_seen_at=max((c.last_heartbeat_at for c in conns), default=None),
+                declared=RuntimeDeclaration(
+                    role=attachment.runtime_role if attachment else RuntimeRole.UNSPECIFIED,
+                    executor_kind=attachment.executor_kind if attachment else "",
+                    model=attachment.executor_model if attachment else "",
+                    host_class=attachment.host_class if attachment else conns[0].host_class,
+                    is_resumable=attachment.is_resumable if attachment else False,
+                ),
+            )
+        )
+    return sorted(views, key=lambda v: (-LIVENESS_RANK[v.liveness], v.label, v.ref))
 
 
 def _transport_for(mode: DeliveryMode) -> str:

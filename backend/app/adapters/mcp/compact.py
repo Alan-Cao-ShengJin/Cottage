@@ -30,6 +30,38 @@ DEFAULT_MAX_EVENTS = 40
 DEFAULT_MAX_MESSAGES = 5
 
 
+def _runtimes(presence: dict[str, Any]) -> list[dict[str, Any]]:
+    """Which runtimes of this seat are live, and what each says it is.
+
+    Included in the coordination view because "this participant is live" is the wrong
+    answer once a seat is a chat window plus a background worker: whether to expect a
+    prompt reply depends on which of them is live, not on whether one of them is
+    (D-054).
+
+    `declared` is kept as a nested object rather than flattened, so a reader cannot
+    mistake a self-report for something the room observed. `live` beside it is
+    derived and is the only fact here the room stands behind.
+    """
+    out: list[dict[str, Any]] = []
+    for runtime in presence.get("runtimes") or []:
+        declared = runtime.get("declared") or {}
+        entry: dict[str, Any] = {
+            "ref": runtime.get("ref"),
+            "liveness": runtime.get("liveness"),
+        }
+        if runtime.get("label"):
+            entry["label"] = runtime["label"]
+        said = {
+            key: declared.get(key)
+            for key in ("role", "executor_kind", "model")
+            if declared.get(key) and declared.get(key) != "unspecified"
+        }
+        if said:
+            entry["declared"] = said
+        out.append(entry)
+    return out
+
+
 def participant(row: dict[str, Any]) -> dict[str, Any]:
     """Who is here, how reachable they are, and whether they can take work.
 
@@ -58,6 +90,12 @@ def participant(row: dict[str, Any]) -> dict[str, Any]:
     # saying so for every participant would be noise, and noise gets skimmed past.
     if (row.get("identity") or {}).get("name_is_self_asserted"):
         out["name_is_self_asserted"] = True
+    # Only when there is more than one, for the same reason: a seat with a single
+    # runtime is fully described by `liveness` above, and repeating it per runtime
+    # would spend the reader's context to say nothing (D-054).
+    runtimes = _runtimes(presence)
+    if len(runtimes) > 1:
+        out["runtimes"] = runtimes
     return out
 
 

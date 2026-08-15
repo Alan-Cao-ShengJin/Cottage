@@ -197,6 +197,13 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("tasks", "steering_reason", "TEXT NOT NULL DEFAULT ''"),
     ("tasks", "steering_by_participant_id", "TEXT"),
     ("tasks", "steering_at", "TEXT"),
+    # D-054. Every pre-existing attachment is 'unspecified' with no executor named,
+    # which is the correct reading: a runtime that never declared what it was for
+    # should not be described as anything, and guessing from `host_class` would be
+    # the vendor-label error in a new costume.
+    ("attachments", "runtime_role", "TEXT NOT NULL DEFAULT 'unspecified'"),
+    ("attachments", "executor_kind", "TEXT NOT NULL DEFAULT ''"),
+    ("attachments", "executor_model", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
