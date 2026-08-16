@@ -534,3 +534,24 @@ Deepen M2.4: richer digests, pasteable turn output, lease tuning for `attended` 
   for (ADR-006), so the quality ceiling here is deliberate.
 - **Content inspection cannot catch deliberate paraphrase** (D-009). Accepted; the controls
   that work are authorization, privacy classes, provenance, and the audit log.
+- **Unattended claiming does not work on Linux, by design, until the launcher lands.**
+  D-063: the worker asks the OS what it can enforce and refuses to claim where nothing
+  can be. Windows keeps claiming through Job Objects; POSIX runs as an observer, because
+  a POSIX child leaves any process group with `setsid()` and a group kill is escapable
+  however carefully it is written. The missing piece is *placement* - a manager-created
+  transient systemd unit, or a delegated cgroup v2 subtree written before exec - not
+  detection. `detect_containment_strength` returns `none` on Linux even where cgroup v2
+  is writable, and that line changes **with** the launcher and never before it.
+- **No Linux environment exists on the development machine.** WSL is present with no
+  distribution installed and the feature not enabled, so the most important containment
+  path cannot be verified here at all. This is why the item above is a refusal rather
+  than an implementation: code that cannot be run is not evidence, and shipping it would
+  reproduce the false confidence the four T1 review rejections were about.
+- **The room models seats; the thing that edits a repository is a runtime.** Proven three
+  ways in one session - an orphaned executor with no seat that committed under a freeze,
+  a coordinator seat with no runtime whose delegated work held no lease, and a second
+  interactive session invisible to both. No participant can enumerate another's
+  processes, and in a hosted product they never share a machine, so the only thing that
+  can see every writer is the shared artifact: declared targets reconciled against
+  observed file state. D-062 and D-063 narrow the damage at each end; neither closes
+  this, and it is the next architectural milestone rather than a task.
