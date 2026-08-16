@@ -99,6 +99,14 @@ def run(stage: Stage) -> tuple[str, bool, str]:
             cwd=stage.cwd,
             capture_output=True,
             text=True,
+            # Decode explicitly. `text=True` alone uses the locale encoding, which on
+            # this project's Windows machines is cp1252 — and a tool that quotes a
+            # source line containing an em dash then kills the reader thread with a
+            # UnicodeDecodeError. That turned `stdout` into None and crashed the gate
+            # *while every test was passing*: a checker that dies on its own output is
+            # worse than a failing check, because it reports nothing at all.
+            encoding="utf-8",
+            errors="replace",
             # `npm` on Windows is a shim, so a shell is needed for it to resolve.
             shell=os.name == "nt" and stage.command[0].endswith("npm"),
         )
@@ -107,7 +115,7 @@ def run(stage: Stage) -> tuple[str, bool, str]:
         print(f"   skipped: {message}\n", flush=True)
         return stage.name, stage.optional, "skipped"
 
-    output = (completed.stdout + completed.stderr).strip()
+    output = ((completed.stdout or "") + (completed.stderr or "")).strip()
     ok = completed.returncode == 0
 
     if ok:
