@@ -23,6 +23,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,6 +220,29 @@ MAX_CHILD_OUTPUT_CHARS = 20_000
 #: the way back, in one file, so the two halves cannot drift apart.
 QUESTION_MARKER = "QUESTION"
 
+# Fixed bootstrap, never room content. It registers the new session with the
+# worker's external watchdog before the configured executable can do any work.
+# Python's `preexec_fn` cannot be used here: `run_step` runs on a thread and the
+# subprocess module explicitly warns that pre-exec callbacks can deadlock there.
+_POSIX_CONTAINED_EXEC = r"""
+import os
+import sys
+
+fd = int(sys.argv[1])
+command = sys.argv[2:]
+os.setsid()
+pid = os.getpid()
+marker = ""
+try:
+    raw = open(f"/proc/{pid}/stat", encoding="ascii").read()
+    marker = "proc-start:" + raw[raw.rfind(")") + 2:].split()[19]
+except (OSError, IndexError):
+    pass
+os.write(fd, f"R\t{pid}\t{os.getpgrp()}\t{marker}\n".encode("ascii"))
+os.close(fd)
+os.execve(command[0], command, os.environ)
+"""
+
 
 class SubprocessExecutor:
     """Delegate the thinking to an agent CLI its owner already runs.
@@ -256,6 +280,7 @@ class SubprocessExecutor:
         timeout_seconds: int = 180,
         cwd: str | None = None,
         env_passthrough: Sequence[str] = (),
+        containment_fd: int | None = None,
     ) -> None:
         argv = list(command) if not isinstance(command, str) else shlex.split(command, posix=False)
         if not argv:
@@ -284,6 +309,7 @@ class SubprocessExecutor:
         }
         self._process: subprocess.Popen[str] | None = None
         self._cancelled = False
+        self._containment_fd = containment_fd
 
     def build_prompt(self, context: StepContext) -> str:
         """Assemble what the agent is asked to do.
@@ -339,8 +365,19 @@ class SubprocessExecutor:
         prompt = self.build_prompt(context)
         self._cancelled = False
         try:
+            argv = self.argv
+            group_options = _new_process_group()
+            if os.name != "nt" and self._containment_fd is not None:
+                argv = [
+                    sys.executable,
+                    "-c",
+                    _POSIX_CONTAINED_EXEC,
+                    str(self._containment_fd),
+                    *self.argv,
+                ]
+                group_options = {"pass_fds": (self._containment_fd,)}
             process = subprocess.Popen(  # noqa: S603 - fixed argv, never shell=True
-                self.argv,
+                argv,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -357,7 +394,7 @@ class SubprocessExecutor:
                 errors="replace",
                 cwd=self.cwd,
                 env=self.env,
-                **_new_process_group(),
+                **group_options,
             )
         except FileNotFoundError:
             return StepResult(
@@ -383,6 +420,7 @@ class SubprocessExecutor:
                 concern="executor timed out",
             )
         finally:
+            self._notify_process_done(process.pid)
             self._process = None
 
         if self._cancelled:
@@ -411,12 +449,30 @@ class SubprocessExecutor:
             resume={"phase": f"step-{context.step}"},
         )
 
+    def _notify_process_done(self, pid: int) -> None:
+        if os.name == "nt" or self._containment_fd is None:
+            return
+        marker = _process_start_marker(pid) or ""
+        try:
+            os.write(self._containment_fd, f"D\t{pid}\t{marker}\n".encode("ascii"))
+        except OSError:
+            pass
+
 
 def _new_process_group() -> dict[str, Any]:
     """Start the child in its own group, so the whole tree can be signalled later."""
     if os.name == "nt":
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
     return {"start_new_session": True}
+
+
+def _process_start_marker(pid: int) -> str | None:
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        fields = raw[raw.rfind(")") + 2 :].split()
+        return f"proc-start:{fields[19]}"
+    except (OSError, IndexError):
+        return None
 
 
 def _kill_tree(process: subprocess.Popen[str]) -> None:
@@ -453,6 +509,7 @@ def build(
     cwd: str | None = None,
     env_passthrough: Sequence[str] = (),
     timeout_seconds: int = 180,
+    containment_fd: int | None = None,
 ) -> Executor:
     if kind == "echo":
         return EchoExecutor(ask_at_step=ask_at_step)
@@ -464,5 +521,6 @@ def build(
             cwd=cwd,
             env_passthrough=env_passthrough,
             timeout_seconds=timeout_seconds,
+            containment_fd=containment_fd,
         )
     raise ValueError(f"unknown executor {kind!r}")

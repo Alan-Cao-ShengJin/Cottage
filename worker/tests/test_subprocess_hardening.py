@@ -270,6 +270,40 @@ def test_cancel_kills_the_child_and_its_descendants(tmp_path):
     assert marker.read_text().count("tick") == settled, "a descendant outlived the stop"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX watchdog registration contract")
+def test_contained_executor_registers_its_real_session_before_exec(tmp_path):
+    """Exercise the production bootstrap, not a hand-built lookalike process tree."""
+    read_fd, write_fd = os.pipe()
+    marker = tmp_path / "session.txt"
+    executor = SubprocessExecutor(
+        _python(
+            f"""
+            import os
+            from pathlib import Path
+            Path({str(marker)!r}).write_text(
+                f"{{os.getpid()}} {{os.getpgrp()}}", encoding="ascii"
+            )
+            """
+        ),
+        containment_fd=write_fd,
+    )
+    try:
+        result = executor.run_step(_context())
+        os.set_blocking(read_fd, False)
+        records = os.read(read_fd, 4096).decode("ascii").splitlines()
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+    assert result.concern is None
+    pid, pgid = marker.read_text(encoding="ascii").split()
+    registered = records[0].split("\t")
+    assert registered[0] == "R"
+    assert registered[1:3] == [pid, pgid]
+    assert pid == pgid, "the registered CLI must lead its own killable session"
+    assert any(record.startswith(f"D\t{pid}\t") for record in records)
+
+
 def test_a_non_ascii_answer_survives_the_pipe():
     """Found in the first live run with a real model, not in this suite (D-052).
 

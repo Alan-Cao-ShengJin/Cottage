@@ -33,16 +33,22 @@ Run it with:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import signal
+import stat
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from executors import EchoExecutor, Executor, StepContext, StepResult
@@ -68,6 +74,621 @@ CAPABILITIES = [
 #: Renew when less than this fraction of the lease remains. Chosen so a renewal is
 #: attempted with time left to retry it, rather than at the moment it becomes urgent.
 RENEW_AT_FRACTION = 0.4
+
+
+class ContainmentError(RuntimeError):
+    """The worker cannot prove that it owns one killable runtime tree."""
+
+
+class RuntimeContainment:
+    """One local runtime, with an OS-owned boundary around all its descendants.
+
+    The room's attachment label is deliberately stable so a *finished* runtime can
+    resume its work. It cannot also distinguish two processes launched with the same
+    label: today the server treats those connections as one executor. This guard is
+    the client-side safety boundary until the protocol has a server-issued runtime
+    instance id. It refuses the second local process and records a fresh UUID for
+    every real start, so logs and a stale state file name the process that existed.
+
+    Windows uses a Job Object with ``KILL_ON_JOB_CLOSE``. POSIX uses a new session and
+    a tiny watchdog which owns no credential: if the worker disappears, EOF on a pipe
+    makes the watchdog kill that session's process group. Both cover an abrupt parent
+    death, which the executor's graceful ``cancel()`` cannot cover by itself.
+    """
+
+    def __init__(
+        self,
+        *,
+        identity_key: str,
+        label: str,
+        state_dir: Path,
+    ) -> None:
+        key = hashlib.sha256(f"{identity_key}\0{label}".encode()).hexdigest()[:24]
+        self.identity_hash = hashlib.sha256(identity_key.encode()).hexdigest()
+        self.room_id = ""
+        self.label = label
+        self.runtime_id = f"runtime-{uuid.uuid4().hex}"
+        self.state_dir = state_dir
+        self.state_path = state_dir / f"{key}.json"
+        self.lock_path = state_dir / f"{key}.lock"
+        self._lock_file: Any = None
+        self._alias_lock_files: list[Any] = []
+        self._watchdog_write: int | None = None
+        self._job_handle: int | None = None
+        self._closed = False
+        self._state: dict[str, Any] = {}
+
+    @classmethod
+    def acquire(
+        cls,
+        *,
+        identity_key: str,
+        label: str,
+        state_dir: str | None = None,
+    ) -> "RuntimeContainment":
+        root = Path(
+            state_dir
+            or os.environ.get("COTTAGE_RUNTIME_DIR")
+            or Path(tempfile.gettempdir()) / "cottage-worker"
+        )
+        guard = cls(identity_key=identity_key, label=label, state_dir=root)
+        try:
+            guard._acquire()
+        except BaseException:
+            guard._release_lock()
+            raise
+        return guard
+
+    def _acquire(self) -> None:
+        self._secure_runtime_directory()
+        self._lock_file = self._open_lock_file()
+        self._ensure_lock_byte(self._lock_file)
+        try:
+            self._lock_nonblocking(self._lock_file)
+        except (OSError, BlockingIOError) as exc:
+            prior = self._read_state()
+            detail = self._state_description(prior)
+            raise ContainmentError(
+                f"runtime {self.label!r} is already active locally{detail}; "
+                "refusing to merge two processes into one Cottage executor"
+            ) from exc
+
+        prior = self._read_state()
+        if prior and prior.get("status") != "stopped":
+            if self._prior_tree_alive(prior):
+                raise ContainmentError(
+                    f"the prior {self.label!r} process tree is still alive"
+                    f"{self._state_description(prior)}; refusing restart"
+                )
+            log.warning(
+                "recovering unclean runtime record: label=%s runtime=%s pid=%s",
+                self.label,
+                prior.get("runtime_id", "unknown"),
+                prior.get("pid", "unknown"),
+            )
+
+        if os.name == "nt":
+            self._establish_windows_job()
+            group_id: int | None = None
+        else:
+            group_id = None
+
+        self._state = {
+            "version": 1,
+            "status": "running",
+            "room_id": self.room_id,
+            "identity_hash": self.identity_hash,
+            "label": self.label,
+            "runtime_id": self.runtime_id,
+            "pid": os.getpid(),
+            "process_start_marker": self._process_start_marker(os.getpid()),
+            "process_group_id": group_id,
+            "started_at": time.time(),
+        }
+        self._write_state()
+        if os.name != "nt":
+            self._start_posix_watchdog()
+        log.info(
+            "runtime contained: label=%s runtime=%s pid=%s",
+            self.label,
+            self.runtime_id,
+            os.getpid(),
+        )
+
+    @property
+    def containment_fd(self) -> int | None:
+        return self._watchdog_write
+
+    def bind_room(self, room_id: str, *, base: str) -> None:
+        identity_key = f"room:{base}:{room_id}"
+        alias_key = hashlib.sha256(f"{identity_key}\0{self.label}".encode()).hexdigest()[:24]
+        alias_path = self.state_dir / f"{alias_key}.lock"
+        if alias_path == self.lock_path:
+            self.room_id = room_id
+            self._state["room_id"] = room_id
+            self._write_state()
+            return
+        alias_file = self._open_lock_file(alias_path)
+        self._ensure_lock_byte(alias_file)
+        try:
+            self._lock_nonblocking(alias_file)
+        except (OSError, BlockingIOError) as exc:
+            alias_file.close()
+            raise ContainmentError(
+                f"another local runtime already owns room {room_id!r} label "
+                f"{self.label!r}; refusing to connect"
+            ) from exc
+        self._alias_lock_files.append(alias_file)
+        self.room_id = room_id
+        self._state["room_id"] = room_id
+        self._write_state()
+
+    def _secure_runtime_directory(self) -> None:
+        try:
+            self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            details = self.state_dir.lstat()
+        except OSError as exc:
+            raise ContainmentError(f"runtime directory is unavailable: {exc}") from exc
+        if not stat.S_ISDIR(details.st_mode) or self.state_dir.is_symlink():
+            raise ContainmentError("runtime path must be a real directory, not a link")
+        if os.name != "nt":
+            if details.st_uid != os.getuid():
+                raise ContainmentError("runtime directory is not owned by this user")
+            if stat.S_IMODE(details.st_mode) & 0o077:
+                raise ContainmentError(
+                    "runtime directory permissions are too broad; require mode 0700"
+                )
+
+    def _open_lock_file(self, path: Path | None = None):  # type: ignore[no-untyped-def]
+        path = path or self.lock_path
+        if path.is_symlink():
+            raise ContainmentError("runtime lock path must not be a link")
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags, 0o600)
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode):
+                raise ContainmentError("runtime lock path is not a regular file")
+            if os.name != "nt":
+                if details.st_uid != os.getuid():
+                    raise ContainmentError("runtime lock file is not owned by this user")
+                if stat.S_IMODE(details.st_mode) & 0o077:
+                    raise ContainmentError("runtime lock file permissions must be 0600")
+            return os.fdopen(descriptor, "r+b")
+        except BaseException:
+            if "descriptor" in locals():
+                os.close(descriptor)
+            raise
+
+    @staticmethod
+    def _ensure_lock_byte(lock_file) -> None:  # type: ignore[no-untyped-def]
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+
+    @staticmethod
+    def _lock_nonblocking(lock_file) -> None:  # type: ignore[no-untyped-def]
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        import fcntl
+
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _release_lock(self) -> None:
+        for alias_file in self._alias_lock_files:
+            try:
+                alias_file.close()
+            except OSError:
+                pass
+        self._alias_lock_files.clear()
+        if self._lock_file is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                self._lock_file.seek(0)
+                msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            self._lock_file.close()
+        except OSError:
+            pass
+        self._lock_file = None
+
+    def _read_state(self) -> dict[str, Any]:
+        try:
+            details = self.state_path.lstat()
+            if self.state_path.is_symlink() or not stat.S_ISREG(details.st_mode):
+                raise ContainmentError("runtime state path must be a regular file, not a link")
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(self.state_path, flags)
+            with os.fdopen(descriptor, "r", encoding="utf-8") as state_file:
+                opened = os.fstat(state_file.fileno())
+                if not stat.S_ISREG(opened.st_mode):
+                    raise ContainmentError("runtime state path is not a regular file")
+                if os.name != "nt" and (
+                    opened.st_uid != os.getuid() or stat.S_IMODE(opened.st_mode) & 0o077
+                ):
+                    raise ContainmentError(
+                        "runtime state file must be owned by this user with mode 0600"
+                    )
+                raw = json.load(state_file)
+        except FileNotFoundError:
+            return {}
+        except ContainmentError:
+            raise
+        except (OSError, ValueError):
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _write_state(self) -> None:
+        temporary = self.state_path.with_suffix(f".{self.runtime_id}.tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(temporary, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as state_file:
+                descriptor = -1
+                json.dump(self._state, state_file, sort_keys=True)
+                state_file.flush()
+                os.fsync(state_file.fileno())
+            os.replace(temporary, self.state_path)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _state_description(state: dict[str, Any]) -> str:
+        if not state:
+            return ""
+        return f" (runtime={state.get('runtime_id', 'unknown')}, pid={state.get('pid', 'unknown')})"
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.GetExitCodeProcess.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if handle:
+                exit_code = wintypes.DWORD()
+                try:
+                    return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))) and (
+                        exit_code.value == 259
+                    )
+                finally:
+                    kernel32.CloseHandle(handle)
+            return ctypes.get_last_error() == 5
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    @staticmethod
+    def _process_start_marker(pid: int) -> str | None:
+        """Disambiguate a live process from a recycled PID where the OS permits."""
+        if pid <= 0:
+            return None
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.GetProcessTimes.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(wintypes.FILETIME),
+                ctypes.POINTER(wintypes.FILETIME),
+                ctypes.POINTER(wintypes.FILETIME),
+                ctypes.POINTER(wintypes.FILETIME),
+            ]
+            kernel32.GetProcessTimes.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return None
+            created = wintypes.FILETIME()
+            exited = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            try:
+                if not kernel32.GetProcessTimes(
+                    handle,
+                    ctypes.byref(created),
+                    ctypes.byref(exited),
+                    ctypes.byref(kernel),
+                    ctypes.byref(user),
+                ):
+                    return None
+                value = (int(created.dwHighDateTime) << 32) | int(created.dwLowDateTime)
+                return f"win-filetime:{value}"
+            finally:
+                kernel32.CloseHandle(handle)
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+            fields = stat[stat.rfind(")") + 2 :].split()
+            return f"proc-start:{fields[19]}"
+        except (OSError, IndexError):
+            return None
+
+    def _prior_tree_alive(self, state: dict[str, Any]) -> bool:
+        try:
+            pid = int(state.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if self._pid_alive(pid):
+            recorded_marker = state.get("process_start_marker")
+            live_marker = self._process_start_marker(pid)
+            if not recorded_marker or not live_marker or recorded_marker == live_marker:
+                return True
+        if os.name == "nt":
+            # Closing the dead worker's last Job Object handle kills its tree. There
+            # is no surviving job to query; a live recorded parent is the only state
+            # in which a second local launch can safely be identified here.
+            return False
+        try:
+            pgid = int(state.get("process_group_id") or 0)
+        except (TypeError, ValueError):
+            return False
+        if pgid <= 0:
+            return False
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def _start_posix_watchdog(self) -> None:
+        read_fd, write_fd = os.pipe()
+        try:
+            watchdog = subprocess.Popen(  # noqa: S603 - fixed local supervisor argv
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--containment-watchdog",
+                    str(read_fd),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                pass_fds=(read_fd,),
+                env={},
+                # Keep the worker in its caller's foreground group so Ctrl+C stays
+                # interactive, but put the containment watchdog outside that group.
+                # It must remain alive long enough to observe the worker's pipe EOF
+                # and kill executor sessions after an abrupt terminal stop.
+                start_new_session=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            os.close(read_fd)
+            os.close(write_fd)
+            raise ContainmentError("could not start the POSIX process-tree watchdog") from exc
+        os.close(read_fd)
+        self._watchdog_write = write_fd
+        self._state["watchdog_pid"] = watchdog.pid
+        self._state["watchdog_start_marker"] = self._process_start_marker(watchdog.pid)
+        self._write_state()
+
+    def _establish_windows_job(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            raise ContainmentError(
+                f"could not create a Windows Job Object (error {ctypes.get_last_error()})"
+            )
+        information = ExtendedLimitInformation()
+        information.BasicLimitInformation.LimitFlags = 0x00002000
+        configured = kernel32.SetInformationJobObject(
+            job, 9, ctypes.byref(information), ctypes.sizeof(information)
+        )
+        assigned = configured and kernel32.AssignProcessToJobObject(
+            job, kernel32.GetCurrentProcess()
+        )
+        if not assigned:
+            error = ctypes.get_last_error()
+            kernel32.CloseHandle(job)
+            raise ContainmentError(
+                f"could not assign this runtime to a kill-on-close Windows Job "
+                f"Object (error {error})"
+            )
+        # Deliberately held until process teardown. Closing the last handle is the
+        # kill operation and this process is itself a member of the job.
+        self._job_handle = int(job)
+
+    def close(self) -> None:
+        """Mark a clean drain; OS resources remain held until the process exits.
+
+        Keeping both the lock and the Job Object/watchdog pipe open closes the tiny
+        race where a replacement starts while this process is still returning from
+        ``main``. Process teardown releases them; the job/watchdog then removes any
+        descendant that somehow survived the executor's bounded cancellation.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._state["status"] = "stopped"
+        self._state["stopped_at"] = time.time()
+        try:
+            self._write_state()
+        except OSError as exc:
+            log.error("could not record clean runtime stop: %s", exc)
+        if self._watchdog_write is not None:
+            try:
+                os.write(self._watchdog_write, b"G\n")
+                os.close(self._watchdog_write)
+            except OSError:
+                pass
+            self._watchdog_write = None
+
+
+def _run_posix_watchdog(read_fd: int) -> int:
+    """Kill every registered executor group when the worker's control pipe ends."""
+    # A watchdog is deliberately not an interactive process. Even if an operator or
+    # process manager sends SIGINT directly (rather than through the terminal group),
+    # only loss of the worker's control pipe may retire this containment boundary.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    tracked: dict[int, tuple[int, str]] = {}
+    try:
+        with os.fdopen(read_fd, "r", encoding="ascii", errors="replace") as stream:
+            for raw in stream:
+                fields = raw.rstrip("\n").split("\t")
+                if fields == ["G"]:
+                    # G means the worker began a graceful drain, not that every
+                    # registration writer has finished. Continue to EOF: an executor
+                    # bootstrap may already hold a duplicated pipe fd and its atomic
+                    # R record can legally arrive after this writer's G record.
+                    continue
+                if len(fields) == 4 and fields[0] == "R":
+                    try:
+                        pid, pgid = int(fields[1]), int(fields[2])
+                    except ValueError:
+                        continue
+                    # The fixed executor bootstrap creates a session whose leader is
+                    # the configured CLI. Refuse any record broad enough to name a
+                    # terminal or supervisor process group.
+                    if pid > 1 and pgid == pid:
+                        tracked[pid] = (pgid, fields[3])
+                elif len(fields) >= 2 and fields[0] == "D":
+                    try:
+                        pid = int(fields[1])
+                    except ValueError:
+                        continue
+                    registered = tracked.get(pid)
+                    if registered is None:
+                        continue
+                    pgid, _marker = registered
+                    # D means the direct CLI exited. Its helpers can outlive it in
+                    # the same session, so forget the group only once the kernel says
+                    # that no process remains in it.
+                    try:
+                        os.killpg(pgid, 0)
+                    except ProcessLookupError:
+                        tracked.pop(pid, None)
+                    except (OSError, PermissionError):
+                        pass
+    except OSError:
+        pass
+
+    for pid, (pgid, marker) in tuple(tracked.items()):
+        live_marker = RuntimeContainment._process_start_marker(pid)
+        if live_marker is not None and marker and live_marker != marker:
+            continue
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (OSError, PermissionError):
+            continue
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        any_live = False
+        for pgid, _marker in tracked.values():
+            try:
+                os.killpg(pgid, 0)
+                any_live = True
+            except (OSError, PermissionError):
+                pass
+        if not any_live:
+            return 0
+        time.sleep(0.02)
+    for pgid, _marker in tracked.values():
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (OSError, PermissionError):
+            pass
+    return 0
 
 
 class CottageError(RuntimeError):
@@ -205,8 +826,12 @@ class Worker:
     connection_id: str = ""
     attachment_id: str | None = None
     participant_id: str = ""
+    runtime_id: str = ""
     lease: Lease | None = None
     stopping: bool = False
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    cancel_complete: bool = False
+    shutdown_started: bool = False
     #: Steps completed per task. Seeded from the room's checkpoints on start, so a
     #: restarted process resumes where it stopped instead of redoing work — which is
     #: the difference between durable progress and a progress-shaped log line.
@@ -296,7 +921,8 @@ class Worker:
         self.attachment_id = result.get("attachment_id")
         self.cursor = max(self.cursor, int(result.get("current_seq") or 0))
         log.info(
-            "connected: connection=%s attachment=%s may_claim=%s max_lease=%ss",
+            "connected: runtime=%s connection=%s attachment=%s may_claim=%s max_lease=%ss",
+            self.runtime_id or "uncontained-test-runtime",
             self.connection_id,
             self.attachment_id,
             result.get("may_claim"),
@@ -316,31 +942,35 @@ class Worker:
     # -- the loop ----------------------------------------------------------
 
     def run(self) -> None:
-        self.connect()
-        state = self.hydrate()
-        self.participant_id = state.get("you", {}).get("participant_id", "")
-        self.adopt_existing_leases(state)
-        self.adopt_recorded_progress(state)
-        self.absorb_answers(state)
+        try:
+            self.connect()
+            state = self.hydrate()
+            self.participant_id = state.get("you", {}).get("participant_id", "")
+            self.adopt_existing_leases(state)
+            self.adopt_recorded_progress(state)
+            self.absorb_answers(state)
 
-        cycles = 0
-        while not self.stopping and (self.max_cycles is None or cycles < self.max_cycles):
-            cycles += 1
-            try:
-                self.cycle()
-            except CottageError as exc:
-                # A refusal is information, not a crash. The loop is the thing that
-                # must survive: an unattended worker that exits on the first 409 is
-                # attended by whoever restarts it.
-                log.warning("cycle %s refused: %s", cycles, exc)
-                if exc.code in {"unauthenticated", "forbidden"}:
-                    raise
-                time.sleep(2)
-            except urllib.error.URLError as exc:
-                log.warning("network trouble, retrying: %s", exc)
-                time.sleep(5)
-
-        self.shutdown()
+            cycles = 0
+            while not self.stopping and (self.max_cycles is None or cycles < self.max_cycles):
+                cycles += 1
+                try:
+                    self.cycle()
+                except CottageError as exc:
+                    # A refusal is information, not a crash. The loop is the thing that
+                    # must survive: an unattended worker that exits on the first 409 is
+                    # attended by whoever restarts it.
+                    log.warning("cycle %s refused: %s", cycles, exc)
+                    if exc.code in {"unauthenticated", "forbidden"}:
+                        raise
+                    self.stop_event.wait(2)
+                except urllib.error.URLError as exc:
+                    log.warning("network trouble, retrying: %s", exc)
+                    self.stop_event.wait(5)
+        finally:
+            # Fatal authentication and transport errors used to skip shutdown. The
+            # OS boundary would still kill descendants, but the room would needlessly
+            # wait for a lease and connection it could have been told were gone.
+            self.shutdown()
 
     def cycle(self) -> None:
         state = self.hydrate()
@@ -651,6 +1281,13 @@ class Worker:
             # Stopped mid-step. The room already halted the task and the executor's
             # child is dead; there is nothing to record and nothing to complete.
             return
+        # A stop can land after the executor thread writes its result but before the
+        # watcher observes that the thread ended. Re-check at the room-effect boundary
+        # so a cancelled final step cannot checkpoint or complete on its way out.
+        if self.stopping or self.halted(task_id):
+            self.executor.cancel()
+            log.info("discarding step %s on %s after stop", step, task_id)
+            return
         if result.concern:
             log.warning("step %s on %s: %s", step, task_id, result.concern)
 
@@ -667,6 +1304,10 @@ class Worker:
 
         if not result.done and step < self.steps_per_task:
             log.info("step %s/%s on %s", step, self.steps_per_task, task_id)
+            return
+
+        if self.stopping or self.halted(task_id):
+            log.info("not completing %s after stop", task_id)
             return
 
         try:
@@ -747,6 +1388,9 @@ class Worker:
 
         if "error" in failure:
             raise failure["error"]
+        if self.stopping or self.halted(context.task_id):
+            self.executor.cancel()
+            return None
         return outcome.get("result")
 
     def halted(self, task_id: str) -> bool:
@@ -881,7 +1525,21 @@ class Worker:
                 self.cursor = 0
             else:
                 raise
-        time.sleep(self.poll_seconds)
+        self.stop_event.wait(self.poll_seconds)
+
+    def request_stop(self) -> None:
+        """Start a bounded, idempotent drain and reach inside an active step now."""
+        self.stopping = True
+        self.stop_event.set()
+        # Safe when idle by the Executor contract. For a subprocess this kills its
+        # current process tree rather than waiting for the watcher interval or the
+        # outer cycle to notice the flag.
+        if not self.cancel_complete:
+            try:
+                self.executor.cancel()
+                self.cancel_complete = True
+            except BaseException as exc:  # noqa: BLE001 - room cleanup must continue
+                log.error("executor cancellation failed during drain: %s", exc)
 
     def shutdown(self) -> None:
         """Leave nothing held.
@@ -890,6 +1548,9 @@ class Worker:
         something this process already knew — and "it will expire eventually" is the
         answer leases exist so that nobody has to accept.
         """
+        if self.shutdown_started:
+            return
+        self.request_stop()
         if self.lease is not None:
             try:
                 self.call(
@@ -903,15 +1564,20 @@ class Worker:
                     },
                 )
                 log.info("released %s on the way out", self.lease.task_id)
-            except CottageError as exc:
+                self.lease = None
+            except (CottageError, urllib.error.URLError) as exc:
                 log.warning("could not release cleanly: %s", exc)
-            self.lease = None
         if self.connection_id:
             try:
                 self.call("POST", f"/disconnect?connection_id={self.connection_id}", None)
-            except CottageError:
-                pass
-        log.info("stopped")
+                self.connection_id = ""
+                # Last-connection disconnect releases this executor's claims in the
+                # server transaction, including one whose explicit release failed.
+                self.lease = None
+            except (CottageError, urllib.error.URLError) as exc:
+                log.warning("could not disconnect cleanly: %s", exc)
+        self.shutdown_started = self.lease is None and not self.connection_id
+        log.info("stopped" if self.shutdown_started else "drain incomplete; retry is safe")
 
     @staticmethod
     def seconds_until(iso: str) -> float:
@@ -943,6 +1609,12 @@ def _refuses(env_name: str) -> type[argparse.Action]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    effective_argv = sys.argv[1:] if argv is None else argv
+    if effective_argv[:1] == ["--containment-watchdog"]:
+        if len(effective_argv) != 2 or os.name == "nt":
+            return 2
+        return _run_posix_watchdog(int(effective_argv[1]))
+
     parser = argparse.ArgumentParser(description="An unattended Cottage worker.")
     parser.add_argument(
         "--base", default=os.environ.get("COTTAGE_BASE", "https://agent-rooms.fly.dev")
@@ -1056,8 +1728,16 @@ def main(argv: list[str] | None = None) -> int:
             "that terminal — which leaves an exited worker with no recoverable reason."
         ),
     )
+    parser.add_argument(
+        "--runtime-dir",
+        default=os.environ.get("COTTAGE_RUNTIME_DIR"),
+        help=(
+            "Local lock/audit directory for process containment. Defaults to a "
+            "private Cottage directory under the operating-system temp directory."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(effective_argv)
 
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if args.log_file:
@@ -1072,62 +1752,84 @@ def main(argv: list[str] | None = None) -> int:
     # Credentials come from the environment only; the flags above exist to say so.
     invitation = os.environ.get("COTTAGE_INVITATION")
     room_id, token = args.room, os.environ.get("COTTAGE_PARTICIPANT_TOKEN")
-    if invitation:
-        room_id, token = join_with_invitation(
-            args.base.rstrip("/"),
-            invitation,
-            display_name=args.display_name,
-            description=(
-                "Unattended executor. Polls, renews its own leases, and takes only "
-                "work proposed to it. It runs a fixed handler and does not reason."
-            ),
-        )
-        log.info("joined %s as %s", room_id, args.display_name)
-    if not room_id or not token:
+    if not invitation and (not room_id or not token):
         parser.error(
             "no credential in the environment: set COTTAGE_INVITATION (a room key), "
             "or COTTAGE_ROOM + COTTAGE_PARTICIPANT_TOKEN. Neither is accepted as a "
             "command-line argument."
         )
-
-    worker = Worker(
-        base=args.base.rstrip("/"),
-        room_id=room_id,
-        token=token,
-        label=args.label,
-        poll_seconds=args.poll_seconds,
-        max_cycles=args.max_cycles,
-        executor=build_executor(
-            args.executor,
-            command=args.executor_command,
-            ask_at_step=args.ask_at_step,
-            cwd=args.executor_cwd,
-            env_passthrough=args.executor_env,
-            timeout_seconds=args.executor_timeout,
-        ),
-        # No watcher for the instant executor: its steps end before anything could
-        # interrupt them, and polling between them would be pure cost.
-        watch_interval_seconds=0.0 if args.executor == "echo" else 5.0,
-        declared_model=args.declare_model,
-        take_unassigned=args.take_unassigned,
-        steps_per_task=args.steps,
-        lease_seconds=args.lease_seconds,
-    )
-
-    def stop(*_: Any) -> None:
-        # Sets a flag rather than exiting, so the loop reaches `shutdown` and gives
-        # its leases back instead of leaving the room to time them out.
-        log.info("shutdown requested; finishing this cycle")
-        worker.stopping = True
-
-    signal.signal(signal.SIGINT, stop)
-    signal.signal(signal.SIGTERM, stop)
+    base = args.base.rstrip("/")
+    if invitation:
+        invitation_fingerprint = hashlib.sha256(invitation.encode()).hexdigest()
+        identity_key = f"invitation:{base}:{invitation_fingerprint}"
+    else:
+        identity_key = f"room:{base}:{room_id}"
+    try:
+        containment = RuntimeContainment.acquire(
+            identity_key=identity_key,
+            label=args.label,
+            state_dir=args.runtime_dir,
+        )
+    except ContainmentError as exc:
+        log.error("worker not started: %s", exc)
+        return 3
 
     try:
-        worker.run()
-    except SystemExit as exc:
-        log.error("%s", exc)
-        return 2
+        if invitation:
+            room_id, token = join_with_invitation(
+                base,
+                invitation,
+                display_name=args.display_name,
+                description=(
+                    "Unattended executor. Polls, renews its own leases, and takes only "
+                    "work proposed to it. It runs a fixed handler and does not reason."
+                ),
+            )
+            log.info("joined %s as %s", room_id, args.display_name)
+        assert room_id and token
+        containment.bind_room(room_id, base=base)
+        worker = Worker(
+            base=base,
+            room_id=room_id,
+            token=token,
+            label=args.label,
+            poll_seconds=args.poll_seconds,
+            max_cycles=args.max_cycles,
+            executor=build_executor(
+                args.executor,
+                command=args.executor_command,
+                ask_at_step=args.ask_at_step,
+                cwd=args.executor_cwd,
+                env_passthrough=args.executor_env,
+                timeout_seconds=args.executor_timeout,
+                containment_fd=containment.containment_fd,
+            ),
+            # No watcher for the instant executor: its steps end before anything could
+            # interrupt them, and polling between them would be pure cost.
+            watch_interval_seconds=0.0 if args.executor == "echo" else 5.0,
+            declared_model=args.declare_model,
+            take_unassigned=args.take_unassigned,
+            steps_per_task=args.steps,
+            lease_seconds=args.lease_seconds,
+            runtime_id=containment.runtime_id,
+        )
+
+        def stop(*_: Any) -> None:
+            log.info("shutdown requested; draining this runtime")
+            worker.request_stop()
+
+        signal.signal(signal.SIGINT, stop)
+        signal.signal(signal.SIGTERM, stop)
+        try:
+            worker.run()
+        except SystemExit as exc:
+            log.error("%s", exc)
+            return 2
+    except ContainmentError as exc:
+        log.error("worker not started: %s", exc)
+        return 3
+    finally:
+        containment.close()
     return 0
 
 
