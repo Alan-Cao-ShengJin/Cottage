@@ -22,6 +22,15 @@ except what their agent happens to mention, and silence reads as a dead room whi
 companion works. The JSON feeds a terminal status line; the markdown copy is for keeping
 open in an editor split, since an editor reloads a changed file on disk.
 
+**And doing both cheaply.** We do not pay for inference — our users do, from their own
+subscriptions (`docs/PRODUCT.md` §9). This process's stdout is wired to a host that turns
+each line into a model wake-up, so every line printed here spends someone else's money.
+Events are therefore split in *code* into two classes: `routine` ones render into the files
+below, which cost nothing to write and nothing to read; only `judgement` ones reach stdout,
+batched so that a poll carrying five of them is one wake rather than five. The counters
+that prove it are written into the status file — a relay that cannot report its own wake
+rate is not known to be cheap, only not known to be expensive.
+
 Pass `--read-only` to go back to observing without attaching — useful for watching a room
 you do not want to appear in.
 
@@ -40,9 +49,11 @@ import collections
 import json
 import os
 import pathlib
+import re
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -144,12 +155,41 @@ def summarize(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-#: Never worth waking a human for. `presence.changed` fires several times a minute for
-#: every polling participant, and a routine work refresh is a client keeping its card warm
-#: — the filter Codex arrived at independently (seq 144) after its own feed became a
-#: firehose. Everything else is reported: suppressing by default is how a relay quietly
-#: stops mentioning the thing that mattered.
-NOT_WORTH_WAKING = frozenset({"presence.attachment_registered"})
+#: Three classes, decided here in code and never by a model — deciding what matters by
+#: asking a model to read every line is the exact cost `docs/PRODUCT.md` §9 forbids.
+JUDGEMENT = "judgement"  # worth waking a supervisor: it needs a decision
+ROUTINE = "routine"  # worth showing: it renders into the files and stops there
+NOISE = "noise"  # not worth a line: it would crowd out the feed it sits in
+
+#: Events that need a person or an agent to *decide* something: an instruction aimed at
+#: us, an unanswered question, a clash, work offered to us, a lease we just lost, a peer
+#: that vanished mid-task. Everything not listed is routine, so a new event type shows up
+#: in the file rather than silently disappearing — the failure mode to avoid is a relay
+#: that stops mentioning the thing that mattered, not one that says too much.
+JUDGEMENT_TYPES = frozenset(
+    {
+        # Someone is telling us to do something, or asking.
+        "directive.issued",
+        "task.steered",
+        "question.asked",
+        "question.answered",
+        # Work is being offered to us, or taken away.
+        "task.proposed",
+        "task.cancelled",
+        # We lost a lease we thought we held. Nothing else in the log says so.
+        "task.claim_expired",
+        # Two participants disagree about the same thing.
+        "conflict.detected",
+        "artifact.divergence_detected",
+        # Progress has stopped and nobody has said why.
+        "task.awaiting_input",
+        "task.blocked",
+        "work.stale",
+        # A peer is gone. What it was holding is now nobody's.
+        "participant.left",
+        "room.closed",
+    }
+)
 
 #: Presence is noise when a participant is merely re-confirming that it is here, and is
 #: coordination news when it *stops* being here. Suppressing the whole event type — which
@@ -157,25 +197,89 @@ NOT_WORTH_WAKING = frozenset({"presence.attachment_registered"})
 #: disconnect, which is precisely the event a supervisor needs to act on.
 PRESENCE_WORTH_WAKING = frozenset({"disconnected", "stale", "idle"})
 
+#: Free-text fields that may contain a report of trouble. A checkpoint's `summary` and a
+#: completion's `result` are prose: the room stores no structured "did it work" flag, so
+#: whether an event reports failure can only be read out of the words (see below).
+OUTCOME_FIELDS = ("result", "summary", "outcome", "status", "error", "reason", "note")
 
-def worth_waking(event: dict[str, Any], *, me: str = "") -> bool:
-    kind = event.get("type")
-    if kind in NOT_WORTH_WAKING:
-        return False
+#: Deliberately over-broad. A false wake costs one model call; a missed "the gate is red"
+#: costs a supervisor who thinks work is progressing while it is not. When cost and
+#: coverage conflict here, coverage wins — that is the whole point of the relay.
+TROUBLE = re.compile(
+    r"\b("
+    r"fail\w*|error\w*|block\w*|broke\w*|break\w*|"
+    # The contractions and their spelled-out forms both, because a worker writing up a
+    # failure picks either and the two are the same report. `couldn't` was here without
+    # `could not`, so "gave up, could not reach the room" classified as routine.
+    r"cannot|can't|couldn't|could not|gave up|giving up|unable|stuck|abort\w*|crash\w*|"
+    r"denied|reject\w*|refus\w*|invalid|missing|timeout|timed out|"
+    r"traceback|exception|regress\w*|conflict\w*|revert\w*|"
+    r"red|failing|unresolved|no-go"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def reports_trouble(payload: dict[str, Any]) -> bool:
+    """Does this payload say something went wrong?
+
+    Structural first — an explicit `ok: false` or `success: false` is unambiguous and
+    needs no guessing. Then the words, because the room's own schema has no field for
+    "it worked": a checkpoint carries a free-text `summary` and a completion a free-text
+    `result`, so for those two the prose is the only evidence there is.
+    """
+    for flag in ("ok", "success", "succeeded", "passed"):
+        if payload.get(flag) is False:
+            return True
+    for field_name in OUTCOME_FIELDS:
+        value = payload.get(field_name)
+        if isinstance(value, str) and TROUBLE.search(value):
+            return True
+    return False
+
+
+def classify(event: dict[str, Any], *, me: str = "") -> str:
+    """Decide what an event costs: a wake, a line in a file, or nothing.
+
+    The one genuinely contested case is `task.checkpointed`, and the ruling is: **a
+    checkpoint is routine unless it reports trouble.** A checkpoint is progress, and
+    progress arriving every few minutes is exactly the drip that makes a relay expensive
+    — but "the gate failed" and "I am blocked" arrive as checkpoints too, and those are
+    the single most important thing a supervisor can be told. So it is split by content
+    rather than by type. `task.completed` is split the same way, for the same reason.
+
+    What a reader loses under this rule, stated plainly because it is a real loss: a
+    checkpoint that reports failure in words `TROUBLE` does not contain ("the numbers
+    came back lower than we hoped") renders into `ROOM.md` and the status file, and does
+    not wake anyone until the supervisor next looks. It is never dropped — the file is
+    complete — but its *delivery* is pull rather than push. The mitigations are that the
+    vocabulary is over-broad on purpose, and that the counters make the ratio of routine
+    to judgement visible, so a relay that has gone quiet can be seen to have gone quiet.
+    """
+    kind = str(event.get("type") or "")
+    payload = event.get("payload") or {}
+
+    if kind == "presence.attachment_registered":
+        # Fires every time any participant reattaches; several a minute in a busy room.
+        return NOISE
     if kind == "presence.changed":
-        return (
-            str((event.get("payload") or {}).get("liveness")) in PRESENCE_WORTH_WAKING
-        )
-    if (
-        kind == "message.posted"
-        and me
-        and (event.get("actor") or {}).get("participant_id") == me
-    ):
+        liveness = str(payload.get("liveness") or "")
+        return JUDGEMENT if liveness in PRESENCE_WORTH_WAKING else NOISE
+    if kind == "message.posted" and me and (event.get("actor") or {}).get("participant_id") == me:
         # Something I said, read back to me. Only messages: a checkpoint or a task
         # change from this same seat comes from the *companion* runtime, which is news
         # to the supervisor even though the room attributes it to one participant.
-        return False
-    return True
+        return NOISE
+
+    if kind in JUDGEMENT_TYPES:
+        return JUDGEMENT
+    if kind in ("task.checkpointed", "task.completed"):
+        return JUDGEMENT if reports_trouble(payload) else ROUTINE
+    if kind == "message.posted":
+        # Free-form text from another participant. There is no schema to reason from,
+        # which is precisely why a model rather than a template has to read it.
+        return JUDGEMENT
+    return ROUTINE
 
 
 #: Fields worth showing per event, in the order they are worth trying. An event whose
@@ -224,15 +328,138 @@ def describe(event: dict[str, Any]) -> str:
     return f"{line} — {detail[:150]}" if detail else line
 
 
+#: The typographic characters this module actually emits, and their ASCII readings. Named
+#: rather than folded blindly so a dash stays a dash instead of becoming `?`. Written as
+#: escapes because the literal glyphs are what this table exists to eliminate — a source
+#: file that has to survive a cp1252 editor should not depend on its own bytes.
+ASCII_READINGS = str.maketrans(
+    {
+        "·": "|",  # middle dot, from describe()'s actor separator
+        "—": "-",  # em dash, from describe()'s detail separator
+        "–": "-",  # en dash
+        "‘": "'",  # curly quotes, which arrive in copied-in prose
+        "’": "'",
+        "“": '"',
+        "”": '"',
+    }
+)
+
+
 def plain(event: dict[str, Any]) -> str:
     """The same line without markdown, and ASCII-only, for a stdout relay.
 
     A relay line crosses a pipe into a host that may decode it as anything; the middle
     dot arrived as a replacement character the first time this ran. Encoding has cost
     this project a mangled checkpoint, a rejected secret and a dead status line already
-    — a status line is not the place to keep testing it.
+    - a status line is not the place to keep testing it.
+
+    The promise is kept at this boundary rather than at each call site. An earlier version
+    of this function claimed "ASCII-only" while stripping three markdown characters and
+    one middle dot, so the em dash `describe` puts before every detail went straight out
+    to the pipe. Substituting the characters we know, then folding whatever is left, means
+    a *new* non-ASCII character in someone's display name degrades instead of escaping.
     """
-    return describe(event).replace("`", "").replace("**", "").replace(" · ", " | ")
+    line = describe(event).replace("`", "").replace("**", "").translate(ASCII_READINGS)
+    return line.encode("ascii", "replace").decode("ascii")
+
+
+#: Separator inside a coalesced wake. It has to be one *line*, not one block: the host
+#: reading this stdout makes a wake-up per line, so two lines are two wakes no matter how
+#: related they are.
+BATCH_SEPARATOR = " ;; "
+
+
+def render_batch(events: list[dict[str, Any]]) -> str:
+    """Every judgement event from one poll, as a single line."""
+    lines = [plain(event) for event in events]
+    if len(lines) == 1:
+        return lines[0]
+    return f"[{len(lines)} events] " + BATCH_SEPARATOR.join(lines)
+
+
+@dataclass
+class RelayCounters:
+    """The numbers `docs/PRODUCT.md` §9 says a supervisor must be able to report.
+
+    Three of the four live here. The fourth — duplicate claims prevented — is a property
+    of the room's lease table, not of this relay; counting it from a client's view of the
+    event stream would be a guess presented as a measurement, so it is deliberately
+    absent rather than approximated.
+    """
+
+    started_at: float = field(default_factory=time.time)
+    #: Lines actually written to stdout. This is the number that costs money.
+    wakes: int = 0
+    #: Judgement events seen, whether or not `--emit` was on to deliver them.
+    judgement_events: int = 0
+    #: Events that rendered into the files and woke nobody. The savings.
+    routine_events: int = 0
+    noise_events: int = 0
+    #: Judgement events actually delivered; `emitted - wakes` is what batching saved.
+    emitted_events: int = 0
+    wake_bytes_total: int = 0
+    wake_bytes_max: int = 0
+    wake_bytes_last: int = 0
+
+    def record_wake(self, line: str, count: int) -> None:
+        size = len(line.encode("utf-8", "replace"))
+        self.wakes += 1
+        self.emitted_events += count
+        self.wake_bytes_total += size
+        self.wake_bytes_last = size
+        self.wake_bytes_max = max(self.wake_bytes_max, size)
+
+    def report(self, *, now: float | None = None) -> dict[str, Any]:
+        elapsed = max((now if now is not None else time.time()) - self.started_at, 1.0)
+        return {
+            "uptime_s": round(elapsed),
+            "wakes": self.wakes,
+            "wakes_per_hour": round(self.wakes * 3600.0 / elapsed, 2),
+            "judgement": self.judgement_events,
+            "routine": self.routine_events,
+            "noise": self.noise_events,
+            # Events that arrived alongside another judgement event and so cost no
+            # extra wake. Zero wakes for five routine events does not show up here —
+            # that is `routine`, which is the larger saving of the two.
+            "coalesced": self.emitted_events - self.wakes,
+            "bytes_last": self.wake_bytes_last,
+            "bytes_max": self.wake_bytes_max,
+            "bytes_mean": round(self.wake_bytes_total / self.wakes) if self.wakes else 0,
+        }
+
+
+def relay(
+    events: list[dict[str, Any]],
+    *,
+    me: str = "",
+    counters: RelayCounters,
+    emit: bool = True,
+) -> tuple[list[str], str | None]:
+    """One poll's events, split into what renders and what wakes.
+
+    Returns the lines to append to the readable feed, and at most one line for stdout —
+    at most, because three routine events are three lines in a file and zero wakes, and
+    two judgement events in the same poll are one wake carrying both.
+    """
+    shown: list[str] = []
+    waking: list[dict[str, Any]] = []
+    for event in events:
+        klass = classify(event, me=me)
+        if klass == NOISE:
+            counters.noise_events += 1
+            continue
+        shown.append(describe(event))
+        if klass == JUDGEMENT:
+            counters.judgement_events += 1
+            waking.append(event)
+        else:
+            counters.routine_events += 1
+
+    if not (waking and emit):
+        return shown, None
+    line = render_batch(waking)
+    counters.record_wake(line, len(waking))
+    return shown, line
 
 
 def as_markdown(state: dict[str, Any]) -> str:
@@ -263,6 +490,24 @@ def as_markdown(state: dict[str, Any]) -> str:
     feed = state.get("feed") or []
     lines += ["", "## Live", ""]
     lines += [f"- {line}" for line in reversed(feed)] or ["_nothing yet_"]
+
+    # What this relay cost, on the page rather than only in the JSON. A supervisor
+    # reading the room should be able to see the bill without being asked to.
+    relay_stats = state.get("relay") or {}
+    if relay_stats:
+        lines += [
+            "",
+            "## Cost",
+            "",
+            f"- model wakes: **{relay_stats.get('wakes', 0)}** "
+            f"({relay_stats.get('wakes_per_hour', 0)}/hour)",
+            f"- rendered without waking: **{relay_stats.get('routine', 0)}** routine, "
+            f"{relay_stats.get('noise', 0)} suppressed",
+            f"- coalesced into an existing wake: **{relay_stats.get('coalesced', 0)}**",
+            f"- payload per wake: {relay_stats.get('bytes_last', 0)}B last, "
+            f"{relay_stats.get('bytes_mean', 0)}B mean, "
+            f"{relay_stats.get('bytes_max', 0)}B max",
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -341,6 +586,7 @@ def main() -> int:
     # the replay deliberately; the default is "from now".
     cursor = args.from_seq if args.from_seq is not None else -1
     me = ""
+    counters = RelayCounters()
     while True:
         try:
             if not args.read_only and not connection_id:
@@ -376,15 +622,19 @@ def main() -> int:
                 "GET",
                 f"/events?since_seq={cursor}&limit=60",
             )
-            for event in fresh.get("events") or []:
-                feed.append(describe(event))
+            batch = list(fresh.get("events") or [])
+            for event in batch:
                 cursor = max(cursor, int(event.get("seq") or cursor))
-                if args.emit and worth_waking(event, me=me):
-                    # One line per event, flushed immediately: this stdout IS the relay.
-                    # A host that turns lines into notifications can wake a supervisor
-                    # whose turn has already ended, which is the difference between a
-                    # durable log and a continuous feed.
-                    print(plain(event), flush=True)
+            shown, wake = relay(batch, me=me, counters=counters, emit=args.emit)
+            feed.extend(shown)
+            if wake:
+                # One line per *poll*, not per event, flushed immediately: this stdout IS
+                # the relay. A host that turns lines into notifications can wake a
+                # supervisor whose turn has already ended, which is the difference
+                # between a durable log and a continuous feed — and each line it reads
+                # spends a model call, so a poll that carries three things to decide
+                # spends one call and not three.
+                print(wake, flush=True)
             cursor = max(cursor, int(fresh.get("current_seq") or cursor))
 
             state = summarize(read_room(args.base, args.room, token))
@@ -399,6 +649,9 @@ def main() -> int:
             state = {"at": time.time(), "error": type(exc).__name__}
         except Exception as exc:  # noqa: BLE001 - a status line must not take the poller down
             state = {"at": time.time(), "error": type(exc).__name__}
+        # On every path, including the error ones: the cost of the relay is a fact about
+        # the relay, not about whether the room happened to answer this time.
+        state["relay"] = counters.report()
         tmp = out.with_suffix(".tmp")
         tmp.write_text(json.dumps(state), encoding="utf-8")
         # Atomic on Windows too: the status line must never read a half-written file.
