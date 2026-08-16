@@ -281,9 +281,23 @@ CREATE TABLE IF NOT EXISTS attachments (
     executor_model TEXT NOT NULL DEFAULT '',
     created_at     TEXT NOT NULL,
     last_seen_at   TEXT NOT NULL,
+    -- Which run of this runtime is current. Bumped by a drain, never reused. A fence
+    -- says which run of a *lease* a caller belongs to; this says which run of a
+    -- *runtime*, and the two are independent: a process can hold a perfectly valid
+    -- fence and still be a run that was told to stop.
+    epoch          INTEGER NOT NULL DEFAULT 1,
+    -- Set when this runtime was drained, cleared only by an explicit resume. Sticky
+    -- on purpose. Killing a process is not something a server can do — in the hosted
+    -- product the runtime is on someone else's machine — so the only durable control
+    -- is refusing to accept its work. A drained runtime that survives its kill, or
+    -- reconnects afterwards, lands back on this same row and is refused again;
+    -- clearing it is a separate, visible act rather than a side effect of reconnecting.
+    drained_at     TEXT,
+    drained_reason TEXT NOT NULL DEFAULT '',
     -- Stable identity is the whole point: the same runtime reattaching must land on
     -- the same row, so affinity survives a transport reconnect.
-    UNIQUE (participant_id, label)
+    UNIQUE (participant_id, label),
+    CHECK (epoch >= 1)
 );
 
 CREATE INDEX IF NOT EXISTS idx_attachments_participant ON attachments(participant_id);

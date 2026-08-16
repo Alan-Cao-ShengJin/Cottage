@@ -45,6 +45,14 @@ class EventType(str, Enum):
     #: distinguish "the worker restarted" from "a second worker appeared".
     ATTACHMENT_REGISTERED = "presence.attachment_registered"
 
+    #: A runtime was told to stop, and the room will refuse its work from here on.
+    #: Emitted for the *decision*, not for the process ending — the room never learns
+    #: whether the process ended, and a design that waited to find out would be waiting
+    #: on a machine it does not own (D-062). `runtime.resumed` is the explicit,
+    #: separately-authorized undo; there is deliberately no automatic one.
+    RUNTIME_DRAINED = "presence.runtime_drained"
+    RUNTIME_RESUMED = "presence.runtime_resumed"
+
     MESSAGE_POSTED = "message.posted"
 
     WORK_DECLARED = "work.declared"

@@ -55,7 +55,14 @@ from ..domain.room import (
 from ..util import from_iso, is_past, utcnow, utcnow_iso
 from . import authz, eventlog, store
 from .dispatch import CommandOutcome, execute_command, publish_committed
-from .errors import AmbiguousExecutor, CapabilityUnsupported, InvalidCommand, RateLimited
+from .errors import (
+    AmbiguousExecutor,
+    CapabilityUnsupported,
+    Forbidden,
+    InvalidCommand,
+    RateLimited,
+    StaleRuntime,
+)
 
 log = logging.getLogger(__name__)
 
@@ -722,6 +729,12 @@ async def resolve_executor(
 
     attachment_id = chosen[0].attachment_id
     if attachment_id is not None:
+        # Refused here rather than at each call site, because this is the one place
+        # every command passes through on its way to becoming somebody's executor.
+        # A drained runtime is therefore unable to claim, renew, checkpoint, complete
+        # or release anything, without a single one of those handlers knowing the
+        # concept exists (D-062).
+        await assert_not_drained(attachment_id, tx=tx)
         # Every open connection of that attachment is the same runtime, so affinity
         # survives any one of them dying — and returns to nothing when they all do,
         # because `is_live` asks about connections rather than about a stored flag.
@@ -737,6 +750,220 @@ async def resolve_executor(
         return Executor(attachment_id=attachment_id, connection_id=None, connections=siblings)
 
     return Executor(attachment_id=None, connection_id=chosen[0].id, connections=(chosen[0],))
+
+
+async def assert_not_drained(attachment_id: str, *, tx: db.Tx | None = None) -> int:
+    """Refuse a runtime that was told to stop. Returns the current epoch.
+
+    An attachment row that has vanished is not treated as drained: the runtime is
+    then unknown rather than stopped, and inventing a refusal out of an absence
+    would fail every ephemeral connection that never had a row (D-034).
+    """
+    rows = await _fetch_all(
+        tx,
+        "SELECT epoch, drained_at, drained_reason FROM attachments WHERE id = ?",
+        (attachment_id,),
+    )
+    row = rows[0] if rows else None
+    if row is None or row["drained_at"] is None:
+        return int(row["epoch"]) if row is not None else 1
+    raise StaleRuntime(
+        "This runtime was drained and may no longer act in the room. It was not "
+        "killed — the room cannot kill a process it does not own — so if it is "
+        "still running, stop it. Reconnecting will not clear this: a drained "
+        "runtime that comes back is the same drained runtime. Resume it explicitly "
+        "once you know the old process is gone.",
+        attachment_id=attachment_id,
+        epoch=int(row["epoch"]),
+        drained_at=row["drained_at"],
+        reason=row["drained_reason"],
+    )
+
+
+async def _load_attachment_for(
+    tx: db.Tx, room: Room, participant: Participant, attachment_id: str
+) -> Any:
+    rows = await tx.fetch_all(
+        "SELECT * FROM attachments WHERE id = ? AND room_id = ?",
+        (attachment_id, room.id),
+    )
+    if not rows:
+        raise InvalidCommand("No such runtime in this room.", attachment_id=attachment_id)
+    row = rows[0]
+    # Scoped to the seat, not to the room. `room.admin` is not a licence to act as
+    # another participant, and draining someone else's runtime is exactly that:
+    # it stops their work, under their name, on their machine (see docs/SECURITY.md).
+    if row["participant_id"] != participant.id:
+        raise Forbidden(
+            "That runtime belongs to another participant. Steer them with a directive "
+            "instead — stopping another seat's worker is their decision to carry out, "
+            "and a room admin is not an owner of other people's processes.",
+            attachment_id=attachment_id,
+        )
+    return row
+
+
+async def drain_runtime(
+    *,
+    room: Room,
+    participant: Participant,
+    attachment_id: str,
+    reason: str = "",
+    command_id: str | None = None,
+) -> CommandOutcome:
+    """Stop accepting this runtime's work, and say so in the log.
+
+    This is the whole containment story for a process the server does not own. It
+    does not signal, kill, or wait: it revokes permission, which is the one lever
+    that works when the runtime is on someone else's machine — the normal case for
+    this product, not the exception.
+
+    Idempotent. Draining twice is a supervisor being careful about a process it
+    cannot see, which is the situation this exists for, so the second call is a
+    no-op that still answers with the epoch rather than an error.
+    """
+
+    async def body(tx: db.Tx) -> CommandOutcome:
+        row = await _load_attachment_for(tx, room, participant, attachment_id)
+        if row["drained_at"] is not None:
+            return CommandOutcome(
+                result={
+                    "ok": True,
+                    "attachment_id": attachment_id,
+                    "epoch": int(row["epoch"]),
+                    "drained_at": row["drained_at"],
+                    "already_drained": True,
+                },
+                events=[],
+            )
+
+        now = utcnow_iso()
+        epoch = int(row["epoch"]) + 1
+        await tx.execute(
+            "UPDATE attachments SET epoch = ?, drained_at = ?, drained_reason = ? "
+            "WHERE id = ? AND drained_at IS NULL",
+            (epoch, now, reason, attachment_id),
+        )
+        # Closing the connections is housekeeping, not the control. A survivor can
+        # open a new one whenever it likes; what it cannot do is get past
+        # `assert_not_drained`, because that reads the attachment rather than the
+        # connection. Closing them simply stops the room showing a runtime as live
+        # when it has been told to stop.
+        await tx.execute(
+            "UPDATE connections SET closed_at = ? WHERE attachment_id = ? AND closed_at IS NULL",
+            (now, attachment_id),
+        )
+        event = await eventlog.append(
+            tx,
+            room_id=room.id,
+            type_=EventType.RUNTIME_DRAINED,
+            actor=EventActor(
+                participant_id=participant.id,
+                display_name=participant.identity.display_name,
+                kind=participant.identity.kind,
+                org_id=participant.org_id,
+            ),
+            payload={
+                "attachment_id": attachment_id,
+                "participant_id": participant.id,
+                "label": row["label"],
+                "epoch": epoch,
+                "reason": reason,
+            },
+        )
+        return CommandOutcome(
+            result={
+                "ok": True,
+                "attachment_id": attachment_id,
+                "epoch": epoch,
+                "drained_at": now,
+                "already_drained": False,
+            },
+            events=[event],
+        )
+
+    return await execute_command(
+        command_id=command_id,
+        command_type="runtime.drain",
+        room_id=room.id,
+        participant_id=participant.id,
+        body=body,
+    )
+
+
+async def resume_runtime(
+    *,
+    room: Room,
+    participant: Participant,
+    attachment_id: str,
+    note: str = "",
+    command_id: str | None = None,
+) -> CommandOutcome:
+    """Let a drained runtime act again, as a deliberate and visible act.
+
+    Separated from draining rather than folded into reconnect, because the question
+    it answers is one only a human or supervisor can answer: *is the old process
+    actually gone?* The room cannot see that. Making it a command means the claim
+    is attributed to whoever made it and sits in the log next to the drain.
+
+    The epoch is not rolled back. It counts runs, and a resumed runtime is a new
+    run — so an in-flight message from before the drain is still recognisably from
+    an older one.
+    """
+
+    async def body(tx: db.Tx) -> CommandOutcome:
+        row = await _load_attachment_for(tx, room, participant, attachment_id)
+        if row["drained_at"] is None:
+            return CommandOutcome(
+                result={
+                    "ok": True,
+                    "attachment_id": attachment_id,
+                    "epoch": int(row["epoch"]),
+                    "was_drained": False,
+                },
+                events=[],
+            )
+
+        await tx.execute(
+            "UPDATE attachments SET drained_at = NULL, drained_reason = '' "
+            "WHERE id = ? AND drained_at IS NOT NULL",
+            (attachment_id,),
+        )
+        event = await eventlog.append(
+            tx,
+            room_id=room.id,
+            type_=EventType.RUNTIME_RESUMED,
+            actor=EventActor(
+                participant_id=participant.id,
+                display_name=participant.identity.display_name,
+                kind=participant.identity.kind,
+                org_id=participant.org_id,
+            ),
+            payload={
+                "attachment_id": attachment_id,
+                "participant_id": participant.id,
+                "label": row["label"],
+                "epoch": int(row["epoch"]),
+                "note": note,
+            },
+        )
+        return CommandOutcome(
+            result={
+                "ok": True,
+                "attachment_id": attachment_id,
+                "epoch": int(row["epoch"]),
+                "was_drained": True,
+            },
+            events=[event],
+        )
+
+    return await execute_command(
+        command_id=command_id,
+        command_type="runtime.resume",
+        room_id=room.id,
+        participant_id=participant.id,
+        body=body,
+    )
 
 
 async def executor_of(task_row: Any, *, tx: db.Tx | None = None) -> Executor:

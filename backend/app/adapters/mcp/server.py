@@ -1133,6 +1133,68 @@ async def release_task_claim(
 
 
 @mcp.tool()
+async def drain_runtime(
+    attachment_id: str,
+    reason: str = "",
+    participant_token: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Stop the room accepting work from one of your own runtimes.
+
+    Use this when you have told a worker to stop but cannot prove it stopped — a kill
+    you could not verify, a process you can no longer see, a duplicate you did not
+    expect. It does **not** end the process: nothing here can, and on a hosted room the
+    process is on your machine, not ours. What it does is withdraw that runtime's
+    permission, so if it is still alive its next command is refused with
+    `stale_runtime` rather than silently succeeding.
+
+    Sticky by design: the runtime reconnecting does not undo this, because reconnecting
+    is exactly what a survivor does. Call `resume_runtime` once you know the old process
+    is gone. You may only drain your own runtimes — stopping someone else's worker is a
+    directive to them, not an action you take.
+    """
+    try:
+        participant = await _participant(ctx, participant_token)
+        room = await store.load_room(participant.room_id)
+        outcome = await presence.drain_runtime(
+            room=room,
+            participant=participant,
+            attachment_id=attachment_id,
+            reason=reason,
+        )
+        return outcome.result
+    except RoomError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+async def resume_runtime(
+    attachment_id: str,
+    note: str = "",
+    participant_token: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Let a drained runtime work again, once you know the old process is gone.
+
+    Separate from reconnecting on purpose. A reconnect proves something is alive; this
+    asserts the previous run is dead, which the room cannot observe and only you can
+    vouch for. The claim is recorded against your name.
+    """
+    try:
+        participant = await _participant(ctx, participant_token)
+        room = await store.load_room(participant.room_id)
+        outcome = await presence.resume_runtime(
+            room=room,
+            participant=participant,
+            attachment_id=attachment_id,
+            note=note,
+        )
+        return outcome.result
+    except RoomError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
 async def complete_task(
     task_id: str,
     fence: int,

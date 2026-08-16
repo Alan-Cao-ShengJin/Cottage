@@ -73,6 +73,32 @@ class ExtendRoomCommand(CommandMeta):
     extend_seconds: int = Field(ge=MIN_ROOM_EXTENSION_SECONDS, le=MAX_ROOM_EXTENSION_SECONDS)
 
 
+class DrainRuntimeCommand(CommandMeta):
+    """Stop accepting work from one of your own runtimes (D-062).
+
+    Addressed to a runtime, not a task: it is not "stop this piece of work" but "stop
+    believing this process". That is why there is no fence here — a drained runtime may
+    be holding a perfectly valid one.
+    """
+
+    attachment_id: str = Field(min_length=1, max_length=64)
+    #: Free text for the log. Say how the runtime was lost, because "drained" alone
+    #: cannot later be told apart from a clean shutdown.
+    reason: str = Field(default="", max_length=500)
+
+
+class ResumeRuntimeCommand(CommandMeta):
+    """Let a drained runtime act again.
+
+    Deliberately not folded into reconnect. Reconnecting proves a process is alive;
+    this asserts the *old* one is dead, which no server can observe and only the person
+    who stopped it can vouch for.
+    """
+
+    attachment_id: str = Field(min_length=1, max_length=64)
+    note: str = Field(default="", max_length=500)
+
+
 class CreateInvitationCommand(CommandMeta):
     target_kind: InvitationTargetKind = InvitationTargetKind.LINK
     target_value: str | None = Field(default=None, max_length=320)

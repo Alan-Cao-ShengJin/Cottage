@@ -80,6 +80,8 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 | `credential.revoked` | credential_id, participant_id, revoked_by_participant_id, reason |
 | `presence.changed` | participant_id, liveness, connection_count, delivery_modes, negotiated_capabilities, runtime |
 | `presence.attachment_registered` | attachment_id, participant_id, label, host_class, is_resumable |
+| `presence.runtime_drained` | attachment_id, participant_id, label, epoch, reason — the room will refuse this runtime's commands from here on |
+| `presence.runtime_resumed` | attachment_id, participant_id, label, epoch, note — an explicit, attributed undo |
 | `message.posted` | message_id, body, to_participant_id, about_ref |
 | `work.declared` | work_id, participant_id, headline, status, targets, task_id, expected_done_by |
 | `work.updated` | work_id, headline, status, targets, note |
@@ -413,6 +415,39 @@ would let a worker widen its own treatment by editing one string. Connections wi
 attachment appear as their own runtime — NULL means *no durable runtime*, never *no
 runtime*.
 
+### 4.6 Draining a runtime — refusing work instead of killing a process (D-062)
+
+A supervisor that stops a worker cannot prove the worker stopped. Killing a supervisor
+does not kill the executor it spawned; a POSIX child can leave its process group with
+`setsid()`; and in the hosted product the runtime is on the customer's machine, where we
+hold no privilege at all. Every containment primitive — process groups, job objects,
+cgroups — assumes we own the box.
+
+So the room does not try to end the process. It **revokes the runtime's permission**,
+which needs no cooperation from the runtime and no privilege on its host.
+
+- `runtime.drain` (owner of the seat only) bumps the attachment's `epoch`, stamps
+  `drained_at`, closes its open connections, and appends `presence.runtime_drained`.
+- Any later command from that runtime is refused with **`stale_runtime`**. The check runs
+  where a caller is resolved into an executor, so it covers claim, renew, checkpoint,
+  complete and release without those paths knowing the rule exists.
+- The drain is **sticky**: reconnecting does not clear it. A same-label restart lands on
+  the same attachment and is refused again. This is the property the design rests on —
+  reconnecting is precisely what a surviving orphan does.
+- `runtime.resume` is the explicit undo, and it is a separate authorized command because
+  it asserts something only a human or supervisor can know: that the old process is gone.
+  It does **not** roll the epoch back. The epoch counts runs, so a resumed runtime is a
+  new run and an in-flight message from before the drain remains recognisably older.
+
+Ownership, not privilege: `room.admin` may **not** drain another seat's runtime. Stopping
+someone else's worker is acting as them (`docs/SECURITY.md`); steer them with a directive
+instead. An ephemeral connection with no attachment row is *unknown*, never *drained* —
+refusing it would invent a stop out of an absence.
+
+`stale_runtime` is distinct from `stale_fence` on purpose. A fence says another run of the
+*lease* superseded yours and re-reading fixes it; this says the *runtime* was told to stop,
+and re-reading fixes nothing.
+
 ## 5. Reconnect & replay
 
 - Client reconnects with `since_seq = <last seq it fully processed>`.
@@ -479,6 +514,7 @@ Detection is advisory and always surfaces as a `conflict` record — the room wa
 | `lease_conflict` | task already validly claimed by another participant — wait |
 | `lease_required` | caller holds no active lease on a lease-gated operation — claim first |
 | `stale_fence` | fence lower than current |
+| `stale_runtime` | this runtime was drained — it may still be running, it may no longer act (§4.6) |
 | `revision_conflict` | state CAS mismatch |
 | `artifact_divergence` | publish diverged from head |
 | `capability_unsupported` | operation not permitted for this host class/policy |

@@ -1,7 +1,7 @@
 """ARP over HTTP: commands as POSTs, events as a resumable SSE stream.
 
 The native transport. A browser and any first-class client use this; the MCP and A2A
-adapters call the same `core` services, so no behavior is defined here — only
+adapters call the same `core` services, so no behavior is defined here â€” only
 translation.
 """
 
@@ -47,6 +47,7 @@ from ..domain.commands import (
     CreateRoomCommand,
     CreateTaskCommand,
     DeclareWorkCommand,
+    DrainRuntimeCommand,
     EndWorkCommand,
     ExtendRoomCommand,
     HeartbeatCommand,
@@ -57,6 +58,7 @@ from ..domain.commands import (
     PostMessageCommand,
     ReleaseClaimCommand,
     RenewClaimCommand,
+    ResumeRuntimeCommand,
     RevokeCredentialCommand,
     SetParticipantRoleCommand,
     TakeOverExecutionCommand,
@@ -98,7 +100,7 @@ async def health() -> dict[str, Any]:
 async def describe_capabilities() -> dict[str, Any]:
     """What a client may declare, and what each transport can honor.
 
-    Published so a client can negotiate honestly instead of guessing — and so the
+    Published so a client can negotiate honestly instead of guessing â€” and so the
     fact that capabilities, not provider labels, drive behavior is discoverable from
     the API itself.
     """
@@ -127,7 +129,7 @@ async def describe_capabilities() -> dict[str, Any]:
 
 @router.post("/rooms", status_code=201)
 async def create_room(principal: PrincipalDep, command: CreateRoomCommand) -> dict[str, Any]:
-    """Create a room, join as owner, and get a shareable join token — one call.
+    """Create a room, join as owner, and get a shareable join token â€” one call.
 
     `participant_token` is the creator's; `join_token` is the single thing to hand to
     everyone else. Both are returned exactly once and stored only as hashes.
@@ -180,7 +182,7 @@ async def join_room(credential: JoinCredentialDep, command: JoinRoomCommand) -> 
     """Redeem an invitation.
 
     Three kinds of caller take the same path, because membership has exactly one entry
-    point: an agent identity, a human with an account, and — since D-025 — **a stranger
+    point: an agent identity, a human with an account, and â€” since D-025 â€” **a stranger
     holding nothing but the invitation itself.** That last case is the product's central
     claim, and until the invitation became a credential there was no way to express it.
     """
@@ -215,7 +217,7 @@ async def _identity_for_invitation(
     """A guest joining on the strength of the invitation alone.
 
     The body's `invitation_token` must be the same invitation that authenticated the
-    request. They are almost always identical — a client sends one token twice — but a
+    request. They are almost always identical â€” a client sends one token twice â€” but a
     mismatch is the confused-deputy shape worth refusing outright: a credential for one
     room must never be the thing that authorizes entry into another.
     """
@@ -228,7 +230,7 @@ async def _identity_for_invitation(
     return await rooms.provision_guest_identity(
         credential,
         # A guest with no account has no name to fall back on, so an omitted one is
-        # labelled rather than left blank — the room shows it as self-asserted anyway.
+        # labelled rather than left blank â€” the room shows it as self-asserted anyway.
         display_name=command.display_name or "Guest",
         host_class=command.host_class,
         description=command.description,
@@ -266,14 +268,53 @@ async def extend_room(
 # ---------------------------------------------------------------------------
 
 
+@router.post("/rooms/{room_id}/runtimes/drain")
+async def drain_runtime(
+    room_id: str, participant: ParticipantDep, command: DrainRuntimeCommand
+) -> dict[str, Any]:
+    """Refuse further work from one of your own runtimes (D-062).
+
+    This does not stop the process â€” nothing here can, and on the hosted path the
+    process is on someone else's machine. It withdraws the runtime's permission, which
+    is the guarantee the room can actually keep. Sticky: reconnecting does not undo it.
+    """
+    _assert_room(participant, room_id)
+    room = await rooms.store.load_room(room_id)
+    outcome = await presence.drain_runtime(
+        room=room,
+        participant=participant,
+        attachment_id=command.attachment_id,
+        reason=command.reason,
+        command_id=command.command_id,
+    )
+    return outcome.result
+
+
+@router.post("/rooms/{room_id}/runtimes/resume")
+async def resume_runtime(
+    room_id: str, participant: ParticipantDep, command: ResumeRuntimeCommand
+) -> dict[str, Any]:
+    """Undo a drain, asserting that the old process is genuinely gone."""
+    _assert_room(participant, room_id)
+    room = await rooms.store.load_room(room_id)
+    outcome = await presence.resume_runtime(
+        room=room,
+        participant=participant,
+        attachment_id=command.attachment_id,
+        note=command.note,
+        command_id=command.command_id,
+    )
+    return outcome.result
+
+
 @router.post("/rooms/{room_id}/connect", status_code=201)
 async def connect(
     room_id: str, participant: ParticipantDep, command: ConnectCommand
 ) -> dict[str, Any]:
     """Negotiate capabilities and open a connection.
 
-    The response tells the client exactly what it got — including whether it may
-    claim work and why not, if not — so it never coordinates against an assumption we
+    The response tells the client exactly what it got â€” including whether it may
+    claim work and why not, if not â€” so it never coordinates against an assumption we
     did not agree to.
     """
     _assert_room(participant, room_id)
@@ -385,7 +426,7 @@ async def stream(
     `since_seq=0` opens with a snapshot frame whose `snapshot_seq` is read in the
     same transaction as its content, then streams events strictly greater than that
     seq. That boundary is why a reconnect can neither miss nor duplicate an event
-    (`docs/PROTOCOL.md` §5).
+    (`docs/PROTOCOL.md` Â§5).
 
     A resume cursor below the retained floor yields a `resume_gap` frame rather than
     a silent partial replay, because a client that cannot tell it lost history would
@@ -418,7 +459,7 @@ async def stream(
                 break
 
             # Read the raw page first, then filter. The cursor advances to the
-            # highest seq actually *read*, not to the room's current seq — reading
+            # highest seq actually *read*, not to the room's current seq â€” reading
             # the room's seq after the page would skip anything that landed in
             # between, which is precisely the silent-miss failure the protocol
             # forbids. Events filtered out for this recipient still advance the
@@ -514,7 +555,7 @@ async def update_task(
     """Revise a task, or move it to `in_progress`.
 
     Two paths for one operation, and the second is the one that matters. Every
-    sibling — claim, renew, release, complete, cancel, take-over, steer — is
+    sibling â€” claim, renew, release, complete, cancel, take-over, steer â€” is
     `POST /tasks/<verb>`, and update alone was `PATCH /tasks`. A worker following
     the pattern its neighbours set got `405 Method Not Allowed` while trying to
     say it had started, so the board could not distinguish *held* from *being
@@ -564,7 +605,7 @@ async def mint_credential(
     """Mint a narrow, expiring token for one of your own runtimes.
 
     Returned once and stored only as a hash. Put it in the worker's environment,
-    never in room content — the disclosure screen would refuse it there anyway,
+    never in room content â€” the disclosure screen would refuse it there anyway,
     which is the screen doing its job rather than a limitation of it.
     """
     _assert_room(participant, room_id)
@@ -575,7 +616,7 @@ async def mint_credential(
         "token": issued.token,
         "next_step": (
             "Put this in the worker's COTTAGE_PARTICIPANT_TOKEN environment variable "
-            "and launch it from there — never as a command-line argument, where every "
+            "and launch it from there â€” never as a command-line argument, where every "
             "process listing on that machine can read it. It can take and finish work "
             "assigned to it and nothing else, and revoking it does not touch your seat."
         ),
@@ -746,7 +787,7 @@ def _assert_room(participant, room_id: str) -> None:
     """A participant token is scoped to one room; using it elsewhere is a 403.
 
     Returning `Forbidden` rather than `NotFound` is safe here because the caller
-    already proved membership of *some* room — there is no existence to leak.
+    already proved membership of *some* room â€” there is no existence to leak.
     """
     if participant.room_id != room_id:
         raise Forbidden(

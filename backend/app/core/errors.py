@@ -128,6 +128,26 @@ class StaleFence(RoomError):
     status_code = 409
 
 
+class StaleRuntime(RoomError):
+    """This runtime was drained. It may still be running; it may no longer act.
+
+    The one guarantee a coordination server can actually make about a process it
+    does not own. Containment primitives — process groups, job objects, cgroups —
+    all assume the runtime is on our machine, and in the hosted product it never
+    is. So the server stops trying to end the process and instead refuses its
+    work, which needs no cooperation from the process and no privilege on its host.
+
+    Distinct from `stale_fence`, and the distinction is the entire point: a fence
+    says another run of the *lease* superseded yours, and re-reading fixes it. This
+    says the *runtime* was told to stop, and re-reading fixes nothing — a drained
+    runtime that reconnects is the same drained runtime, because the drain is
+    sticky and reconnecting is not a way to become allowed again (D-062).
+    """
+
+    code = "stale_runtime"
+    status_code = 409
+
+
 class RevisionConflict(RoomError):
     code = "revision_conflict"
     status_code = 409

@@ -347,6 +347,13 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # a convenience: back then `heartbeat_at` was refreshed *only* by declare/update,
     # which is exactly the progress evidence this column now carries.
     ("work_declarations", "progress_at", "TEXT"),
+    # D-062. Epoch 1 and never drained on every pre-existing attachment, which is the
+    # correct reading: a runtime nobody has stopped is on its first run. Note the CHECK
+    # in schema.sql is absent on databases migrated this way — SQLite cannot add one
+    # with ALTER TABLE — so the invariant is enforced by the only writer that bumps it.
+    ("attachments", "epoch", "INTEGER NOT NULL DEFAULT 1"),
+    ("attachments", "drained_at", "TEXT"),
+    ("attachments", "drained_reason", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
