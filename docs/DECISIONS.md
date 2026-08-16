@@ -3207,3 +3207,58 @@ host runs this worker as an observer. That is a real capability loss and it is s
 plainly rather than hidden behind a warning nobody reads, which is what the previous
 version did: it logged "runtime contained" unconditionally, so a worker with no boundary
 at all looked exactly like one with a Job Object behind it.
+
+## D-064 — The relay writes metadata by default, never prose
+
+**Date:** 2026-08-16
+**Status:** accepted
+**Context:** an ACL audit of the files `scripts/room_watcher.py` writes, prompted by the
+same class of defect being found in the VS Code surface.
+
+### What was on disk
+
+The watcher wrote every event's free text — message bodies, task descriptions,
+checkpoint summaries, completion results — into a status JSON and a markdown copy. Both
+live outside the repository, unencrypted, with no opt-in and no retention, for as long
+as nobody deletes them. The room they came from has more than one organisation in it.
+
+The permissions were worse than the practice. `ROOM.md` granted **read to
+`BUILTIN\Users` and modify to `NT AUTHORITY\Authenticated Users`** — inherited from the
+directory it happened to be created in. So a room's prose was readable by every local
+account, and *writable* by any authenticated one, which matters as much: that file is
+the supervisor's window on the room, and an untrusted local account could edit what a
+human read about it.
+
+Separately, the participant token file sat in a directory granting `Modify` to another
+tenant's sandbox group. Moving a credential off the command line (D-058) had moved it
+somewhere whose permissions nobody had checked. **Moving a secret is not securing it.**
+
+### The decision
+
+Metadata by default, content only on explicit request.
+
+- `describe` renders `<body, 214 chars>` rather than the body. A reader still learns who
+  acted, when, on what, and how much they said — everything coordination needs, and none
+  of the words. The length is deliberate: "someone posted 4000 characters" is a signal
+  on its own and discloses none of them.
+- `--include-content` / `AGENT_ROOMS_INCLUDE_CONTENT` turns prose back on, and says so
+  on stderr when it does. Turning it on is a statement that this machine is a fine place
+  for other people's words.
+- Files are created 0600 on POSIX, at creation rather than by a later chmod, because the
+  file is rewritten every few seconds and a chmod leaves a window each time.
+
+### The Windows gap, stated rather than papered over
+
+`os.chmod` on Windows toggles a read-only bit and says nothing about the ACL, which is
+inherited from the containing directory. So on Windows the protection is *where `--out`
+points*, not what the writer does. A chmod there would look like a control and be none,
+which is the failure mode this whole entry is about, so it is named instead.
+
+### On the tests
+
+Four existing relay tests asserted that content appeared in the rendered line — they
+were about wake cost and used the words as proof a line had rendered at all. They now opt
+in through a fixture rather than being rewritten, so they keep testing what they were
+written to test, and the default has its own tests. Rewriting them to assert the redacted
+form would have quietly converted four cost tests into four disclosure tests and left
+batching unpinned.

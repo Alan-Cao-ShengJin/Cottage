@@ -46,10 +46,12 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import json
 import os
 import pathlib
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -313,6 +315,26 @@ def local_time(iso: str) -> str:
     return when.astimezone().strftime("%H:%M:%S")
 
 
+#: Whether the files this writes may contain what people actually said.
+#:
+#: Off, and the default matters more than the feature. This process writes to a status
+#: file and a markdown file that live outside the repository, unencrypted, for as long as
+#: nobody deletes them. An ACL audit found the markdown copy readable by every local user
+#: and writable by any authenticated one — so a room's prose, from a room with more than
+#: one organisation in it, sat on disk with weaker protection than the room itself
+#: enforces. `docs/SECURITY.md` says free-text bodies can carry anything; nothing about
+#: being useful to glance at makes that untrue.
+#:
+#: With this off a reader still learns everything coordination needs — who acted, when,
+#: on what, and how much they said — and none of what was said. Turning it on is an
+#: explicit statement that this machine is a fine place for other people's words.
+INCLUDE_CONTENT = os.environ.get("AGENT_ROOMS_INCLUDE_CONTENT", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+
 def describe(event: dict[str, Any]) -> str:
     """One line for a human reading the room over someone's shoulder."""
     payload = event.get("payload") or {}
@@ -320,7 +342,13 @@ def describe(event: dict[str, Any]) -> str:
     for field_name in DETAIL_FIELDS:
         value = payload.get(field_name)
         if isinstance(value, str) and value.strip():
-            detail = " ".join(value.split())
+            if INCLUDE_CONTENT:
+                detail = " ".join(value.split())
+            else:
+                # The shape of what was said, never the words. Length is deliberate:
+                # "someone posted 4000 characters" is a coordination signal on its own,
+                # and it is not a disclosure of any of them.
+                detail = f"<{field_name}, {len(value)} chars>"
             break
     actor = (event.get("actor") or {}).get("display_name") or "room"
     stamp = local_time(str(event.get("ts") or event.get("created_at") or ""))
@@ -361,6 +389,34 @@ def plain(event: dict[str, Any]) -> str:
     """
     line = describe(event).replace("`", "").replace("**", "").translate(ASCII_READINGS)
     return line.encode("ascii", "replace").decode("ascii")
+
+
+def write_private(path: pathlib.Path, text: str) -> None:
+    """Write a file only its owner can read, where the OS lets us say that.
+
+    An ACL audit of the files this process writes found ROOM.md readable by every local
+    user and writable by any authenticated one, inherited from the directory it happened
+    to be created in. Redacting the content (see `INCLUDE_CONTENT`) removes most of what
+    was worth reading; this narrows who can read the rest.
+
+    POSIX gets 0600 at creation rather than a chmod afterwards, because a chmod leaves a
+    window in which the file exists with the default mode and this file is rewritten
+    every few seconds - a small window multiplied by a lot of rewrites.
+
+    Windows is the honest gap. `os.chmod` there toggles a read-only bit and says nothing
+    about the ACL, which is inherited from the containing directory, so on Windows the
+    protection is *where you point `--out`*, not what this function does. Said plainly
+    rather than papered over with a chmod that would look like a control and be none.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        raise
 
 
 #: Separator inside a coalesced wake. It has to be one *line*, not one block: the host
@@ -512,6 +568,11 @@ def as_markdown(state: dict[str, Any]) -> str:
 
 
 def main() -> int:
+    # Declared up front because the flag's default reads the module value below, and a
+    # `global` after that first read is a syntax error rather than a subtle bug - which
+    # is the better failure of the two.
+    global INCLUDE_CONTENT
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--base", default=os.environ.get("AGENT_ROOMS_BASE", DEFAULT_BASE)
@@ -557,12 +618,35 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--include-content",
+        action="store_true",
+        default=INCLUDE_CONTENT,
+        help=(
+            "Write what people actually said into the status and markdown files. Off by "
+            "default: those files sit outside the repository, unencrypted, for as long "
+            "as nobody deletes them, and an audit found the markdown copy readable by "
+            "every local user. Without this you still get who, when, what type, and how "
+            "many characters -- everything coordination needs and none of the words."
+        ),
+    )
+    parser.add_argument(
         "--feed-length",
         type=int,
         default=25,
         help="How many recent events to keep in the readable feed.",
     )
     args = parser.parse_args()
+
+    # Module-level because `describe` is called from several places and threading a
+    # disclosure setting through every one of them is how a redaction gets forgotten in
+    # exactly one path. Set once, before anything can render.
+    INCLUDE_CONTENT = bool(args.include_content)
+    if INCLUDE_CONTENT:
+        log_line = (
+            "writing ROOM CONTENT to disk by explicit request: these files are "
+            "unencrypted and outlive this process. Delete them when done."
+        )
+        print(f"room_watcher: {log_line}", file=sys.stderr, flush=True)
 
     # Never an argument: a token on a command line is readable from any process
     # listing for the life of the process (D-058). `--token-file` exists because an
@@ -653,7 +737,7 @@ def main() -> int:
         # the relay, not about whether the room happened to answer this time.
         state["relay"] = counters.report()
         tmp = out.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state), encoding="utf-8")
+        write_private(tmp, json.dumps(state))
         # Atomic on Windows too: the status line must never read a half-written file.
         tmp.replace(out)
 
@@ -664,7 +748,7 @@ def main() -> int:
         if args.markdown:
             md = pathlib.Path(args.markdown)
             md_tmp = md.with_suffix(".tmp")
-            md_tmp.write_text(as_markdown(state), encoding="utf-8")
+            write_private(md_tmp, as_markdown(state))
             md_tmp.replace(md)
 
         time.sleep(args.interval)

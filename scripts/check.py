@@ -119,8 +119,15 @@ def run(stage: Stage) -> tuple[str, bool, str]:
     ok = completed.returncode == 0
 
     if ok:
-        tail = output.splitlines()[-1] if output else "ok"
-        print(f"   {tail}\n", flush=True)
+        # The *result*, not the last thing written. Stdout carries the summary and
+        # stderr carries whatever the tool grumbled about; concatenating them and taking
+        # the final line means one deprecation warning hides the counts entirely. The
+        # worker stage read `[ok]` with no numbers for weeks for exactly that reason,
+        # which is a checker that has stopped saying what it checked.
+        stdout_lines = [line for line in (completed.stdout or "").splitlines() if line.strip()]
+        stderr_lines = [line for line in (completed.stderr or "").splitlines() if line.strip()]
+        tail = (stdout_lines or stderr_lines or ["ok"])[-1]
+        print(f"   {tail.strip()}\n", flush=True)
     else:
         if stage.optional:
             print(f"   skipped (not installed):\n{_indent(output)}\n", flush=True)

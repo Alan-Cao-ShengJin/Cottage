@@ -23,6 +23,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 # The watcher is an operator script, outside the backend package. Same idiom as
 # test_worker_loop_e2e.py: reach it by path rather than making scripts/ importable.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
@@ -61,6 +63,18 @@ def run(events: list[dict[str, object]], *, me: str = "p_me", emit: bool = True)
 # --------------------------------------------------------------------------------------
 
 
+@pytest.fixture
+def content_visible(monkeypatch):
+    """Render what people said, for tests about cost rather than disclosure.
+
+    The watcher redacts free text by default (D-064), so a test that proves batching by
+    looking for the words needs to opt in - otherwise it would be asserting the
+    redaction, which has its own tests below, and would stop noticing whether the line
+    rendered at all.
+    """
+    monkeypatch.setattr(watcher, "INCLUDE_CONTENT", True)
+
+
 def test_an_idle_room_wakes_nobody_and_still_refreshes_the_files():
     """The normal case. A quiet room is not an error state, it is most of the time."""
     shown, wake, counters = run([])
@@ -79,7 +93,7 @@ def test_an_idle_room_wakes_nobody_and_still_refreshes_the_files():
     assert "model wakes: **0**" in page
 
 
-def test_a_directive_is_exactly_one_wake():
+def test_a_directive_is_exactly_one_wake(content_visible):
     shown, wake, counters = run(
         [event(EventType.DIRECTIVE_ISSUED.value, 1, body="stop and rerun the gate")]
     )
@@ -92,7 +106,7 @@ def test_a_directive_is_exactly_one_wake():
     assert len(shown) == 1
 
 
-def test_five_routine_events_are_five_lines_and_zero_wakes():
+def test_five_routine_events_are_five_lines_and_zero_wakes(content_visible):
     """Claims, renewals and status transitions: a template renders all of it."""
     routine = [
         event(EventType.TASK_CLAIMED.value, 1, title="wire the relay"),
@@ -112,7 +126,7 @@ def test_five_routine_events_are_five_lines_and_zero_wakes():
     assert EventType.TASK_CLAIM_RENEWED.value in shown[1]
 
 
-def test_two_judgement_events_in_one_poll_are_one_combined_line():
+def test_two_judgement_events_in_one_poll_are_one_combined_line(content_visible):
     shown, wake, counters = run(
         [
             event(EventType.QUESTION_ASKED.value, 7, body="which base URL?"),
@@ -136,7 +150,7 @@ def test_two_judgement_events_in_one_poll_are_one_combined_line():
 # --------------------------------------------------------------------------------------
 
 
-def test_a_checkpoint_is_routine_until_it_reports_trouble():
+def test_a_checkpoint_is_routine_until_it_reports_trouble(content_visible):
     """The ruling, pinned: progress renders, trouble wakes.
 
     A checkpoint every few minutes is the drip that makes a relay expensive; "the gate
@@ -307,3 +321,26 @@ def test_a_wake_line_is_ascii_and_single_line():
     assert wake is not None
     assert "\n" not in wake
     wake.encode("ascii")  # raises if the middle dot or any other non-ASCII survived
+
+
+def test_free_text_is_not_written_to_disk_by_default():
+    """The default, and the reason the flag exists.
+
+    These files live outside the repository, unencrypted, for as long as nobody deletes
+    them, and an ACL audit found the markdown copy readable by every local user and
+    writable by any authenticated one. A room's prose does not belong there by accident.
+    """
+    secret = "the customer's password is hunter2 and the deal closes friday"
+    shown, wake, _ = run([event(EventType.MESSAGE_POSTED.value, 1, body=secret)])
+
+    rendered = " ".join(shown) + (wake or "")
+    assert "hunter2" not in rendered
+    assert "password" not in rendered
+    assert f"<body, {len(secret)} chars>" in rendered
+
+
+def test_redaction_still_says_that_something_was_said_and_how_much():
+    """Metadata, not silence. "Someone posted 4000 characters" is a coordination signal
+    on its own, and it discloses none of them."""
+    shown, _, _ = run([event(EventType.TASK_UPDATED.value, 1, note="x" * 4000)])
+    assert "<note, 4000 chars>" in shown[0]
