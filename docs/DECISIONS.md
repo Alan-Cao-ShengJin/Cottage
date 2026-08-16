@@ -3144,3 +3144,66 @@ while the thing that edits a repository is a **runtime**. No participant can enu
 another's processes, and in a hosted product they never share a machine, so the only thing
 that can see every writer is the shared artifact itself — declared targets reconciled
 against observed file state. That remains open.
+
+## D-063 — A worker that cannot contain its executor does not claim
+
+**Date:** 2026-08-16
+**Status:** accepted
+**Context:** the T1 containment work failed independent review four times, and the fourth
+rejection was the one that mattered.
+
+### The three blockers were symptoms
+
+Review named a watchdog sharing the terminal's process group and dying on SIGINT, a group
+kill overtaking a late registration, and a deregistration that untracked a process group
+while daemonised descendants lived on. Three separate races, three separate patches
+available.
+
+Underneath them the design was escapable by construction. A POSIX child may call
+`setsid()`, leave its process group, and walk out of any group kill however carefully
+that kill is written. Closing the three races would have produced a worker that looked
+contained and was not — worse than the original defect, because the original defect at
+least announced itself by committing to the repository.
+
+### The decision
+
+Ask the OS what it can enforce, and behave accordingly rather than hopefully.
+
+- **Windows keeps claiming.** Job Objects with `KILL_ON_JOB_CLOSE` are kernel-enforced
+  and inherited by every descendant. That half was never the broken part.
+- **Everywhere else reports `none` and refuses to claim.** Not a degraded mode with a
+  warning: an actual refusal, enforced in `take_work` before any task is considered.
+- **The default is `none`.** A field that defaulted to "contained" would rebuild the
+  original defect one constructor away, so anything that forgets to check fails closed.
+
+The trade is deliberate. Unclaimed work is recoverable by anyone; an executor that
+escapes its supervisor and keeps writing to a shared repository is the failure this came
+from. A lease is a promise that one runtime and no other is doing the work, and a worker
+that cannot stop its own executor cannot make that promise honestly. Better to hold no
+lease than to hold one on false pretences.
+
+### Linux reports `none` even where cgroup v2 is writable
+
+Deliberate, and the point most likely to be "fixed" by someone in a hurry. Detecting a
+primitive is not placing a process into it. The placement half — a manager-created
+transient unit, or a delegated subtree the launcher writes before exec — is not
+implemented, so reporting `strong` on the strength of a writable path would announce a
+boundary that nothing puts anything inside. That is the same lie in a new costume. The
+detection line changes *with* the launcher, never before it.
+
+### Relationship to D-062
+
+Two halves of one answer, at different layers. D-062 is what the room does: refuse a
+drained runtime's commands, which works even when the process is on a customer's machine
+we hold no privilege on. This is what the worker does: decline to take on an obligation
+it cannot keep. Neither replaces the other — the room cannot see a process, and the
+worker cannot be trusted to report itself honestly, so each is enforced where it can
+actually be checked.
+
+### What is still missing
+
+The Linux launcher, and with it unattended claiming on Linux. Until it exists, a POSIX
+host runs this worker as an observer. That is a real capability loss and it is stated
+plainly rather than hidden behind a warning nobody reads, which is what the previous
+version did: it logged "runtime contained" unconditionally, so a worker with no boundary
+at all looked exactly like one with a Job Object behind it.

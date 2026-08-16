@@ -118,6 +118,13 @@ async def _provision(*, steps: int, cycles: int, ask_at_step: int | None = None)
             steps_per_task=steps,
             lease_seconds=300,
             executor=EchoExecutor(ask_at_step=ask_at_step),
+            # Declared, because the field defaults to `none` and a worker with no
+            # enforceable process boundary refuses to claim (D-063). These tests are
+            # about the loop, so they state the host they are standing in for; the
+            # refusal itself is pinned in worker/tests/test_containment_honesty.py.
+            # Left to default, every test here would pass an empty board and prove
+            # nothing — which is exactly what happened when the rule first landed.
+            containment=cottage_worker.CONTAINMENT_STRONG,
             **overrides,
         )
 

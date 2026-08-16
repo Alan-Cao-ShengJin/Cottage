@@ -80,6 +80,50 @@ class ContainmentError(RuntimeError):
     """The worker cannot prove that it owns one killable runtime tree."""
 
 
+#: A boundary the kernel enforces and a descendant cannot leave.
+CONTAINMENT_STRONG = "strong"
+#: No such boundary here. Not a degraded mode to work around — a mode in which this
+#: worker declines to claim, because unclaimed work is recoverable and an escaped
+#: executor writing to a repository nobody is watching is not.
+CONTAINMENT_NONE = "none"
+
+
+def detect_containment_strength() -> str:
+    """Can this host actually hold a process tree, or only appear to?
+
+    Answered by asking the OS, never by assuming, because the previous design assumed
+    and was wrong in the one direction that matters. Three findings decided the shape:
+
+    * **Windows Job Objects are genuine.** `KILL_ON_JOB_CLOSE` is enforced by the
+      kernel and inherited by every descendant, so this path is kept.
+    * **POSIX process groups are not.** A child may call `setsid()` and leave the
+      group, at which point a group kill misses it entirely. That is not a race to be
+      closed — it is a documented capability of the platform, so a watchdog built on
+      group kill is escapable by design however carefully it is written.
+    * **cgroup v2 is genuine, when we have a delegated subtree.** Membership is
+      inherited and an unprivileged process cannot leave it. Detected by evidence of a
+      writable delegated subtree rather than by the mere presence of the mount, because
+      a cgroup we cannot write to contains nothing for us.
+
+    Anything else is `CONTAINMENT_NONE`, and none means no claiming. That is the whole
+    point: this returns what is true, and the caller refuses accordingly.
+    """
+    if os.name == "nt":
+        return CONTAINMENT_STRONG
+
+    # POSIX reports `none` even where cgroup v2 is present and writable, and that is
+    # deliberate rather than pessimistic. Detecting a primitive is not the same as
+    # placing a process into it, and the placement half — a manager-created transient
+    # unit or a delegated subtree the launcher writes before exec — is not implemented.
+    # Reporting `strong` on the strength of a writable path would announce a boundary
+    # that nothing puts anything inside, which is precisely the failure being corrected:
+    # the previous version's claim to contain was also true only on paper.
+    #
+    # This is the one line to change when the Linux launcher lands, and it must change
+    # *with* it, never before.
+    return CONTAINMENT_NONE
+
+
 class RuntimeContainment:
     """One local runtime, with an OS-owned boundary around all its descendants.
 
@@ -167,11 +211,9 @@ class RuntimeContainment:
                 prior.get("pid", "unknown"),
             )
 
-        if os.name == "nt":
+        self.strength = detect_containment_strength()
+        if self.strength == CONTAINMENT_STRONG and os.name == "nt":
             self._establish_windows_job()
-            group_id: int | None = None
-        else:
-            group_id = None
 
         self._state = {
             "version": 1,
@@ -182,18 +224,31 @@ class RuntimeContainment:
             "runtime_id": self.runtime_id,
             "pid": os.getpid(),
             "process_start_marker": self._process_start_marker(os.getpid()),
-            "process_group_id": group_id,
+            "containment": self.strength,
             "started_at": time.time(),
         }
         self._write_state()
-        if os.name != "nt":
-            self._start_posix_watchdog()
-        log.info(
-            "runtime contained: label=%s runtime=%s pid=%s",
-            self.label,
-            self.runtime_id,
-            os.getpid(),
-        )
+        if self.strength == CONTAINMENT_STRONG:
+            log.info(
+                "runtime contained: label=%s runtime=%s pid=%s boundary=%s",
+                self.label,
+                self.runtime_id,
+                os.getpid(),
+                "job_object" if os.name == "nt" else "cgroup",
+            )
+        else:
+            # Said once, loudly, at the only moment anyone is reading. The previous
+            # version logged "runtime contained" here unconditionally, which is how a
+            # worker with no boundary at all came to look identical to one with a Job
+            # Object behind it.
+            log.warning(
+                "NO PROCESS CONTAINMENT on this host: label=%s runtime=%s pid=%s. "
+                "This runtime will not claim work. Descendants would survive its death "
+                "and keep writing, which is the failure this refuses to repeat.",
+                self.label,
+                self.runtime_id,
+                os.getpid(),
+            )
 
     @property
     def containment_fd(self) -> int | None:
@@ -827,6 +882,10 @@ class Worker:
     attachment_id: str | None = None
     participant_id: str = ""
     runtime_id: str = ""
+    #: What the OS will actually enforce around this runtime's descendants. Defaults to
+    #: `none` so anything that forgets to set it refuses work rather than assuming a
+    #: boundary it never checked for — the direction this has already been wrong in once.
+    containment: str = CONTAINMENT_NONE
     lease: Lease | None = None
     stopping: bool = False
     stop_event: threading.Event = field(default_factory=threading.Event)
@@ -1128,7 +1187,20 @@ class Worker:
         participant deliberately handing this worker a job, where an open task is
         merely one nobody currently holds. Treating the second as an invitation is
         how an unattended process quietly empties a shared board.
+
+        Claiming requires a real process boundary. Without one this worker can start an
+        executor and cannot promise to stop it, and a lease is exactly the promise that
+        one runtime and no other is doing this work. An orphan that outlives its
+        supervisor keeps that promise on paper while breaking it in the repository, so
+        the honest position is to hold no lease at all.
         """
+        if self.containment != CONTAINMENT_STRONG:
+            log.warning(
+                "not claiming: no enforceable process boundary on this host "
+                "(containment=%s). Observing only.",
+                self.containment,
+            )
+            return
         offered = [
             {
                 "task_id": p["task_id"],
@@ -1812,6 +1884,7 @@ def main(argv: list[str] | None = None) -> int:
             steps_per_task=args.steps,
             lease_seconds=args.lease_seconds,
             runtime_id=containment.runtime_id,
+            containment=containment.strength,
         )
 
         def stop(*_: Any) -> None:
