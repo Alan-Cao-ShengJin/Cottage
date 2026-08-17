@@ -325,7 +325,7 @@ route returns 200, and a production Chrome render confirms the hierarchy fits th
 
 ### M2.0k — Make the full handoff legible in one frame
 
-**In progress (2026-08-17).** Refine the existing hero graph so a first-time visitor can identify
+**Implemented (2026-08-17).** Refine the existing hero graph so a first-time visitor can identify
 the complete operating model without decoding generic nodes or relying on motion: named humans
 exchange goals, constraints, progress, and approvals with their own AI supervisors; those
 independently owned supervisors use a clearly bounded Cottage room to share plans, task claims, and
@@ -338,9 +338,15 @@ directly labeled. Connector labels name their payloads, animation reveals direct
 and the complete story stays understandable in a static frame, on a narrow screen, and with reduced
 motion enabled. No chart library or client runtime is required.
 
+Delivery evidence: the production HTML names both humans, their owned supervisors, the bounded
+Cottage room, four scoped workers, the converged end product, and the human review path. The seven-
+page frontend export compiles and type-checks; 1440px and real 390px Playwright renders confirm the
+desktop and container-query layouts; and Fly release
+`deployment-01M07BJC3H5R3BH26D672WNRG8` serves the complete graph at `cottageai.dev`.
+
 ### M2.0l — One Cottage authentication surface for every MCP client
 
-**In progress (2026-08-17).** Restyle the shared browser account, OAuth login, and OAuth consent
+**Implemented (2026-08-17).** Restyle the shared browser account, OAuth login, and OAuth consent
 pages with the same cream-white and navy identity as `cottageai.dev` and `app.cottageai.dev`.
 This is one provider-neutral authorization journey discovered through the MCP OAuth protocol, not a
 Claude-, ChatGPT-, Codex-, or IDE-specific screen. Every compatible client receives the same clear
@@ -353,9 +359,15 @@ must use no remote assets, keep account recovery and verification visually consi
 keyboard-visible focus and mobile layouts, and state that the client never receives the Cottage
 password.
 
+Delivery evidence: 40 focused account/browser-login/OAuth tests and the full backend suite (507
+passed, 11 intentional skips) pass, with mypy and Ruff clean for the changed surface. A dynamically
+registered generic MCP client renders the new three-step OAuth login locally; the production
+account login renders the shared shell at 480px; CSP/no-store headers remain unchanged; and Fly
+release `deployment-01M07BJC3H5R3BH26D672WNRG8` serves the provider-neutral account pages.
+
 ### M2.0m — Show coordination through a familiar AI workbench
 
-**In progress (2026-08-17).** Replace the abstract Shared Activity line chart with a cream-and-navy
+**Implemented (2026-08-17).** Replace the abstract Shared Activity line chart with a cream-and-navy
 workbench inspired by the tools people already use to supervise AI work: an agent rail showing live
 roles and status, the human's high-level direction as the first event, supervisor planning and task
 claims in the shared room, worker progress and file checkpoints streaming below, and a persistent
@@ -366,6 +378,12 @@ the structural explanation; the workbench demonstrates what that model feels lik
 motion. Static labels must explain every event, CSS motion may stage new activity but cannot carry
 meaning alone, reduced-motion must retain the completed state, and the layout must collapse into a
 single readable activity column on narrow screens.
+
+Delivery evidence: production HTML contains the human steering prompt, supervisor response, five
+agent states, task/file/checkpoint events, and shared-room conflict prevention. The static export
+adds no client JavaScript or chart dependency. Production Chrome and a 390px Playwright render
+verify the two-column workbench and single-column container-query form; all seven deployment-shape
+tests pass against Fly release `deployment-01M07BJC3H5R3BH26D672WNRG8`.
 
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
