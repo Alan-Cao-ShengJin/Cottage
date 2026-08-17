@@ -307,7 +307,7 @@ confirms path/card alignment and readable layer ownership.
 
 ### M2.0j — One coordination graph, with humans in the loop
 
-**In progress (2026-08-17).** Replace the hero's flat supervisor-only graph with the complete
+**Implemented (2026-08-17).** The hero's flat supervisor-only graph is replaced by the complete
 human-to-supervisor-to-worker hierarchy, and remove the separate explanatory diagram introduced in
 M2.0i. Visitors should see one canonical graph rather than infer the relationship between two.
 
@@ -316,6 +316,12 @@ neutral supervisors coordinating inside the Cottage room; and scoped work flowin
 specialist agents. Animated direction and return paths must fit the existing first viewport, while
 labels retain the meaning without motion. The later activity chart remains as evidence of the shared
 event stream, not a second topology diagram.
+
+Delivery evidence: the separate topology markup is absent from the production HTML. The compact
+hero graph labels two humans, three cross-vendor supervisors inside the Cottage room, and five
+downstream workers; animated steer, peer-discussion, and task-dispatch paths connect the layers. Fly
+release `deployment-01M079H47DRJ4BFNVQ0P5D0BA9` compiled and type-checked all seven pages, the live
+route returns 200, and a production Chrome render confirms the hierarchy fits the first viewport.
 
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,

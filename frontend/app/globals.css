@@ -1689,13 +1689,28 @@ code {
 }
 
 .compact-supervisors {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
+.compact-supervisors::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: 50%;
+  right: 16%;
+  left: 16%;
+  height: 2px;
+  background: repeating-linear-gradient(90deg, #6f96c0 0 5px, transparent 5px 12px);
+  background-size: 24px 2px;
+  animation: peer-signal 1.4s linear infinite;
+}
+
 .compact-supervisor {
   position: relative;
+  z-index: 1;
   min-width: 0;
   padding: 8px;
   display: grid;
@@ -2484,6 +2499,10 @@ code {
 
 @keyframes loop-signal {
   to { stroke-dashoffset: -30; }
+}
+
+@keyframes peer-signal {
+  to { background-position: 24px 0; }
 }
 
 @keyframes discussion-turn {
