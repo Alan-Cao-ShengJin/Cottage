@@ -417,6 +417,8 @@ so the feedback loop has an unambiguous source and destination.
 
 Delivery evidence: frontend typecheck and production build pass. A 1440px headless-Chrome render
 shows the green live room state and the review path touching the product card at its right edge.
+Fly release `deployment-01M07DA87QNDPVFXA568AMW38C` is healthy; production HTML and CSS expose
+the `Live` badge, anchored review path, and green room-glow state.
 
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
