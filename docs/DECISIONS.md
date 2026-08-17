@@ -3538,3 +3538,19 @@ identical semantic event sets form a seamless upward CSS loop; the second is hid
 technology. Under reduced motion the animation stops, the duplicate set is removed, and the first
 complete set remains available in a scrollable viewport. Container queries keep timestamps and
 secondary chrome only when the component has room for them.
+
+## D-077 — Workers are downstream unless they join the room
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** the workflow visual needed to distinguish agents participating directly in Cottage
+from AI workers invoked downstream by those participants. It also showed a review return path whose
+visible line began beyond the end-product card, weakening the feedback-loop story.
+
+### The decision
+
+The Cottage boundary contains connected supervisors. Downstream workers remain outside that
+boundary and receive task briefs through their supervisor; if a worker connects as its own Cottage
+participant, it belongs inside the boundary like any other agent. The room uses a green border,
+beacon, slow glow, and textual `Live` badge to encode active coordination accessibly. The review
+connector begins at the product card's right edge and returns to the responsible human.

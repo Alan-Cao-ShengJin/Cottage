@@ -26,7 +26,7 @@ export default function CoordinationGraph() {
           <path className="compact-path assembly-flow flow-ten" markerEnd="url(#flow-arrow)" d="M263 468 C275 500 315 510 334 538" />
           <path className="compact-path assembly-flow flow-eleven" markerEnd="url(#flow-arrow)" d="M437 468 C425 500 385 510 366 538" />
           <path className="compact-path assembly-flow flow-twelve" markerEnd="url(#flow-arrow)" d="M597 468 C580 514 440 505 390 538" />
-          <path className="compact-path review-flow" markerEnd="url(#flow-arrow)" d="M612 568 C680 535 684 122 561 70" />
+          <path className="compact-path review-flow" markerEnd="url(#flow-arrow)" d="M525 568 C660 548 684 122 561 70" />
         </svg>
 
         <div className="compact-layer-label compact-human-label"><span>01</span><b>Steer</b></div>
@@ -45,6 +45,7 @@ export default function CoordinationGraph() {
         <div className="compact-room">
           <div className="compact-room-title">
             <div><span className="room-live-dot" /><strong>Cottage room</strong><small>Shared state</small></div>
+            <em>Live</em>
           </div>
           <div className="compact-supervisors">
             <div className="compact-supervisor supervisor-one"><span>AI</span><div><strong>Claude</strong><small>Supervisor · Alex&apos;s</small></div></div>

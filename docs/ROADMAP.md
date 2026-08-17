@@ -406,6 +406,18 @@ shape tests pass. Desktop, 390px, and reduced-motion Playwright renders confirm 
 responsive, and single-static-set states. Fly release
 `deployment-01M07CFQKRW2ZHNFDZY42QY501` is healthy on `cottageai.dev`.
 
+### M2.0o — Close the review loop; signal the live room
+
+**Implemented (2026-08-17).** Keep downstream AI workers outside the Cottage room boundary because
+they receive delegated briefs through their connected supervisors; a worker appears inside the room
+only when it joins as its own participant. Give the room boundary, live beacon, and compact `Live`
+badge one green state treatment so live coordination is immediately distinct without relying on
+color alone. Anchor the dotted review path to the end-product card before it returns to the human,
+so the feedback loop has an unambiguous source and destination.
+
+Delivery evidence: frontend typecheck and production build pass. A 1440px headless-Chrome render
+shows the green live room state and the review path touching the product card at its right edge.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six

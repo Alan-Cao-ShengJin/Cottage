@@ -1719,10 +1719,15 @@ code {
   left: 4%;
   height: 158px;
   padding: 53px 18px 24px;
-  border: 1px solid #285582;
+  border: 1px solid #3b8c63;
   border-radius: 18px;
   background: #0b294e;
-  box-shadow: 0 16px 38px rgba(16, 43, 79, 0.22);
+  box-shadow:
+    0 16px 38px rgba(16, 43, 79, 0.22),
+    0 0 0 1px rgba(76, 190, 126, 0.12),
+    0 0 28px rgba(76, 190, 126, 0.18),
+    inset 0 0 26px rgba(76, 190, 126, 0.05);
+  animation: room-live-glow 3.2s ease-in-out infinite;
 }
 
 .compact-room-title {
@@ -1741,11 +1746,20 @@ code {
 .compact-room-title small { color: #8da8c5; font-size: clamp(7px, 1.2cqi, 9px); }
 .compact-room-title em {
   padding: 4px 7px;
-  border: 1px solid rgba(174, 201, 229, 0.2);
+  border: 1px solid rgba(91, 215, 145, 0.38);
   border-radius: 999px;
-  color: #9db5ce;
+  background: rgba(55, 165, 104, 0.12);
+  color: #7de0a8;
   font-size: clamp(6px, 1.12cqi, 8px);
+  font-weight: 850;
   font-style: normal;
+  letter-spacing: 0.08em;
+}
+
+.compact-room .room-live-dot {
+  background: #5bd791;
+  box-shadow: 0 0 0 4px rgba(91, 215, 145, 0.13);
+  animation-name: room-beacon-pulse;
 }
 
 .compact-supervisors {
@@ -2869,6 +2883,28 @@ code {
   50% { box-shadow: 0 0 0 7px rgba(62, 114, 173, 0.03); }
 }
 
+@keyframes room-live-glow {
+  0%, 100% {
+    box-shadow:
+      0 16px 38px rgba(16, 43, 79, 0.22),
+      0 0 0 1px rgba(76, 190, 126, 0.1),
+      0 0 22px rgba(76, 190, 126, 0.13),
+      inset 0 0 22px rgba(76, 190, 126, 0.04);
+  }
+  50% {
+    box-shadow:
+      0 18px 42px rgba(16, 43, 79, 0.24),
+      0 0 0 1px rgba(91, 215, 145, 0.2),
+      0 0 36px rgba(76, 190, 126, 0.24),
+      inset 0 0 30px rgba(76, 190, 126, 0.08);
+  }
+}
+
+@keyframes room-beacon-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(91, 215, 145, 0.16); }
+  50% { box-shadow: 0 0 0 7px rgba(91, 215, 145, 0.04); }
+}
+
 @keyframes chart-draw {
   0% { stroke-dashoffset: 1000; opacity: 0.2; }
   45%, 82% { stroke-dashoffset: 0; opacity: 1; }
@@ -3021,8 +3057,7 @@ code {
     height: 900px;
   }
 
-  .hive-card-header > span,
-  .compact-room-title em {
+  .hive-card-header > span {
     display: none;
   }
 
