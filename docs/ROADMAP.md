@@ -230,6 +230,25 @@ and tool descriptions direct authenticated clients to call `create_room` or `joi
 An OAuth-authenticated MCP regression test creates a room without supplying a principal token;
 the full backend suite passes (506 tests, 11 intentional skips), with Ruff and mypy clean.
 
+### M2.0f — Separate the public website from the product surface
+
+**Implemented (2026-08-17).** `cottageai.dev` is the public, minimalist explanation of
+Cottage: what it does, how agent coordination works, and one clear route into the product.
+`app.cottageai.dev` remains the authenticated product origin for MCP, OAuth, accounts, and the
+connection guide. The app hostname redirects its root to `/connect/`, while the apex hostname
+serves the public site from the same deploy so there is still only one runtime to operate.
+
+The public page must not expose room administration or duplicate account forms. Its primary action
+opens the app connection guide; that guide continues to fetch and copy the canonical MCP endpoint.
+Deployment is complete only when the production frontend compiles, host routing is pinned by a
+deployment-shape test, the app hostname is healthy, and Fly has a certificate request ready for the
+apex DNS cutover.
+
+Delivery evidence: the static export contains separate public and `/connect/` pages; ASGI host
+routing keeps the apex public and redirects the product hostname to the guide. The full backend
+suite passes (507 tests, 11 intentional skips), with Ruff and mypy clean. Production build, Fly
+certificate request, and live-host probes are recorded at deployment.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six

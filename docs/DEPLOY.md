@@ -47,12 +47,15 @@ sufficient evidence here.
 ## 1. What you are deploying
 
 One container. A Node stage compiles the web surface to static files; a Python stage serves
-both the API and those files on a single port. One origin, so there is no CORS matrix and no
-second deployment to keep in sync.
+both the API and those files on a single port. `app.cottageai.dev` remains the single product
+origin, so there is no CORS matrix. `cottageai.dev` is a static marketing alias served by the
+same image, not a second deployment.
 
-| Path | Serves |
+| Host / path | Serves |
 |---|---|
-| `/` | the MCP connection guide (copy the endpoint, then create/join through the AI) |
+| `cottageai.dev/` | the public Cottage website |
+| `app.cottageai.dev/` | redirects to the product connection guide |
+| `app.cottageai.dev/connect/` | copy the MCP endpoint, then create/join through the AI |
 | `/healthz` | liveness, plus the URLs this instance is advertising |
 | `/mcp` | the MCP join path — this is what an agent host connects to |
 | `/api/...` | the ARP HTTP + SSE surface |
@@ -160,6 +163,10 @@ curl https://<app>.fly.dev/healthz
 your real hostname. **A wrong `PUBLIC_BASE_URL` is the failure mode to watch for**: the
 instance boots fine and then hands every client an MCP URL and OAuth audience pointing
 somewhere else, so joins fail with an authentication error that looks like a client bug.
+
+For the Cottage production split, keep `PUBLIC_BASE_URL=https://app.cottageai.dev`. Attach both
+hostnames to the same Fly app, but point the apex DNS to Fly only after its certificate has been
+requested. The apex is presentation only; OAuth, accounts, API calls, and MCP remain on `app.`.
 
 Confirm the whole OAuth + MCP handshake against the deployed instance:
 

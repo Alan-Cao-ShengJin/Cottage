@@ -13,10 +13,11 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .adapters.mcp.auth import McpAuthMiddleware, NormalizeMcpPath
@@ -258,6 +259,19 @@ def build_app(console_dir: Path | None = _CONFIGURED_CONSOLE_DIR) -> FastAPI:
         else. See `api/gpt_schema.py` for why the translation is needed.
         """
         return build_gpt_schema(app.openapi(), public_base_url=settings.public_base_url)
+
+    # The same static export serves two deliberately different entry points. The apex
+    # hostname gets the public explanation; the configured `app.*` product hostname
+    # enters at the connection guide. Keeping both in one image avoids a second deploy.
+    if console_dir is not None:
+        configured_host = (urlparse(settings.public_base_url).hostname or "").lower()
+
+        @app.get("/", include_in_schema=False)
+        async def web_entry(request: Request) -> Response:
+            request_host = (request.url.hostname or "").lower()
+            if configured_host.startswith("app.") and request_host == configured_host:
+                return RedirectResponse("/connect/", status_code=307)
+            return FileResponse(console_dir / "index.html")
 
     # Registered last, and it must stay last: a mount at "/" matches everything Starlette
     # has not already matched, so any route declared after it becomes unreachable. That

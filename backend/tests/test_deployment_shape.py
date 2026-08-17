@@ -35,6 +35,9 @@ def console(tmp_path: Path) -> Path:
     room = tmp_path / "room"
     room.mkdir()
     (room / "index.html").write_text("<!doctype html><title>room</title>", "utf-8")
+    connect = tmp_path / "connect"
+    connect.mkdir()
+    (connect / "index.html").write_text("<!doctype html><title>connect</title>", "utf-8")
     return tmp_path
 
 
@@ -60,6 +63,34 @@ async def test_console_mount_does_not_shadow_the_api(console: Path) -> None:
         api = await c.post("/api/rooms", json={"name": "shadow check"})
         assert api.status_code == 401, api.text
         assert api.json()["error"] == "unauthenticated"
+
+
+@pytest.mark.asyncio
+async def test_app_hostname_enters_at_the_connection_guide(
+    console: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The public apex explains Cottage; the product hostname opens the product."""
+    from app import main as main_module
+
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(Settings(), public_base_url="https://app.cottageai.dev"),
+    )
+    app = main_module.build_app(console)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="https://app.cottageai.dev",
+        follow_redirects=False,
+    ) as client:
+        entry = await client.get("/")
+        assert entry.status_code == 307
+        assert entry.headers["location"] == "/connect/"
+
+        guide = await client.get("/connect/")
+        assert guide.status_code == 200
+        assert "connect" in guide.text
 
 
 @pytest.mark.asyncio

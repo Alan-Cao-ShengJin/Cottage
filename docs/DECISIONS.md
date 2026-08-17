@@ -3345,3 +3345,23 @@ The root page is a compact connection guide: MCP address, copy action, three-ste
 example prompts. Account management remains a secondary browser surface, while room-specific boards
 remain available as read surfaces. Removing duplicate browser commands does not remove the HTTP API;
 it keeps automation and compatibility available without presenting them as the normal product path.
+
+## D-068 — The apex explains Cottage; `app.` is Cottage
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** using the same landing screen at `cottageai.dev` and `app.cottageai.dev` made the two
+hostnames look accidental. New visitors need a concise product explanation, while connected users
+need the MCP endpoint and account surface. Operating separate web applications would add deployment
+and routing work without creating product value.
+
+### The decision
+
+`cottageai.dev` is the public marketing hostname. `app.cottageai.dev` is the canonical product and
+identity hostname: MCP, OAuth, accounts, API, connection guide, and room boards stay there. Requests
+to the product root redirect to `/connect/`; requests to the apex root receive the public page.
+
+Both hostnames terminate at the same Fly application and use the same static export. Host-aware root
+routing is the only distinction, and it is tested at the ASGI boundary. `PUBLIC_BASE_URL` remains the
+app hostname so adding the marketing alias cannot change token audiences, discovery documents,
+verification links, or password-recovery links.
