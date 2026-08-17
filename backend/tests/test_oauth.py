@@ -19,6 +19,7 @@ import base64
 import hashlib
 import re
 import secrets
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -34,6 +35,7 @@ from app.util import iso_in
 pytestmark = pytest.mark.asyncio
 
 REDIRECT = "https://chatgpt.com/aip/callback"
+LOOPBACK_REDIRECT = "http://localhost:3118/callback"
 TEST_PASSWORD = "correct horse battery staple"
 
 
@@ -141,6 +143,7 @@ async def test_registration_issues_a_client_id_and_no_secret(fresh_db):
     [
         "http://evil.example.com/callback",  # remote http would leak the code
         "ftp://example.com/cb",
+        "https://safe.example.com/callback#attacker-fragment",
     ],
 )
 async def test_registration_rejects_unsafe_redirect_uris(fresh_db, bad_uri):
@@ -479,15 +482,17 @@ def _hidden_csrf(page: str) -> str:
     return match.group(1)
 
 
-async def _login_browser(client, registered, owner, *, state: str = "xyz") -> str:
+async def _login_browser_flow(
+    client, registered, owner, *, state: str = "xyz", redirect_uri: str = REDIRECT
+) -> tuple[str, str]:
     await accounts.set_password_hash(owner["user_id"], accounts.hash_password(TEST_PASSWORD))
-    _, challenge = _pkce()
+    verifier, challenge = _pkce()
     started = await client.get(
         "/oauth/authorize",
         params={
             "client_id": registered.client_id,
             "response_type": "code",
-            "redirect_uri": REDIRECT,
+            "redirect_uri": redirect_uri,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
             "scope": "agent",
@@ -508,7 +513,12 @@ async def _login_browser(client, registered, owner, *, state: str = "xyz") -> st
     assert logged_in.status_code == 303
     consent = await client.get(logged_in.headers["location"])
     assert consent.status_code == 200
-    return consent.text
+    return consent.text, verifier
+
+
+async def _login_browser(client, registered, owner, *, state: str = "xyz") -> str:
+    page, _ = await _login_browser_flow(client, registered, owner, state=state)
+    return page
 
 
 async def test_consent_screen_states_what_the_client_will_be_able_to_do(registered, owner):
@@ -557,3 +567,92 @@ async def test_successful_consent_redirects_with_a_code_and_state(registered, ow
     assert location.startswith(REDIRECT)
     assert "code=" in location
     assert "state=opaque-state" in location
+
+
+async def test_loopback_consent_returns_a_recoverable_handoff_page(fresh_db, owner):
+    """A dead desktop listener must not turn successful consent into a blank mystery.
+
+    The same registered callback, code, state and PKCE verifier remain authoritative; the
+    page only keeps the one-time handoff available for the client's manual URL fallback.
+    """
+    registered = await oauth.register_client(
+        client_name="Desktop MCP client", redirect_uris=[LOOPBACK_REDIRECT]
+    )
+    async with await _client() as client:
+        page, verifier = await _login_browser_flow(
+            client,
+            registered,
+            owner,
+            state="loopback-state",
+            redirect_uri=LOOPBACK_REDIRECT,
+        )
+        authorized = await client.post(
+            "/oauth/authorize",
+            data={
+                "csrf_token": _hidden_csrf(page),
+                "new_agent_name": "Local coding agent",
+            },
+            follow_redirects=False,
+        )
+
+        assert authorized.status_code == 303
+        handoff_location = authorized.headers["location"]
+        assert handoff_location.startswith("/oauth/complete#callback=")
+        fragment = parse_qs(urlparse(handoff_location).fragment)
+        callback_url = fragment["callback"][0]
+
+        # Fragments never reach the server. The HttpOnly flow cookie proves this browser
+        # completed consent and lets refresh render the same generic recovery shell.
+        response = await client.get("/oauth/complete")
+        refreshed = await client.get("/oauth/complete")
+
+    assert response.status_code == 200
+    assert refreshed.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    csp = response.headers["content-security-policy"]
+    assert "script-src 'nonce-" in csp
+    assert "script-src 'unsafe-inline'" not in csp
+    assert "Authorization approved" in response.text
+    assert "Client did not reconnect?" in response.text
+    assert "Never share this URL" in response.text
+    assert f'data-redirect="{LOOPBACK_REDIRECT}"' in response.text
+    assert 'id="callback-url" type="text" value=""' in response.text
+    # The code is present only in the browser fragment, not the completion HTTP body.
+    assert parse_qs(urlparse(callback_url).query)["code"][0] not in response.text
+
+    parsed = urlparse(callback_url)
+    params = parse_qs(parsed.query)
+    assert callback_url.startswith(LOOPBACK_REDIRECT)
+    assert params["state"] == ["loopback-state"]
+    assert len(params["code"]) == 1
+
+    grant = await oauth.exchange_authorization_code(
+        code=params["code"][0],
+        client_id=registered.client_id,
+        redirect_uri=LOOPBACK_REDIRECT,
+        code_verifier=verifier,
+        resource=None,
+        expected_audience="https://rooms.test/mcp",
+    )
+    assert grant.access_token
+
+
+async def test_loopback_completion_requires_a_consumed_browser_flow(fresh_db):
+    async with await _client() as client:
+        response = await client.get("/oauth/complete")
+    assert response.status_code == 400
+    assert "handoff is missing or expired" in response.text
+
+
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "http://localhost:3118/callback",
+        "http://127.0.0.1:3118/callback",
+        "http://[::1]:3118/callback",
+    ],
+)
+async def test_loopback_handoff_is_selected_by_redirect_shape(redirect_uri):
+    assert oauth.is_loopback_redirect_uri(redirect_uri)
+    assert not oauth.is_loopback_redirect_uri("https://localhost.example/callback")

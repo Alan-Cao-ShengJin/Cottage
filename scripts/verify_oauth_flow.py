@@ -58,6 +58,7 @@ BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8100").rstrip("/
 PRINCIPAL = sys.argv[2] if len(sys.argv) > 2 else "dev-owner-token"
 EMAIL = os.getenv("OPERATOR_EMAIL", "dev@example.com")
 REDIRECT = "https://chatgpt.com/aip/callback"
+LOOPBACK_REDIRECT = "http://localhost:3118/callback"
 
 
 def ok(label: str, detail: str = "") -> None:
@@ -93,6 +94,7 @@ async def authorize(
     verifier: str,
     password: str,
     state: str | None = None,
+    redirect_uri: str = REDIRECT,
 ) -> str:
     challenge = (
         base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
@@ -104,7 +106,7 @@ async def authorize(
         params={
             "client_id": client_id,
             "response_type": "code",
-            "redirect_uri": REDIRECT,
+            "redirect_uri": redirect_uri,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
             "scope": "agent",
@@ -136,8 +138,19 @@ async def authorize(
             "new_agent_name": "ChatGPT (Alan)",
         },
     )
-    assert submitted.status_code == 302, submitted.text[:400]
-    query = parse_qs(urlparse(submitted.headers["location"]).query)
+    if urlparse(redirect_uri).hostname in {"localhost", "127.0.0.1", "::1"}:
+        assert submitted.status_code == 303, submitted.text[:400]
+        handoff = submitted.headers["location"]
+        assert handoff.startswith("/oauth/complete#callback=")
+        callback = parse_qs(urlparse(handoff).fragment)["callback"][0]
+        completion = await http.get(f"{BASE}/oauth/complete")
+        assert completion.status_code == 200, completion.text[:400]
+        assert "Authorization approved" in completion.text
+        assert parse_qs(urlparse(callback).query)["code"][0] not in completion.text
+        query = parse_qs(urlparse(callback).query)
+    else:
+        assert submitted.status_code == 302, submitted.text[:400]
+        query = parse_qs(urlparse(submitted.headers["location"]).query)
     if state is not None:
         assert query["state"][0] == state
     return query["code"][0]
@@ -181,7 +194,10 @@ async def main() -> int:
         print("3. dynamic client registration")
         registration = await http.post(
             meta["registration_endpoint"],
-            json={"client_name": "ChatGPT", "redirect_uris": [REDIRECT]},
+            json={
+                "client_name": "Cross-host OAuth verifier",
+                "redirect_uris": [REDIRECT, LOOPBACK_REDIRECT],
+            },
         )
         assert registration.status_code == 201, registration.text
         client_id = registration.json()["client_id"]
@@ -202,6 +218,33 @@ async def main() -> int:
         )
         ok("password login and consent bound the identity")
         ok("code issued, bound to 'ChatGPT (Alan)'")
+
+        # A desktop/CLI client whose local listener is unavailable still receives a
+        # refresh-safe Cottage handoff page and a PKCE-exchangeable callback URL.
+        loopback_verifier = secrets.token_urlsafe(48)
+        loopback_code = await authorize(
+            http,
+            meta["authorization_endpoint"],
+            client_id=client_id,
+            resource=resource["resource"],
+            verifier=loopback_verifier,
+            password=password,
+            state="loopback",
+            redirect_uri=LOOPBACK_REDIRECT,
+        )
+        loopback_exchange = await http.post(
+            meta["token_endpoint"],
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "code": loopback_code,
+                "redirect_uri": LOOPBACK_REDIRECT,
+                "code_verifier": loopback_verifier,
+                "resource": resource["resource"],
+            },
+        )
+        assert loopback_exchange.status_code == 200, loopback_exchange.text
+        ok("loopback fallback page preserved a valid PKCE handoff")
 
         # -- 5. token exchange ------------------------------------------------
         print("5. token exchange")

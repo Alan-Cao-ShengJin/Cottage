@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import logging
+import secrets
 from typing import Annotated, Any
 from urllib.parse import urlencode
 
@@ -34,18 +35,27 @@ SESSION_COOKIE = "cottage_session"
 OAUTH_FLOW_COOKIE = "cottage_oauth_flow"
 
 
-def _browser_headers() -> dict[str, str]:
+def _browser_headers(*, script_nonce: str | None = None) -> dict[str, str]:
+    script_policy = f"; script-src 'nonce-{script_nonce}'" if script_nonce else ""
     return {
         "Cache-Control": "no-store",
         "Pragma": "no-cache",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+        "Content-Security-Policy": (
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'" + script_policy
+        ),
     }
 
 
-def _html_page(content: str, *, status_code: int = 200) -> HTMLResponse:
-    return HTMLResponse(content=content, status_code=status_code, headers=_browser_headers())
+def _html_page(
+    content: str, *, status_code: int = 200, script_nonce: str | None = None
+) -> HTMLResponse:
+    return HTMLResponse(
+        content=content,
+        status_code=status_code,
+        headers=_browser_headers(script_nonce=script_nonce),
+    )
 
 
 def _redirect(location: str, *, status_code: int = 303) -> RedirectResponse:
@@ -337,11 +347,36 @@ async def authorize_submit(
     if flow.request.state:
         params["state"] = flow.request.state
     separator = "&" if "?" in flow.request.redirect_uri else "?"
-    response = _redirect(
-        f"{flow.request.redirect_uri}{separator}{urlencode(params)}", status_code=302
-    )
-    _clear_cookie(response, OAUTH_FLOW_COOKIE)
+    callback_url = f"{flow.request.redirect_uri}{separator}{urlencode(params)}"
+    if oauth.is_loopback_redirect_uri(flow.request.redirect_uri):
+        # POST/Redirect/GET prevents a browser refresh from resubmitting already-consumed
+        # consent. The fragment is not sent to `/oauth/complete`, so neither the access
+        # log nor a plaintext database row receives the short-lived authorization code.
+        response = _redirect(
+            f"/oauth/complete#{urlencode({'callback': callback_url})}",
+            status_code=303,
+        )
+    else:
+        response = _redirect(callback_url, status_code=302)
+        _clear_cookie(response, OAUTH_FLOW_COOKIE)
     return response
+
+
+@router.get("/oauth/complete")
+async def complete_loopback_authorization(request: Request) -> Response:
+    """Render a refresh-safe handoff for any validated desktop/CLI loopback client."""
+    try:
+        flow = await oauth.load_completed_browser_authorization_flow(
+            request.cookies.get(OAUTH_FLOW_COOKIE)
+        )
+    except OAuthError as exc:
+        return _html_page(_error_page(exc.error, exc.description), status_code=exc.status_code)
+
+    script_nonce = secrets.token_urlsafe(18)
+    return _html_page(
+        _loopback_completion_page(flow.request, script_nonce),
+        script_nonce=script_nonce,
+    )
 
 
 @router.post("/oauth/logout")
@@ -456,6 +491,81 @@ def _error_page(error: str, description: str) -> str:
 <p class="lede"><code>{html.escape(error)}</code></p>
 <p>{html.escape(description)}</p>
 <p class="form-note">Return to your AI client and restart the Cottage connection.</p>""",
+        context="Secure MCP authorization",
+    )
+
+
+def _loopback_completion_page(request_data: oauth.AuthorizationRequest, script_nonce: str) -> str:
+    """Keep a recovery surface available when a desktop client's listener is absent.
+
+    The callback fragment contains a short-lived, single-use, PKCE-bound code. It is the
+    same URI that a direct OAuth redirect would expose to the browser; fragments never
+    reach this endpoint. The script verifies it still targets the flow's exact validated
+    redirect and state before enabling either handoff action.
+    """
+    client = html.escape(request_data.client_name or request_data.client_id)
+    safe_redirect = html.escape(request_data.redirect_uri, quote=True)
+    safe_state = html.escape(request_data.state or "", quote=True)
+    has_state = "true" if request_data.state else "false"
+    return browser_page(
+        f"Return to {client}",
+        f"""<div class="auth-progress"><span>1 Signed in</span><i></i><span>2 Agent chosen</span><i></i><span class="active">3 Return</span></div>
+<div class="success-mark" aria-hidden="true">&#10003;</div>
+<h1>Authorization approved</h1>
+<p class="lede">Cottage is ready to return this connection to <span class="client-pill">{client}</span>.</p>
+
+<div id="handoff" data-redirect="{safe_redirect}" data-state="{safe_state}" data-has-state="{has_state}">
+<a id="return-to-client" class="button return-button" href="#" target="_blank" rel="noopener noreferrer" aria-disabled="true">Return to {client}</a>
+<p class="form-note">Keep your AI client open while returning. This page stays available if its local callback is not listening.</p>
+
+<details class="handoff-recovery">
+  <summary>Client did not reconnect?</summary>
+  <p>Copy the complete callback URL and paste it into the authorization prompt in your AI client. Never share this URL with anyone.</p>
+  <div class="callback-copy">
+    <input id="callback-url" type="text" value="" readonly aria-label="One-time callback URL">
+    <button id="copy-callback" class="secondary" type="button" disabled>Copy URL</button>
+  </div>
+  <p id="copy-status" class="copy-status" role="status" aria-live="polite"></p>
+</details>
+</div>
+<script nonce="{script_nonce}">
+(() => {{
+  const handoff = document.getElementById("handoff");
+  const returnLink = document.getElementById("return-to-client");
+  const button = document.getElementById("copy-callback");
+  const input = document.getElementById("callback-url");
+  const status = document.getElementById("copy-status");
+  const callback = new URLSearchParams(window.location.hash.slice(1)).get("callback");
+  try {{
+    const actual = new URL(callback);
+    const expected = new URL(handoff.dataset.redirect);
+    const separator = expected.search ? "&" : "?";
+    const exactRegisteredPrefix = callback.startsWith(handoff.dataset.redirect + separator);
+    const sameState = handoff.dataset.hasState === "false" ||
+      actual.searchParams.get("state") === handoff.dataset.state;
+    if (!exactRegisteredPrefix || !sameState || !actual.searchParams.get("code")) {{
+      throw new Error("invalid handoff");
+    }}
+    returnLink.href = callback;
+    returnLink.setAttribute("aria-disabled", "false");
+    input.value = callback;
+    button.disabled = false;
+  }} catch (_) {{
+    status.textContent = "This handoff is incomplete. Restart the connection from your AI client.";
+  }}
+  button.addEventListener("click", async () => {{
+    try {{
+      await navigator.clipboard.writeText(input.value);
+      status.textContent = "Copied. Paste it into your AI client's authorization prompt.";
+      button.textContent = "Copied";
+    }} catch (_) {{
+      input.focus();
+      input.select();
+      status.textContent = "Press Ctrl+C (or Command+C), then paste it into your AI client.";
+    }}
+  }});
+}})();
+</script>""",
         context="Secure MCP authorization",
     )
 

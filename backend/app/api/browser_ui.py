@@ -183,6 +183,37 @@ button:hover, .button:hover { background: var(--navy-dark); }
 .permission-list li { position: relative; padding-left: 1.35rem; }
 .permission-list li::before { content: "✓"; position: absolute; left: 0; color: #4e7b50; font-weight: 900; }
 .row { display: flex; gap: .7rem; flex-wrap: wrap; align-items: center; }
+.success-mark {
+  width: 3rem;
+  height: 3rem;
+  margin: 0 0 1rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid #75aa83;
+  border-radius: 50%;
+  background: #edf7ee;
+  color: #367448;
+  font-size: 1.35rem;
+  font-weight: 900;
+  box-shadow: 0 0 0 .4rem rgba(78,123,80,.08);
+}
+.return-button { width: 100%; }
+.return-button[aria-disabled=true] { pointer-events: none; opacity: .48; }
+.handoff-recovery {
+  margin-top: 1.25rem;
+  padding: .85rem;
+  border: 1px solid var(--border);
+  border-radius: .8rem;
+  background: #fbf8f1;
+  color: #536174;
+  font-size: .78rem;
+}
+.handoff-recovery summary { color: var(--navy); font-weight: 800; cursor: pointer; }
+.callback-copy { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .55rem; align-items: center; }
+.callback-copy input { min-width: 0; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .7rem; }
+.callback-copy .secondary { min-height: 2.85rem; background: white; }
+.callback-copy .secondary:disabled { cursor: not-allowed; opacity: .5; }
+.copy-status { min-height: 1.2em; margin: .5rem 0 0; color: #367448; font-weight: 700; }
 code { padding: .1rem .3rem; border-radius: .3rem; background: #edf0f3; color: #384a5d; }
 .auth-footer { margin: 1rem 0 0; color: #798492; font-size: .69rem; text-align: center; }
 @media (max-width: 34rem) {
@@ -192,6 +223,8 @@ code { padding: .1rem .3rem; border-radius: .3rem; background: #edf0f3; color: #
   .auth-progress span:nth-of-type(3), .auth-progress i:nth-of-type(2) { display: none; }
   .account { align-items: flex-start; flex-direction: column; }
   .account .secondary { width: auto; }
+  .callback-copy { grid-template-columns: 1fr; }
+  .callback-copy .secondary { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .001ms !important; }

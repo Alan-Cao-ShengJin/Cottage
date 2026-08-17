@@ -420,6 +420,23 @@ shows the green live room state and the review path touching the product card at
 Fly release `deployment-01M07DA87QNDPVFXA568AMW38C` is healthy; production HTML and CSS expose
 the `Live` badge, anchored review path, and green room-glow state.
 
+### M2.0p — OAuth completion that survives a missing local callback
+
+**In progress (2026-08-17).** A real Claude Code authorization proved that Cottage can validate the
+request, authenticate the human, bind an agent identity, and issue a PKCE-bound code while the
+connection still fails: the client registered `http://localhost:3118/callback`, but no listener
+received the redirect, so no token exchange followed. Retrying the consent form then surfaced the
+already-consumed browser flow rather than the actual handoff failure.
+
+Keep standards behavior unchanged for HTTPS and private-use redirect URIs. For a validated loopback
+redirect, return a no-store Cottage completion page after consent that clearly states authorization
+succeeded, exposes only the already-issued short-lived PKCE-bound callback URL, and offers both a
+normal return-to-client link and a copyable manual handoff. The original registered URI, state,
+single-use code, PKCE verifier requirement, resource binding, and five-minute code lifetime stay
+unchanged. The page must not use remote assets, leak its URL through referrers, log the code, or
+pretend Cottage can repair a client that failed to open its listener. This recovery is based on
+redirect shape, never provider name, so every desktop/CLI MCP client receives the same treatment.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six

@@ -33,6 +33,7 @@ import logging
 import secrets
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from ..db import database as db
 from ..domain.identity import AgentIdentity
@@ -130,12 +131,12 @@ def _validate_redirect_uri(uri: str) -> None:
     must be HTTPS. An open redirect here would hand codes to an attacker even with PKCE,
     since the code is delivered to whatever URI we honour.
     """
-    from urllib.parse import urlparse
-
     parsed = urlparse(uri)
+    if parsed.fragment:
+        raise OAuthError("invalid_redirect_uri", "redirect_uri must not contain a fragment.")
     if parsed.scheme == "https":
         return
-    if parsed.scheme == "http" and (parsed.hostname or "") in {"localhost", "127.0.0.1", "::1"}:
+    if is_loopback_redirect_uri(uri):
         return
     # A private-use scheme is how native clients receive codes. RFC 8252 §7.1 says it
     # should be a reverse-DNS name the client controls (`com.example.app:/cb`), and the
@@ -148,6 +149,21 @@ def _validate_redirect_uri(uri: str) -> None:
         "redirect_uri must be https, a loopback http URL, or a reverse-DNS private-use "
         f"scheme such as com.example.app:/callback — got {uri!r}",
     )
+
+
+def is_loopback_redirect_uri(uri: str) -> bool:
+    """Whether a validated client redirect returns through this device's loopback.
+
+    The authorization API uses this shape, never a client/vendor label, to choose the
+    desktop handoff experience. Keep this predicate aligned with `_validate_redirect_uri`:
+    it must never classify a URI as loopback that registration would refuse.
+    """
+    parsed = urlparse(uri)
+    return parsed.scheme == "http" and (parsed.hostname or "").lower() in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }
 
 
 async def load_client(client_id: str) -> dict[str, Any]:
@@ -311,6 +327,48 @@ async def load_browser_authorization_flow(flow_token: str | None) -> BrowserAuth
         state=row["state"],
         resource=row["resource"],
     )
+    return BrowserAuthorizationFlow(
+        token_hash=token_hash,
+        csrf_token=row["csrf_token"],
+        request=request,
+        expires_at=row["expires_at"],
+    )
+
+
+async def load_completed_browser_authorization_flow(
+    flow_token: str | None,
+) -> BrowserAuthorizationFlow:
+    """Load a consumed browser flow solely to render its loopback handoff page.
+
+    The authorization code is never stored on this record. It travels in the browser URL
+    fragment, which is not sent in the completion-page HTTP request. This lookup proves
+    only that this HttpOnly cookie belongs to a live, successfully consumed flow and
+    recovers the validated client/redirect metadata needed to render a trustworthy page.
+    """
+    if not flow_token:
+        raise OAuthError(
+            "invalid_request",
+            "The authorization handoff is missing or expired. Restart the MCP connection.",
+        )
+    token_hash = hash_token(flow_token)
+    row = await db.fetch_one("SELECT * FROM oauth_browser_flows WHERE flow_hash = ?", (token_hash,))
+    if row is None or not row["consumed_at"] or is_past(row["expires_at"]):
+        raise OAuthError(
+            "invalid_request",
+            "The authorization handoff is missing or expired. Restart the MCP connection.",
+        )
+    request = await validate_authorization_request(
+        client_id=row["client_id"],
+        redirect_uri=row["redirect_uri"],
+        response_type="code",
+        code_challenge=row["code_challenge"],
+        code_challenge_method=ONLY_SUPPORTED_CHALLENGE_METHOD,
+        scope=row["scope"],
+        state=row["state"],
+        resource=row["resource"],
+    )
+    if not is_loopback_redirect_uri(request.redirect_uri):
+        raise OAuthError("invalid_request", "This authorization does not use a local callback.")
     return BrowserAuthorizationFlow(
         token_hash=token_hash,
         csrf_token=row["csrf_token"],

@@ -182,6 +182,7 @@ such a client cannot attach at all.
 | `/oauth/authorize` | begin authorization (GET) and submit consent (POST) |
 | `/oauth/login` | email/password authentication for an authorization flow |
 | `/oauth/consent` | resume consent with an authenticated browser session |
+| `/oauth/complete` | refresh-safe handoff for a validated loopback desktop/CLI redirect |
 | `/oauth/logout` | revoke the current browser session |
 | `/oauth/token` | authorization-code exchange and refresh rotation |
 | `/oauth/revoke` | RFC 7009 |
@@ -215,7 +216,14 @@ such a client cannot attach at all.
 - **Never redirect an unvalidated request.** An unregistered `redirect_uri` is answered
   directly, because redirecting is exactly how a code reaches an attacker. Registration
   accepts https, loopback http, or a reverse-DNS private-use scheme (RFC 8252 §7.1) — not
-  any non-http scheme, which would have admitted `ftp://`.
+  any non-http scheme, which would have admitted `ftp://`; URI fragments are refused.
+- **A missing desktop listener does not erase successful consent.** HTTPS and private-use clients
+  retain the ordinary direct redirect. A validated loopback client receives a POST/Redirect/GET
+  completion page keyed only by redirect shape, never provider. The complete callback travels in
+  the browser fragment, which is absent from the `/oauth/complete` request and access log; the
+  database still stores only the authorization-code hash. The page verifies the exact registered
+  redirect and `state` before enabling return/copy actions. The code remains five-minute,
+  single-use, resource-bound, and useless without the client's original PKCE verifier.
 
 **Transport enforcement** (`adapters/mcp/auth.py`) sits in front of the MCP app, not inside
 the tools: an unauthenticated request must not reach the protocol machinery, and the

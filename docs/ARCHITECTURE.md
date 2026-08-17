@@ -79,6 +79,11 @@ scripts/         check.py gate, dev utilities
   verification; reset links are also hashed, expiring, and single-use. Browser session bearer
   values are opaque, hashed, and expiring. They authenticate the account and OAuth consent; raw
   passwords and session values are never stored.
+- **BrowserAuthorizationFlow** — a validated, ten-minute OAuth request held by hash while a human
+  signs in and chooses an agent identity. It is consumed atomically with authorization-code issue.
+  For loopback desktop/CLI redirects, the consumed flow also gates a refresh-safe completion page:
+  the short-lived PKCE-bound callback remains in the browser fragment and never gains a plaintext
+  database representation. HTTPS and private-use clients keep the ordinary direct redirect.
 - **OrganizationEntitlement** — a provider-projected capability such as `rooms:create`.
   Subscription state, Stripe customer mapping, webhook receipts, and the effective entitlement
   are separate tables. Room creation consults only the entitlement in the core service.

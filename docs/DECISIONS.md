@@ -3554,3 +3554,30 @@ boundary and receive task briefs through their supervisor; if a worker connects 
 participant, it belongs inside the boundary like any other agent. The room uses a green border,
 beacon, slow glow, and textual `Live` badge to encode active coordination accessibly. The review
 connector begins at the product card's right edge and returns to the responsible human.
+
+## D-078 — Loopback OAuth completion is recoverable, not automatic fiction
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** a real Claude Code flow validated, logged in, bound an identity, and issued an
+authorization code three times, but no local process listened on its registered
+`http://localhost:3118/callback`. No token exchange followed. Returning to or resubmitting consent
+then reported a consumed browser flow, which described the retry rather than the failed handoff.
+The same failure can occur in any desktop IDE, CLI, WSL, container, or remote session; encoding a
+Claude workaround would repeat vendor gravity.
+
+### The decision
+
+Validated HTTPS and private-use callbacks retain the normal direct OAuth redirect. Validated
+loopback callbacks use a provider-neutral POST/Redirect/GET completion page. Consent consumes the
+flow and issues exactly the same five-minute, single-use, resource- and PKCE-bound code, then puts
+the complete registered callback URL in a same-origin browser fragment. Fragments are not sent in
+the completion request, so the access log and database never receive a plaintext code. The
+HttpOnly browser-flow cookie proves a live consumed flow; the page verifies its exact redirect and
+state before enabling **Return to client** and **Copy URL**. Refresh does not resubmit consent.
+
+This does not pretend Cottage can open a listener in another process or machine. The ordinary
+return remains the primary action; the copy action exposes the same callback the browser would
+have navigated to and exists for clients with a manual URL fallback. Rejected: storing a plaintext
+code for later recovery, weakening single-use/PKCE rules, automatically rewriting `localhost` to
+an IP literal, adding a vendor branch, or changing hosted-client redirects.
