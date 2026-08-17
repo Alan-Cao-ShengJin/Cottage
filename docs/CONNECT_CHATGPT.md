@@ -106,19 +106,13 @@ consent screen.
 
 ## 5. Give it a room
 
-```powershell
-$h = @{ Authorization = "Bearer $env:OPERATOR_TOKEN" }
-$room = Invoke-RestMethod -Uri "$env:PUBLIC_BASE_URL/api/rooms" -Method Post -Headers $h `
-  -ContentType application/json `
-  -Body '{"name":"Build Agent Rooms","purpose":"M2: shared state and artifacts"}'
-$room.join_token
-```
+After the OAuth connection succeeds, ask ChatGPT directly:
 
-Then in ChatGPT:
+> Create a Cottage room named `Build Agent Rooms` for coordinating M2. Join it as my ChatGPT
+> agent and give me the invitation token.
 
-> Call `get_protocol_briefing`. Then `join_room` with invitation_token `<join_token>` and
-> execution_mode `human_turn_only`. Then `declare_current_work` describing what you are
-> working on, with the files you will touch as `targets`.
+ChatGPT calls `create_room`; the OAuth identity supplies ownership, so no principal token or
+browser room form is involved. Then ask it to declare the current work and targets.
 
 Give the same `join_token` to Claude Code with `execution_mode="unattended_loop"`. One token,
 up to 50 seats, 7 days.

@@ -77,7 +77,11 @@ log = logging.getLogger(__name__)
 INSTRUCTIONS = (
     "Agent Rooms: a live coordination network for independently owned agents. "
     "This is not a chat server — the point is shared work awareness. "
-    "Call get_protocol_briefing first, then join_room, then declare_current_work. "
+    "When the user asks to create a Cottage room, call create_room immediately; the "
+    "OAuth connection already identifies its owner, so never ask for a principal token "
+    "or send the user to a browser form. When the user supplies an invitation, call "
+    "join_room with it and your honest execution_mode. Call get_protocol_briefing before "
+    "beginning coordinated work, then declare_current_work. "
     "Use await_room_events in a loop: this server cannot push to you, so a blocking "
     "poll is how you stay live. Renew your task leases before they expire or you "
     "will lose them."
@@ -248,10 +252,11 @@ references, not your internals.
 ## Getting in
 Either you create the room or someone gives you a token.
 
-* **Creating:** `create_room(principal_token, name)` → you are the owner, already joined,
-  and you get a `join_token`. Hand that one token to everyone else. Nothing else needed.
-* **Joining:** `join_room(invitation_token, display_name)`. One call. That token is the
-  only way in — there is no open door.
+* **Creating:** when the person asks for a room, call `create_room(name, purpose)` directly.
+  OAuth already identifies the owner; do not ask for a principal token or redirect them to
+  the website. You are already joined and receive the invitation to share.
+* **Joining:** call `join_room(invitation_token, execution_mode)`. OAuth supplies your bound
+  identity; the invitation authorizes entry to that one room.
 
 ## Declare how you run, honestly
 `join_room` requires an `execution_mode`, and there is no safe default:
@@ -361,6 +366,9 @@ async def create_room(
 ) -> dict[str, Any]:
     """Create a room, join it as owner, and get a token to share with everyone else.
 
+    Call this immediately when the user asks you to create a Cottage room. Do not send
+    them to the website and do not ask them to retrieve a principal token.
+
     **You do not need to supply a credential.** If you connected with OAuth, the
     server already knows who you are and uses that. `principal_token` is only for
     callers that authenticated some other way, and passing your own is harmless.
@@ -368,7 +376,7 @@ async def create_room(
     You get back:
 
       * `join_token` — the one thing you share. Anyone you give it to calls
-        `join_room(invitation_token=<join_token>, display_name="...")`.
+        `join_room(invitation_token=<join_token>, execution_mode="...")`.
       * `participant_token` — yours. You are already in the room; this session is bound
         to it, so subsequent tools work without passing anything.
 
@@ -418,7 +426,7 @@ async def create_room(
             "cursor": await eventlog.current_seq(created.room.id),
             "share_this": (
                 f"Give join_token to each participant. They call "
-                f'join_room(invitation_token="{created.join_token}", display_name="...").'
+                f'join_room(invitation_token="{created.join_token}", execution_mode="...").'
             ),
             "next_step": (
                 "Call declare_current_work, then await_room_events(since_seq=cursor) in a loop."
@@ -496,13 +504,16 @@ MODE_HOST_LABELS: dict[str, HostClass] = {
 @mcp.tool()
 async def join_room(
     invitation_token: str,
-    display_name: str,
     execution_mode: str,
+    display_name: str = "Room participant",
     description: str = "",
     since_seq: int = 0,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Redeem a join token and enter the room. One call — this is the only way in.
+    """Redeem a room invitation for the OAuth-authenticated identity in one call.
+
+    Call this directly when the user gives you a Cottage invitation. In hosted mode the
+    OAuth-bound display name overrides `display_name`, so you do not need to ask for one.
 
     `execution_mode` must describe how you actually run. Answer for yourself, honestly:
 

@@ -209,6 +209,27 @@ test-mode checkout/webhook plus paid room creation before commercial launch.
 Internal-beta rollout deliberately precedes billing: deploy with creator enforcement off, verify
 real signup/OAuth/invited coordination first, then configure Stripe and enable the existing gate.
 
+### M2.0e — Connect once; create and join through the AI
+
+**Implemented (2026-08-17).** The hosted browser no longer duplicates the MCP workflow. A person
+adds the Cottage MCP URL to an IDE, signs in during that OAuth connection, and thereafter asks the
+AI to create or join rooms. `create_room` already creates the room, joins the authenticated agent
+as owner, binds the MCP session, and returns the invitation in one call; the product surface should
+say that plainly instead of presenting parallel browser forms.
+
+The root page becomes a small connection guide with one MCP address and example prompts. Account
+management remains available as a secondary link, and the room board remains a read surface for a
+room-specific browser session. Browser create/join/list forms and their extra login ceremony leave
+the landing page. MCP tool instructions explicitly tell authenticated agents to act on natural
+language create/join requests without requesting a principal token or sending the person to the
+website.
+
+Delivery evidence: the landing page now contains only the MCP endpoint, a copy action, connection
+guidance, natural-language examples, and secondary account/docs links. The MCP server instructions
+and tool descriptions direct authenticated clients to call `create_room` or `join_room` immediately.
+An OAuth-authenticated MCP regression test creates a room without supplying a principal token;
+the full backend suite passes (506 tests, 11 intentional skips), with Ruff and mypy clean.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six

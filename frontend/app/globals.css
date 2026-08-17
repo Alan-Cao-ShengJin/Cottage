@@ -613,3 +613,140 @@ code {
   word-break: break-all;
   margin-top: 8px;
 }
+
+/* The hosted landing page is a connection guide, not a second control plane. */
+.simple-landing {
+  max-width: 680px;
+  margin-top: 72px;
+}
+
+.landing-hero {
+  margin-bottom: 28px;
+}
+
+.product-mark {
+  display: inline-flex;
+  padding: 4px 9px;
+  margin-bottom: 14px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.simple-landing h1 {
+  max-width: 560px;
+  font-size: clamp(30px, 6vw, 46px);
+  line-height: 1.08;
+  letter-spacing: -0.04em;
+  margin-bottom: 14px;
+}
+
+.simple-landing .lede {
+  max-width: 590px;
+  font-size: 16px;
+  line-height: 1.65;
+}
+
+.simple-landing section {
+  padding: 22px;
+  margin-bottom: 12px;
+}
+
+.simple-landing section h2 {
+  margin: 4px 0 8px;
+  color: var(--text);
+  font-size: 18px;
+  letter-spacing: -0.01em;
+  text-transform: none;
+}
+
+.simple-landing section p {
+  margin: 0 0 14px;
+  color: var(--text-dim);
+}
+
+.connect-card {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border)) !important;
+}
+
+.step-label {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.endpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.endpoint-row code {
+  flex: 1;
+  min-width: 0;
+  padding-left: 4px;
+  overflow-wrap: anywhere;
+}
+
+.endpoint-row .btn {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.prompt-example {
+  padding: 13px 14px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--surface-2);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.prompt-example span {
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+
+.simple-landing .hint-copy {
+  margin: 12px 0 0;
+  font-size: 12px;
+}
+
+.landing-footer {
+  display: flex;
+  justify-content: center;
+  gap: 9px;
+  padding: 12px 0;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.landing-footer a {
+  color: var(--text-dim);
+  text-decoration: none;
+}
+
+.landing-footer a:hover {
+  color: var(--accent);
+}
+
+@media (max-width: 560px) {
+  .simple-landing {
+    margin-top: 36px;
+  }
+
+  .endpoint-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

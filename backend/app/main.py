@@ -264,7 +264,7 @@ def build_app(console_dir: Path | None = _CONFIGURED_CONSOLE_DIR) -> FastAPI:
     # failure is silent and total, which is why a test asserts the ordering.
     if console_dir is not None:
         app.mount("/", StaticFiles(directory=console_dir, html=True), name="console")
-        log.info("serving the room console from %s", console_dir)
+        log.info("serving the Cottage web surface from %s", console_dir)
     else:
 
         @app.get("/")

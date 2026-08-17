@@ -65,7 +65,7 @@ backend/app/
   api/           ARP HTTP: commands, SSE stream, auth extraction
   db/            schema + migrations + thin async SQLite access
   main.py        ASGI composition
-frontend/        Next.js work board
+frontend/        Next.js connection guide, account surface, and room read board
 docs/            canonical docs
 scripts/         check.py gate, dev utilities
 ```

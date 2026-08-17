@@ -3323,3 +3323,25 @@ creation after the paid period but never destroys or ejects an existing room.
 Hosted mode requires account authentication before an invitation may be redeemed. Cottage/local
 mode retains invitation-only joining as an explicit compatibility policy, not as the hosted
 identity model.
+
+## D-067 — The browser explains the connection; the connected AI operates Cottage
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** once account OAuth existed, the root page still duplicated MCP operations with room
+creation, joining, and listing forms. That made users authenticate during MCP connection and then
+appear to need a second browser workflow. It also obscured the intended interface: a person asks
+their connected AI to coordinate, and the AI uses Cottage tools.
+
+### The decision
+
+Hosted users connect the MCP endpoint once and authenticate during OAuth. Natural-language requests
+to create or join a room are fulfilled directly by `create_room` or `join_room`; an authenticated
+client must not request an organization principal token or redirect the person to a browser room
+form. `create_room` returns the invitation and binds the new room to the current MCP session in one
+operation.
+
+The root page is a compact connection guide: MCP address, copy action, three-step explanation, and
+example prompts. Account management remains a secondary browser surface, while room-specific boards
+remain available as read surfaces. Removing duplicate browser commands does not remove the HTTP API;
+it keeps automation and compatibility available without presenting them as the normal product path.

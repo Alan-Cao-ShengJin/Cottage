@@ -476,6 +476,26 @@ async def test_authenticated_join_records_the_bound_name_in_the_room(fresh_db, o
     assert "Totally Someone Else" not in names, "the room must never show the spoofed name"
 
 
+async def test_authenticated_agent_creates_without_a_principal_token(fresh_db, org):
+    """The natural-language path is one tool call after OAuth, with no browser form."""
+    from app.adapters.mcp import server as mcp_server
+    from app.api.oauth import mcp_resource_url
+
+    org_id, user_id = org
+    token, _ = await _access_token(org_id, user_id, audience=mcp_resource_url())
+
+    with require_auth(True):
+        created = await mcp_server.create_room(
+            name="Created by request",
+            purpose="No principal-token ceremony",
+            ctx=_FakeCtx(token),  # type: ignore[arg-type]
+        )
+
+    assert created["ok"] is True, created
+    assert created["room_name"] == "Created by request"
+    assert created["join_token"]
+
+
 async def test_without_a_token_the_client_names_itself(fresh_db, org, make_room):
     """The local-development path, stated so its weakness is visible rather than implied."""
     from app.adapters.mcp.server import _resolve_identity

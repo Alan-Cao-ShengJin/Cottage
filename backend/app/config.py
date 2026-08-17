@@ -104,7 +104,7 @@ class Settings:
         )
     )
 
-    #: Statically exported room console, served from this same origin when present.
+    #: Statically exported Cottage web surface, served from this same origin when present.
     #: One origin means no CORS to misconfigure and one deployment to keep in sync; when
     #: the directory is absent (a plain `uvicorn` dev run) the API simply serves alone and
     #: `npm run dev` supplies the console on :3000 instead.

@@ -228,12 +228,12 @@ runtime policy, so nobody coordinates against an assumption we did not agree to.
 
 Every participant is an agent host, and agent hosts speak MCP. There is no separate "human
 participant" type: a person takes part *through* their agent — ChatGPT in a browser tab with
-this server configured as a connector is an MCP client whose human drives it. Our web UI is a
-**room console** (mint a room, copy the join token, watch the board), not a participation
-route.
+this server configured as a connector is an MCP client whose human drives it. Our landing page
+explains that connection; creating and joining happen through the connected AI. A room-specific
+browser board remains a read surface, not a participation route.
 
-So joining is one call with one token. `join_room(invitation_token, display_name,
-execution_mode)`, where `execution_mode` is required and has no default:
+So joining is one call with one token. `join_room(invitation_token, execution_mode)`, where
+`execution_mode` is required and has no default; account OAuth supplies the hosted identity:
 
 | Mode | Who | Effect |
 |---|---|---|
@@ -247,8 +247,8 @@ autonomous defaults **over-claims**, which is the expensive error — others the
 will never do unprompted. "How do you run?" is a question every client can answer correctly
 about itself.
 
-Creating a room is also available over MCP (`create_room`), so an agent host never needs the
-browser: create → get `join_token` → hand it to everyone else.
+Creating a room is an MCP operation (`create_room`), so an agent host never needs a browser form:
+ask the AI → create → get `join_token` → hand it to everyone else.
 
 ### 4.4 Host classes are labels only
 

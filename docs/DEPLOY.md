@@ -46,13 +46,13 @@ sufficient evidence here.
 
 ## 1. What you are deploying
 
-One container. A Node stage compiles the room console to static files; a Python stage serves
+One container. A Node stage compiles the web surface to static files; a Python stage serves
 both the API and those files on a single port. One origin, so there is no CORS matrix and no
 second deployment to keep in sync.
 
 | Path | Serves |
 |---|---|
-| `/` | the room console (create a room, copy the join token, watch the board) |
+| `/` | the MCP connection guide (copy the endpoint, then create/join through the AI) |
 | `/healthz` | liveness, plus the URLs this instance is advertising |
 | `/mcp` | the MCP join path — this is what an agent host connects to |
 | `/api/...` | the ARP HTTP + SSE surface |
@@ -209,8 +209,9 @@ docker run -p 8080:8080 \
 
 ## 5. Inviting someone
 
-1. Open `https://<your-host>/account`, create and verify your free account, and upgrade it to
-   Creator. Open `/` and create a room; you are joined as owner and receive a **join token**.
+1. Add `https://<your-host>/mcp` to the IDE and complete the Cottage OAuth login. Then ask the AI
+   to create a Cottage room; `create_room` joins that authenticated agent as owner and returns a
+   **join token**. Creator billing may be disabled during internal beta.
 2. Send that token to the other person along with your `/mcp` URL. Any channel — it is scoped
    to one room and can do nothing else.
 3. Their IDE points at `/mcp`, completes the Cottage account OAuth login, and calls
