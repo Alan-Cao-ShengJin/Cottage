@@ -30,7 +30,9 @@ from ..domain.commands import (
     MintCredentialCommand,
     RevokeCredentialCommand,
     SetParticipantRoleCommand,
+    UpdateRoomCharterCommand,
 )
+from ..domain.disclosure import Audience
 from ..domain.events import EventActor, EventEnvelope, EventType
 from ..domain.identity import (
     AgentIdentity,
@@ -48,6 +50,7 @@ from ..domain.room import (
     MembershipState,
     Participant,
     ParticipantRole,
+    PrivacyClass,
     RetentionPolicy,
     Room,
     RoomPolicy,
@@ -57,7 +60,7 @@ from ..domain.room import (
     Scope,
 )
 from ..util import from_iso, hash_token, is_past, iso_in, new_token, to_iso, utcnow, utcnow_iso
-from . import authz, billing, eventlog, store
+from . import authz, billing, eventlog, privacy, store
 from .actors import SYSTEM_ACTOR, actor_for
 from .dispatch import CommandOutcome, execute_command, publish_committed
 from .errors import Forbidden, InvalidCommand, NotFound, RoomClosed, Unauthenticated
@@ -287,6 +290,10 @@ async def create_room(
     # Billing is an organization capability, not an adapter concern. Keeping the gate
     # here means HTTP, MCP, and future transports cannot disagree or bypass it.
     await billing.require_creator_entitlement(org_id)
+    # The charter becomes room-public as soon as the room exists. Creation has no
+    # participant yet with which to run the authorization half of disclosure, but
+    # the content boundary still applies before anything is persisted or logged.
+    privacy.inspect_content(command.charter, max_text_chars=8000)
 
     room_id = ids.new_id(ids.ROOM)
     participant_id = ids.new_id(ids.PARTICIPANT)
@@ -361,16 +368,17 @@ async def create_room(
         await tx.execute(
             """
             INSERT INTO rooms (
-                id, org_id, name, purpose, visibility, status, event_seq,
+                id, org_id, name, purpose, charter, visibility, status, event_seq,
                 retained_from_seq, policy, retention, created_at,
                 created_by_user_id, expires_at
-            ) VALUES (?,?,?,?,?,'open',0,1,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,'open',0,1,?,?,?,?,?)
             """,
             (
                 room_id,
                 org_id,
                 command.name,
                 command.purpose,
+                command.charter,
                 command.visibility.value,
                 db.dumps(policy.model_dump()),
                 db.dumps(retention.model_dump()),
@@ -387,6 +395,7 @@ async def create_room(
             payload={
                 "name": command.name,
                 "purpose": command.purpose,
+                "charter": command.charter,
                 "visibility": command.visibility.value,
                 "policy": policy.model_dump(),
                 "retention": retention.model_dump(),
@@ -536,6 +545,60 @@ async def close_room(*, participant: Participant, reason: str = "") -> Room:
         body=body,
     )
     return await store.load_room(room.id)
+
+
+async def update_room_charter(
+    *, participant: Participant, command: UpdateRoomCharterCommand
+) -> Room:
+    """Replace the room-public cold-start charter. Room admins only."""
+    room = await store.load_room(participant.room_id)
+    authz.require_admin(participant)
+    authz.require_writable(room)
+    if (
+        command.disclosure.privacy_class is not PrivacyClass.ROOM_PUBLIC
+        or command.disclosure.audience is not Audience.ROOM
+        or command.disclosure.to_participant_id is not None
+    ):
+        raise InvalidCommand("A room charter is visible to every room participant.")
+    decision = privacy.check_disclosure(
+        room=room,
+        participant=participant,
+        disclosure=command.disclosure,
+        content=[command.charter],
+        known_participant_ids=[p.id for p in await store.list_participants(room.id)],
+        max_text_chars=8000,
+    )
+
+    async def body(tx: db.Tx) -> CommandOutcome:
+        live_room = await store.load_room(room.id, tx=tx)
+        authz.require_writable(live_room)
+        if live_room.charter == command.charter:
+            return CommandOutcome(result={"room_id": room.id})
+        affected = await tx.execute(
+            "UPDATE rooms SET charter = ? WHERE id = ? AND status = 'open' AND charter = ?",
+            (command.charter, room.id, live_room.charter),
+        )
+        if affected == 0:
+            raise RoomClosed("This room is no longer accepting writes.", room_id=room.id)
+        event = await eventlog.append(
+            tx,
+            room_id=room.id,
+            type_=EventType.ROOM_CHARTER_UPDATED,
+            actor=actor_for(participant),
+            payload={"charter": command.charter},
+            disclosure=decision,
+            causation_id=command.command_id,
+        )
+        return CommandOutcome(result={"room_id": room.id}, events=[event])
+
+    outcome = await execute_command(
+        command_id=command.command_id,
+        command_type="room.charter.update",
+        room_id=room.id,
+        participant_id=participant.id,
+        body=body,
+    )
+    return await store.load_room(str(outcome.result.get("room_id", room.id)))
 
 
 async def extend_room(*, participant: Participant, command: ExtendRoomCommand) -> Room:

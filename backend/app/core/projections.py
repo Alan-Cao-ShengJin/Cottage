@@ -447,6 +447,7 @@ async def hydrate(
             "id": room.id,
             "name": room.name,
             "purpose": room.purpose,
+            "charter": room.charter,
             "status": room.status.value,
         },
         "you": {

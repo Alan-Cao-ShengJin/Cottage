@@ -24,6 +24,7 @@ class EventType(str, Enum):
     ROOM_EXPIRY_EXTENDED = "room.expiry_extended"
     ROOM_PURGED = "room.purged"
     ROOM_POLICY_CHANGED = "room.policy_changed"
+    ROOM_CHARTER_UPDATED = "room.charter_updated"
 
     INVITATION_CREATED = "invitation.created"
     INVITATION_REVOKED = "invitation.revoked"

@@ -99,7 +99,8 @@ scripts/         check.py gate, dev utilities
 
 ### Room
 - **Room** — owned by an org. `visibility` = `internal` | `cross_org`. `status` = `open` |
-  `closed` | `purged`. Holds a `RetentionPolicy` and a `RoomPolicy` (lease defaults, whether
+  `closed` | `purged`. `purpose` is its short label; `charter` is durable room-public cold-start
+  context that an admin may replace. Holds a `RetentionPolicy` and a `RoomPolicy` (lease defaults, whether
   interactive clients may claim, whether cross-org state writes need approval).
 - **Invitation** — a signed, expiring, scope-bearing token. Targets an email, an org, or is an open
   link with a max redemption count. Redemption is the only path to first membership; rejoining the

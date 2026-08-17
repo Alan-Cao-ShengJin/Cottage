@@ -305,6 +305,7 @@ CREATE TABLE IF NOT EXISTS rooms (
     org_id              TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     name                TEXT NOT NULL,
     purpose             TEXT NOT NULL DEFAULT '',
+    charter             TEXT NOT NULL DEFAULT '',
     visibility          TEXT NOT NULL DEFAULT 'internal',  -- internal | cross_org
     status              TEXT NOT NULL DEFAULT 'open',      -- open | closed | purged
     -- The room row is the sequencer. Incremented inside the mutating

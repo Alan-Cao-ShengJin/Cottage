@@ -119,13 +119,21 @@ async def make_room(fresh_db, org):
         visibility: RoomVisibility = RoomVisibility.INTERNAL,
         policy: RoomPolicy | None = None,
         name: str = "Test room",
+        purpose: str = "",
+        charter: str = "",
     ) -> RoomFixture:
         from app.core import store
 
         user_row = await db.fetch_one("SELECT * FROM users WHERE id = ?", (user_id,))
         created = await rooms.create_room(
             user=store.to_user(user_row),
-            command=CreateRoomCommand(name=name, visibility=visibility, policy=policy),
+            command=CreateRoomCommand(
+                name=name,
+                purpose=purpose,
+                charter=charter,
+                visibility=visibility,
+                policy=policy,
+            ),
             creator_display_name="Room Owner",
         )
         return RoomFixture(

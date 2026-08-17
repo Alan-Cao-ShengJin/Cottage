@@ -488,11 +488,13 @@ async def test_authenticated_agent_creates_without_a_principal_token(fresh_db, o
         created = await mcp_server.create_room(
             name="Created by request",
             purpose="No principal-token ceremony",
+            charter="Coordinate in small claims; ready means the shared gate is green.",
             ctx=_FakeCtx(token),  # type: ignore[arg-type]
         )
 
     assert created["ok"] is True, created
     assert created["room_name"] == "Created by request"
+    assert created["charter"] == "Coordinate in small claims; ready means the shared gate is green."
     assert created["join_token"]
 
 

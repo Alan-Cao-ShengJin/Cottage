@@ -62,6 +62,7 @@ from ..domain.commands import (
     RevokeCredentialCommand,
     SetParticipantRoleCommand,
     TakeOverExecutionCommand,
+    UpdateRoomCharterCommand,
     UpdateTaskCommand,
     UpdateWorkCommand,
 )
@@ -260,6 +261,16 @@ async def extend_room(
 ) -> dict[str, Any]:
     _assert_room(participant, room_id)
     room = await rooms.extend_room(participant=participant, command=command)
+    return {"ok": True, "room": room.model_dump(mode="json")}
+
+
+@router.put("/rooms/{room_id}/charter")
+async def update_room_charter(
+    room_id: str, participant: ParticipantDep, command: UpdateRoomCharterCommand
+) -> dict[str, Any]:
+    """Replace the room-public cold-start charter. Requires `room.admin`."""
+    _assert_room(participant, room_id)
+    room = await rooms.update_room_charter(participant=participant, command=command)
     return {"ok": True, "room": room.model_dump(mode="json")}
 
 

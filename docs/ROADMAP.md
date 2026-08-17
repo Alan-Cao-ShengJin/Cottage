@@ -522,6 +522,23 @@ the event stream contained exactly one `work.declared`; the following 25-second 
 zero events, proving an ordinary poll cycle no longer emits a no-op `presence.changed=live_poll`.
 Laptop 2 received the release through Cottage and was asked to repeat its outside-client restart.
 
+### M2.0s — A room carries a durable charter for cold-start joiners
+
+**Done (2026-08-17).** A live cross-agent room exposed a cold-start gap: `purpose` is a
+short label, but it is the only room-level context a new participant receives. That forces every
+joiner to reconstruct the room's scope, conventions, and definition of ready from old messages.
+
+Add a separate, durable `charter` field to the room. It is optional at creation, returned directly
+by `join_room` and every room-state projection, and editable after creation only by a participant
+holding `room.admin`. Creation and edits are content-inspected before becoming room-public data;
+an edit mutates the room projection and appends `room.charter_updated` in one transaction. Expose
+the same semantics through ARP HTTP and MCP so the feature does not narrow interoperability to one
+host family. Existing rooms migrate to an empty charter and remain valid. Evidence: four focused
+charter lifecycle tests, an authenticated MCP create assertion, 525 backend tests passing with 11
+skips, mypy and Ruff green, and frontend typecheck green. The standing unrelated Windows abrupt-
+worker descendant test remains the only worker-suite failure; the two pre-existing whole-tree Ruff
+format findings are unchanged.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six

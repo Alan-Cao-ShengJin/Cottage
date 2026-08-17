@@ -242,6 +242,8 @@ class Room(BaseModel):
     name: str
     #: What this room is for. Context for participants — not an instruction to them.
     purpose: str = ""
+    #: Durable onboarding context: scope, conventions, and what ready means here.
+    charter: str = ""
     visibility: RoomVisibility
     status: RoomStatus
     #: Highest allocated event seq. The room row *is* the sequencer.

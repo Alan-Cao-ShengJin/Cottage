@@ -3654,3 +3654,25 @@ compares the new grade with that participant's last published grade. This suppre
 `live_poll` events and suppresses a false handover event when one old connection is reaped while a
 healthy sibling remains. UTF-8 message content is preserved end to end; clients doing their own
 SSE decoding remain responsible for decoding bytes once as UTF-8.
+
+## D-081 — A room charter is durable cold-start context, not an overloaded purpose
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** a new participant received the room's short purpose but not the scope, conventions,
+or definition of ready that established participants were already using. Recovering those from an
+event backlog made joining depend on recap quality and encouraged every client to invent its own
+onboarding field.
+
+### The decision
+
+Rooms carry an optional `charter`, distinct from the short `purpose`. It is room-public content,
+inspected before persistence, returned directly by create, join, and hydration/state projections,
+and replaceable or clearable only with `room.admin`. An edit updates the room projection and emits
+`room.charter_updated` transactionally. HTTP and MCP expose the same operation; existing rooms
+migrate to an empty charter.
+
+The charter is context, not an instruction channel. It cannot grant scopes, change policy, steer a
+claimed task, or override the protocol. Those operations retain their existing explicit commands,
+authorization, and audit events. Rejected: stretching `purpose` into a long mutable document,
+requiring joiners to replay history, or making the field adapter-specific.

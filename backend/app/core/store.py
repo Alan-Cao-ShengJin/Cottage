@@ -105,6 +105,7 @@ def to_room(row: Any) -> Room:
         org_id=row["org_id"],
         name=row["name"],
         purpose=row["purpose"],
+        charter=row["charter"],
         visibility=RoomVisibility(row["visibility"]),
         status=RoomStatus(row["status"]),
         event_seq=int(row["event_seq"]),

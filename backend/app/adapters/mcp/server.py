@@ -65,6 +65,7 @@ from ...domain.commands import (
     PostMessageCommand,
     ReleaseClaimCommand,
     RenewClaimCommand,
+    UpdateRoomCharterCommand,
     UpdateWorkCommand,
 )
 from ...domain.directive import DirectiveAction
@@ -540,6 +541,7 @@ async def create_room(
     name: str,
     principal_token: str | None = None,
     purpose: str = "",
+    charter: str = "",
     display_name: str = "Room creator",
     execution_mode: str = "unattended_loop",
     cross_org: bool = False,
@@ -590,6 +592,7 @@ async def create_room(
             command=CreateRoomCommand(
                 name=name,
                 purpose=purpose,
+                charter=charter,
                 visibility=RoomVisibility.CROSS_ORG if cross_org else RoomVisibility.INTERNAL,
             ),
             # An agent presents the name a human bound to its identity, never one it
@@ -626,6 +629,7 @@ async def create_room(
             "ok": True,
             "room_id": created.room.id,
             "room_name": created.room.name,
+            "charter": created.room.charter,
             "join_token": created.join_token,
             "participant_token": created.participant_token,
             "participant_id": created.participant.id,
@@ -823,6 +827,7 @@ async def join_room(
             "participant_id": result.participant.id,
             "room_id": result.room.id,
             "room_name": result.room.name,
+            "charter": result.room.charter,
             "connection_id": negotiated.connection.id,
             "attachment_id": negotiated.connection.attachment_id,
             "negotiated_capabilities": [
@@ -846,6 +851,30 @@ async def join_room(
                 "headline and targets, then await_room_events(since_seq=cursor) in a loop."
             ),
         }
+    except RoomError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+async def update_room_charter(
+    charter: str,
+    command_id: str | None = None,
+    participant_token: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Replace this room's cold-start charter. Requires `room.admin`.
+
+    The charter is durable, room-public onboarding context: what the room coordinates,
+    local conventions, and what ready means. It is returned directly to new joiners and
+    in every room-state read. Pass an empty string to clear it.
+    """
+    try:
+        participant = await _participant(ctx, participant_token)
+        updated = await rooms.update_room_charter(
+            participant=participant,
+            command=UpdateRoomCharterCommand(command_id=command_id, charter=charter),
+        )
+        return {"ok": True, "room_id": updated.id, "charter": updated.charter}
     except RoomError as exc:
         return _err(exc)
 

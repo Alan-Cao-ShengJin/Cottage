@@ -65,11 +65,12 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 
 | Type | Payload highlights |
 |---|---|
-| `room.created` | name, purpose, visibility, policy, retention |
+| `room.created` | name, purpose, charter, visibility, policy, retention |
 | `room.closed` | reason (`retention_ttl_elapsed`, admin reason) |
 | `room.expiry_extended` | previous_expires_at, expires_at, extend_seconds |
 | `room.purged` | tombstone (participant/event counts, timestamps) |
 | `room.policy_changed` | changed fields |
+| `room.charter_updated` | charter |
 | `invitation.created` | invitation_id, target_kind, target_value, role, scopes, max_redemptions — **never the token** |
 | `invitation.revoked` | invitation_id |
 | `invitation.redeemed` | invitation_id, participant_id |

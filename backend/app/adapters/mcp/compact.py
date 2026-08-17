@@ -212,6 +212,7 @@ def room_state(
             "room_id": room.get("id"),
             "name": room.get("name"),
             "purpose": room.get("purpose"),
+            "charter": room.get("charter"),
             "status": room.get("status"),
             "visibility": room.get("visibility"),
         },

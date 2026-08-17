@@ -306,6 +306,8 @@ async def execute(sql: str, params: Iterable[Any] = ()) -> int:
 #: requires rewriting data will need a real numbered-migration mechanism (see
 #: docs/ROADMAP.md, Postgres blocker).
 ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # D-080. Existing rooms had no long-form cold-start context.
+    ("rooms", "charter", "TEXT NOT NULL DEFAULT ''"),
     ("principal_tokens", "client_id", "TEXT"),
     ("principal_tokens", "scope", "TEXT NOT NULL DEFAULT ''"),
     ("principal_tokens", "audience", "TEXT"),

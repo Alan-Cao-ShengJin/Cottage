@@ -64,9 +64,16 @@ class CommandMeta(BaseModel):
 class CreateRoomCommand(CommandMeta):
     name: str = Field(min_length=1, max_length=140)
     purpose: str = Field(default="", max_length=4000)
+    #: Durable cold-start context for a participant arriving without room history.
+    charter: str = Field(default="", max_length=8000)
     visibility: RoomVisibility = RoomVisibility.INTERNAL
     policy: RoomPolicy | None = None
     retention: RetentionPolicy | None = None
+
+
+class UpdateRoomCharterCommand(CommandMeta):
+    charter: str = Field(default="", max_length=8000)
+    disclosure: Disclosure = Field(default_factory=Disclosure)
 
 
 class ExtendRoomCommand(CommandMeta):
