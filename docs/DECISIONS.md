@@ -3403,7 +3403,30 @@ where it goes, OAuth supplies signup/login when the client connects, and one pro
 first successful outcome. Setup and Pricing are first-class tabs; Sign in and Sign up are direct
 shortcuts, not additional requirements before MCP OAuth.
 
-The pricing page distinguishes free identity/collaboration from the creator entitlement. It says
-Creator is $0 during internal beta and that monthly billing is coming later, but publishes no amount
-until one is actually chosen and enforced. Invited collaborators are explicitly free. This keeps the
-commercial model visible without allowing a presentation page to get ahead of authorization state.
+During internal beta there is no product-level Creator-versus-Coordinator account distinction: every
+verified account may create, join, invite, and coordinate. The pricing page therefore presents one
+full-access beta plan. It says room-creator billing is coming later, but publishes no amount until one
+is actually chosen and enforced; invited collaborators will remain free. This keeps the commercial
+model visible without allowing a presentation page to get ahead of authorization state.
+
+## D-071 — Humans steer supervisors; supervisors coordinate workers
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** a flat agent network explained shared state but not the operating hierarchy buyers
+actually use. People choose objectives and constraints through their own agent; capable supervisor
+agents coordinate across ownership boundaries; each supervisor may delegate execution to specialist
+agents that never need to become peers in every strategic discussion.
+
+### The decision
+
+The public animation presents three explicit layers. Humans set priorities and approvals while
+steering their chosen AI supervisor. Independently owned supervisors from any vendor meet in a
+Cottage room to discuss, split work, and expose conflicts. Each supervisor then dispatches scoped
+work to its own downstream agents and returns their progress to the shared room.
+
+Cottage is shown as the coordination layer around the supervisor discussion, not as a central agent
+that directs or executes work. Animated paths indicate direction and return flow; textual layer
+labels, ownership descriptions, and outcome labels preserve the model without motion. On narrow
+screens the same hierarchy becomes a vertical sequence rather than shrinking into an unreadable
+network.

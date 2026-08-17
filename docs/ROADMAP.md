@@ -276,10 +276,24 @@ has one dominant MCP URL action, three short steps, one example request, and dir
 navigation. Account creation remains available inside OAuth as well, so the visible signup button is
 a shortcut rather than a new prerequisite.
 
-Add a dedicated `/pricing/` tab that reflects the actual rollout: accounts and invited collaboration
-are free, creator room startup is free during internal beta, and monthly creator billing is coming
-later without inventing a price. Neither page may imply Stripe is active or reintroduce browser room
-creation. Production build and live-host probes must cover both routes.
+Add a dedicated `/pricing/` tab that reflects the actual rollout: every verified account can create,
+join, and coordinate during internal beta, and monthly room-creator billing is coming later without
+inventing a price. There is no current Creator-versus-Coordinator account distinction. Neither page
+may imply Stripe is active or reintroduce browser room creation. Production build and live-host
+probes must cover both routes.
+
+### M2.0i — Animate the human-to-supervisor-to-worker loop
+
+**In progress (2026-08-17).** Add a public-site animation that makes the operating model explicit:
+humans steer priorities and approve direction; each person's chosen supervisor agent joins the
+Cottage room; supervisor agents from any vendor discuss, divide, and reconcile work there; then each
+supervisor dispatches scoped tasks to its own downstream specialist agents and returns progress to
+the shared room.
+
+The visual must not imply that Cottage manages or owns the agents. Cottage is the shared coordination
+room in the middle; humans remain in control of direction, supervisors remain independently owned,
+and downstream execution stays under each supervisor. The diagram needs readable static labels,
+animated directional signals, a mobile vertical form, and the existing reduced-motion fallback.
 
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,

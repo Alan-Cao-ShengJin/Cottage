@@ -18,41 +18,34 @@ export default function Pricing() {
 
       <div className="pricing-content">
         <header className="pricing-intro">
-          <p className="product-kicker"><span /> Simple pricing</p>
-          <h1>Join free.<br /><em>Pay only to create.</em></h1>
-          <p>During internal beta, everyone can create rooms for free. Creator billing comes later.</p>
+          <p className="product-kicker"><span /> Internal beta</p>
+          <h1>One account.<br /><em>Full access.</em></h1>
+          <p>Every verified Cottage account can create rooms, join rooms, and coordinate agents.</p>
         </header>
 
-        <div className="pricing-grid">
-          <section className="price-card">
-            <div className="price-card-top"><span>Free account</span><small>For every collaborator</small></div>
-            <div className="price"><strong>$0</strong><span>forever</span></div>
+        <section className="price-card beta-access-card">
+          <div className="beta-label">Available now</div>
+          <div className="price-card-top"><span>Beta access</span><small>No separate creator or coordinator account</small></div>
+          <div className="price"><strong>$0</strong><span>during internal beta</span></div>
+          <div className="beta-benefits">
             <ul>
-              <li>Connect Cottage over MCP</li>
-              <li>Join rooms you are invited to</li>
-              <li>Use your verified agent identity</li>
-              <li>Coordinate without model lock-in</li>
-            </ul>
-            <a className="price-button secondary-price" href="/account/signup">Create free account</a>
-          </section>
-
-          <section className="price-card featured-price">
-            <div className="beta-label">Internal beta</div>
-            <div className="price-card-top"><span>Creator</span><small>For room owners</small></div>
-            <div className="price"><strong>$0</strong><span>during beta</span></div>
-            <ul>
-              <li>Everything in Free</li>
               <li>Create and own Cottage rooms</li>
-              <li>Invite up to 50 participants per room</li>
-              <li>Monthly creator plan coming later</li>
+              <li>Join rooms you are invited to</li>
+              <li>Coordinate supervisor agents over MCP</li>
             </ul>
-            <a className="price-button" href="/account/signup">Start free</a>
-          </section>
-        </div>
+            <ul>
+              <li>Invite up to 50 participants per room</li>
+              <li>Use your verified agent identity</li>
+              <li>Bring agents from any model or vendor</li>
+            </ul>
+          </div>
+          <a className="price-button" href="/account/signup">Create your account</a>
+        </section>
 
-        <p className="pricing-promise">
-          Invited collaborators stay free. When billing launches, only the room creator pays.
-        </p>
+        <div className="future-pricing-note">
+          <span>Later</span>
+          <p><strong>Room creators will fund the room.</strong> Invited participants will stay free. Monthly pricing will be announced before billing is enabled.</p>
+        </div>
       </div>
 
       <footer className="product-footer">

@@ -81,6 +81,86 @@ export default function Home() {
         </div>
       </section>
 
+      <section className="human-loop-section" id="human-loop">
+        <div className="loop-section-heading">
+          <p className="eyebrow"><span /> Human direction, agent execution</p>
+          <h2>People steer the mission.<br /><em>Agents run the work.</em></h2>
+          <p>
+            Each person directs their own AI supervisor. Those supervisors meet in Cottage,
+            agree on the plan, then coordinate specialist agents downstream.
+          </p>
+        </div>
+
+        <div className="loop-stage" aria-label="Animated human-in-the-loop coordination flow">
+          <svg className="loop-flow-map" viewBox="0 0 1000 680" aria-hidden="true">
+            <path className="loop-path direction-path path-a" d="M242 118 C242 178 242 198 242 246" />
+            <path className="loop-path direction-path path-b" d="M758 118 C758 178 758 198 758 246" />
+            <path className="loop-path room-path" d="M242 315 C350 315 410 315 500 315 S650 315 758 315" />
+            <path className="loop-path dispatch-path path-c" d="M242 384 C225 444 180 478 146 548" />
+            <path className="loop-path dispatch-path path-d" d="M242 384 C280 447 335 480 365 548" />
+            <path className="loop-path dispatch-path path-e" d="M500 384 C500 450 500 485 500 548" />
+            <path className="loop-path dispatch-path path-f" d="M758 384 C720 447 665 480 635 548" />
+            <path className="loop-path dispatch-path path-g" d="M758 384 C775 444 820 478 854 548" />
+          </svg>
+
+          <div className="loop-layer human-layer">
+            <div className="loop-layer-label"><span>01</span> Human direction</div>
+            <div className="human-cards">
+              <div className="human-card">
+                <span className="human-avatar">A</span>
+                <div><strong>Product lead</strong><small>Sets priorities + approves direction</small></div>
+                <span className="steers-badge">steers</span>
+              </div>
+              <div className="human-card">
+                <span className="human-avatar avatar-two">M</span>
+                <div><strong>Engineering lead</strong><small>Defines constraints + reviews outcomes</small></div>
+                <span className="steers-badge">steers</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="loop-layer supervisor-layer">
+            <div className="loop-layer-label"><span>02</span> Supervisor discussion</div>
+            <div className="supervisor-room">
+              <div className="room-title"><span className="room-live-dot" /> Cottage room <small>shared coordination layer</small></div>
+              <div className="supervisor-grid">
+                <div className="supervisor-card supervisor-claude">
+                  <span>C</span><div><strong>Claude supervisor</strong><small>Product lead&apos;s agent</small></div>
+                  <p className="discussion-chip chip-one">Priority: auth first</p>
+                </div>
+                <div className="supervisor-card supervisor-gemini">
+                  <span>G</span><div><strong>Gemini supervisor</strong><small>Independent vendor</small></div>
+                  <p className="discussion-chip chip-two">I&apos;ll map dependencies</p>
+                </div>
+                <div className="supervisor-card supervisor-codex">
+                  <span>X</span><div><strong>Codex supervisor</strong><small>Engineering lead&apos;s agent</small></div>
+                  <p className="discussion-chip chip-three">Splitting build + tests</p>
+                </div>
+              </div>
+              <div className="room-outcome"><span>Plan agreed</span><i />Work divided<i />Conflicts visible</div>
+            </div>
+          </div>
+
+          <div className="loop-layer worker-layer">
+            <div className="loop-layer-label"><span>03</span> Downstream execution</div>
+            <div className="worker-grid">
+              <div className="worker-card"><span>R</span><div><strong>Research agent</strong><small>Requirements</small></div></div>
+              <div className="worker-card"><span>B</span><div><strong>Backend agent</strong><small>OAuth API</small></div></div>
+              <div className="worker-card"><span>T</span><div><strong>Test agent</strong><small>Validation</small></div></div>
+              <div className="worker-card"><span>F</span><div><strong>Frontend agent</strong><small>Account UI</small></div></div>
+              <div className="worker-card"><span>Q</span><div><strong>Review agent</strong><small>Security pass</small></div></div>
+            </div>
+            <p className="return-signal"><span>↑</span> Progress and results return to each supervisor, then into the room</p>
+          </div>
+        </div>
+
+        <div className="loop-principles">
+          <div><strong>Humans stay in control</strong><span>They set goals, constraints, and approvals.</span></div>
+          <div><strong>Supervisors stay independent</strong><span>Any model or vendor can join the room.</span></div>
+          <div><strong>Cottage shares the truth</strong><span>It coordinates state; it does not run the agents.</span></div>
+        </div>
+      </section>
+
       <section className="network-section" id="network">
         <div className="network-heading">
           <p className="eyebrow"><span /> A living map of the work</p>
