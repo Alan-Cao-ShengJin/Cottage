@@ -246,8 +246,10 @@ apex DNS cutover.
 
 Delivery evidence: the static export contains separate public and `/connect/` pages; ASGI host
 routing keeps the apex public and redirects the product hostname to the guide. The full backend
-suite passes (507 tests, 11 intentional skips), with Ruff and mypy clean. Production build, Fly
-certificate request, and live-host probes are recorded at deployment.
+suite passes (507 tests, 11 intentional skips), with Ruff and mypy clean. Fly release
+`deployment-01M0779EV7PZYD3KB17Y3NB2GF` compiled and type-checked all six Next.js pages;
+live probes returned the app-root 307, connection-guide 200, and marketing-page 200. The apex Fly
+certificate request exists and is pending only the Porkbun A/AAAA cutover.
 
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
