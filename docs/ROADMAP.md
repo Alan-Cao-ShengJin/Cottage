@@ -463,10 +463,17 @@ before proceeding. The seat remains joined throughout; while no call or poll arr
 decays honestly to stale/disconnected and leases are still reclaimed. No server-generated heartbeat,
 vendor branch, or fake background execution is introduced.
 
+A live deployment then exposed the process-restart half: Laptop 2 presented a still-valid participant
+token and successfully declared work after Fly replaced the server, but the erased in-memory binding
+created no presence and the declaration immediately went stale. A valid explicit participant token
+now binds the new MCP session and restores the latest persisted MCP connection profile; the token is
+the authority, while the old connection contributes capability and cursor data only.
+
 Local evidence: the regression exercises attended join, unattended rejoin, exact-connection
-heartbeat, reap, and automatic recovery through the public `get_room_state` tool. The focused MCP,
-presence, and end-to-end sets pass (65 passed and 10 skipped in the wider MCP slice); the complete
-backend suite has 514 passing and 11 skipped tests. Mypy, Ruff lint, worker lint/format, and frontend
+heartbeat, reap, automatic recovery through the public `get_room_state` tool, and recovery after
+clearing all process-local affinity while retaining the participant token. The focused MCP,
+presence, and end-to-end sets pass (88 passed and 10 skipped); the complete backend suite has 515
+passing and 11 skipped tests. Mypy, Ruff lint, worker lint/format, and frontend
 typecheck pass. The standing unrelated failures remain the Windows abrupt-worker descendant test
 and three pre-existing backend format findings.
 

@@ -163,6 +163,8 @@ Presence is derived, never asserted.
   connection, the next call recreates it from the capabilities and attachment declaration captured
   at join, then continues. With no call or poll, the normal ladder still reaches `disconnected` and
   claims are reclaimed; membership remains `joined`, so returning does not require another invite.
+  If the server process restarted and lost session affinity, a valid explicit participant token may
+  bind the new MCP session and restore the latest persisted MCP connection profile for that seat.
 
 ### Work freshness — two clocks (D-059)
 

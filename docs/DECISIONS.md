@@ -3602,6 +3602,12 @@ connection. If it has been reaped, the call reconnects under the same declaratio
 concurrent calls serialize that repair per session. Session-less compatibility calls use the newest
 open connection rather than an unordered row, but receive no fabricated session affinity.
 
+Process-local affinity necessarily disappears on a server replacement. A new MCP session presenting
+a valid participant token may recover the seat's latest persisted MCP attachment profile and opens a
+new connection from it. The token supplies authority; the old connection supplies capabilities and a
+resume cursor only. This closes the live deployment case where a returning tool mutation succeeded
+under the participant token but immediately became stale because it created no presence.
+
 This is resume-on-action, not synthetic presence. With no call or long-poll return, the reaper still
 grades and closes the connection, work becomes stale, and leases are released. The participant seat
 remains joined and the event log retains the transition. Rejected: a server heartbeat emitted on

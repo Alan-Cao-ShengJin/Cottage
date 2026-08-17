@@ -162,6 +162,7 @@ class _SessionConnection:
 
 
 _session_connections: OrderedDict[str, _SessionConnection] = OrderedDict()
+_session_restore_lock = asyncio.Lock()
 
 #: One durable runtime identity for everything arriving over MCP as this participant.
 #:
@@ -257,8 +258,56 @@ async def _participant(ctx: Context | None, token: str | None) -> Participant:
             "pass the participant_token you were given."
         )
     participant = await store.load_participant_by_token(resolved)
+    if token and key and key not in _session_connections:
+        await _restore_session_connection(ctx, participant, token)
     await _ensure_session_connection(ctx, participant)
     return participant
+
+
+async def _restore_session_connection(
+    ctx: Context | None, participant: Participant, participant_token: str
+) -> None:
+    """Rebuild affinity after a server restart from the last persisted MCP profile.
+
+    The participant token is required: after process memory is gone, it is the proof
+    that this new transport session may bind the seat. The previous connection supplies
+    only a capability declaration and resume cursor, never authority.
+    """
+    key = _session_key(ctx)
+    if key is None:
+        return
+
+    async with _session_restore_lock:
+        if key in _session_connections:
+            return
+        row = await db.fetch_one(
+            """
+            SELECT c.id, a.label, a.is_resumable
+              FROM connections c
+              JOIN attachments a ON a.id = c.attachment_id
+             WHERE c.participant_id = ? AND a.label = ?
+             ORDER BY c.opened_at DESC
+             LIMIT 1
+            """,
+            (participant.id, MCP_ATTACHMENT_LABEL),
+        )
+        if row is None:
+            return
+        previous = await store.load_connection(str(row["id"]))
+        _remember_session(ctx, participant_token)
+        # An empty id deliberately forces `_ensure_session_connection` to create a
+        # connection for this new transport session rather than heartbeating a row
+        # whose process disappeared with the old server.
+        _remember_connection(
+            ctx,
+            participant_id=participant.id,
+            connection_id="",
+            capabilities=list(previous.negotiated_capabilities),
+            host_class=previous.host_class,
+            attachment_label=str(row["label"]),
+            attachment_resumable=bool(row["is_resumable"]),
+            last_seq=previous.last_delivered_seq,
+        )
 
 
 async def _ensure_session_connection(

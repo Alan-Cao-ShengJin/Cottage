@@ -204,3 +204,46 @@ async def test_reaped_session_reconnects_its_exact_declared_runtime(make_room) -
     view = (await presence.presence_for_room(await room.refresh()))[participant.id]
     assert view.liveness == Liveness.LIVE_POLL
     assert view.runtime is not None and view.runtime.may_claim is True
+
+
+@pytest.mark.asyncio
+async def test_explicit_token_restores_mcp_profile_after_server_restart(make_room) -> None:
+    """Process memory may vanish while durable membership and connection rows remain.
+
+    A valid participant token proves the returning seat. Its last persisted MCP
+    connection supplies the capability declaration, so the first public tool call after
+    a restart creates a new connection instead of writing work from zero presence.
+    """
+    from app.core import presence, store
+    from app.domain.room import Liveness
+
+    room = await make_room()
+    first_ctx = ctx_for("11111111111111111111111111111110")
+    joined = await mcp_server.join_room(
+        invitation_token=room.join_token,
+        execution_mode="unattended_loop",
+        display_name="Restarting agent",
+        ctx=first_ctx,
+    )
+    assert joined["ok"] is True
+
+    # Stand in for a Fly replacement: database rows survive; process-local affinity does not.
+    mcp_server._session_tokens.clear()
+    mcp_server._session_connections.clear()
+    returning_ctx = ctx_for("22222222222222222222222222222220")
+
+    resumed = await mcp_server.get_room_state(
+        participant_token=joined["participant_token"], ctx=returning_ctx
+    )
+    assert resumed["ok"] is True
+    key = mcp_server._session_key(returning_ctx)
+    assert key is not None
+    binding = mcp_server._session_connections[key]
+    assert binding.connection_id != joined["connection_id"]
+
+    replacement = await store.load_connection(binding.connection_id)
+    assert replacement.closed_at is None
+    assert replacement.host_class.value == "persistent_local"
+    view = (await presence.presence_for_room(await room.refresh()))[joined["participant_id"]]
+    assert view.liveness == Liveness.LIVE_POLL
+    assert view.runtime is not None and view.runtime.may_claim is True

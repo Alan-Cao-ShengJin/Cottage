@@ -113,7 +113,9 @@ scripts/         check.py gate, dev utilities
   adapter binds each transport session to the exact connection it opened. Every later tool call
   heartbeats that connection; if the reaper already closed it, the call recreates the connection
   from that session's recorded declaration before proceeding. This restores a returning runtime
-  without keeping an absent one falsely live (D-079).
+  without keeping an absent one falsely live. After a server restart erases process-local affinity,
+  a valid explicit participant token may bind the new MCP session and recover its latest persisted
+  MCP connection profile; the old connection grants no authority by itself (D-079).
 - **Attachment** — a durable *runtime* of a participant, keyed `UNIQUE (participant_id, label)`. One
   seat may have several: an interactive surface and a companion worker. It outlives any single
   connection, which is what makes "the same runtime came back after a dropped transport"
