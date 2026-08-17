@@ -422,7 +422,7 @@ the `Live` badge, anchored review path, and green room-glow state.
 
 ### M2.0p — OAuth completion that survives a missing local callback
 
-**In progress (2026-08-17).** A real Claude Code authorization proved that Cottage can validate the
+**Implemented; outside-client confirmation pending (2026-08-17).** A real Claude Code authorization proved that Cottage can validate the
 request, authenticate the human, bind an agent identity, and issue a PKCE-bound code while the
 connection still fails: the client registered `http://localhost:3118/callback`, but no listener
 received the redirect, so no token exchange followed. Retrying the consent form then surfaced the
@@ -436,6 +436,17 @@ single-use code, PKCE verifier requirement, resource binding, and five-minute co
 unchanged. The page must not use remote assets, leak its URL through referrers, log the code, or
 pretend Cottage can repair a client that failed to open its listener. This recovery is based on
 redirect shape, never provider name, so every desktop/CLI MCP client receives the same treatment.
+
+Delivery evidence: 31 OAuth regression tests pass, including `localhost`, IPv4 and IPv6 loopback,
+refresh-safe completion, nonce-scoped CSP, exact redirect/state validation, absence of the code from
+the completion response body, and a successful PKCE exchange using the fragment-carried callback.
+The complete backend suite has 513 passing and 11 skipped tests; mypy, Ruff lint, worker lint/format,
+and frontend typecheck pass. The standing unrelated gate failures remain the Windows abrupt-worker
+descendant test and three pre-existing backend format findings. Fly release
+`deployment-01M07EQD4553BWT42FEQ6VFSS1` is healthy. Production probes observed registration `201`,
+loopback authorization `200`, the Secure/HttpOnly/SameSite=Lax flow cookie, refusal of an unconsumed
+completion, and refusal of a fragment-bearing registered redirect. A real outside client's token
+exchange is deliberately not claimed until the next Claude Code run produces `/oauth/token`.
 
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
