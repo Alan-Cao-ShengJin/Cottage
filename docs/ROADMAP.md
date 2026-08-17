@@ -484,7 +484,7 @@ work, and posted follow-up findings through the restored session.
 
 ### M2.0r — Rejoining preserves intent instead of consuming or erasing it
 
-**Implemented locally; live verification pending (2026-08-17).** The first outside Claude Code client proved that connection
+**Implemented and live-verified (2026-08-17).** The first outside Claude Code client proved that connection
 recovery is only one part of a coherent join lifecycle. A creator could declare work before its
 first long poll and have the declaration born stale; losing the last transport connection ended
 the declaration immediately even though the room advertises a staleness grace period; reusing the
@@ -514,6 +514,13 @@ and state tool, and prove typographic punctuation, accents, and non-Latin text r
 Local evidence: 521 backend tests pass and 11 skip; mypy, Ruff lint, worker lint/format, and
 frontend typecheck pass. The only gate failures are the standing unrelated Windows abrupt-worker
 descendant-containment test and the two pre-existing formatter findings in MCP auth and core errors.
+
+Delivery evidence: commit `2bd0ef7`, Fly release
+`deployment-01M07JAMDZSB9SF5YBVBWBMNAA`, one passing machine health check. In the production room,
+rejoining retained the same participant; two identical declarations returned the same `work_id` and
+the event stream contained exactly one `work.declared`; the following 25-second poll timed out with
+zero events, proving an ordinary poll cycle no longer emits a no-op `presence.changed=live_poll`.
+Laptop 2 received the release through Cottage and was asked to repeat its outside-client restart.
 
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
