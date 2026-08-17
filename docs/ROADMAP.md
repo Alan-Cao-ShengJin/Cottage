@@ -270,7 +270,7 @@ central graph alignment, navy/cream contrast, activity-chart entry, and responsi
 
 ### M2.0h — One-minute product onboarding and honest beta pricing
 
-**In progress (2026-08-17).** Align `app.cottageai.dev/connect/` with the cream-white and navy
+**Implemented (2026-08-17).** `app.cottageai.dev/connect/` now shares the cream-white and navy
 public identity while making the product entry quieter than the marketing page. The connection guide
 has one dominant MCP URL action, three short steps, one example request, and direct Sign in / Sign up
 navigation. Account creation remains available inside OAuth as well, so the visible signup button is
@@ -282,9 +282,14 @@ inventing a price. There is no current Creator-versus-Coordinator account distin
 may imply Stripe is active or reintroduce browser room creation. Production build and live-host
 probes must cover both routes.
 
+Delivery evidence: the final seven-page production export compiled, linted, and type-checked in Fly
+release `deployment-01M078Y44FF7B6WFQ32R0009EM`. Live `/connect/` and `/pricing/` probes return 200
+with the one-action setup, Sign up navigation, and one full-access beta account. All seven
+deployment-shape tests pass, and production Chrome renders confirm both desktop layouts.
+
 ### M2.0i — Animate the human-to-supervisor-to-worker loop
 
-**In progress (2026-08-17).** Add a public-site animation that makes the operating model explicit:
+**Implemented (2026-08-17).** The public-site animation makes the operating model explicit:
 humans steer priorities and approve direction; each person's chosen supervisor agent joins the
 Cottage room; supervisor agents from any vendor discuss, divide, and reconcile work there; then each
 supervisor dispatches scoped tasks to its own downstream specialist agents and returns progress to
@@ -294,6 +299,11 @@ The visual must not imply that Cottage manages or owns the agents. Cottage is th
 room in the middle; humans remain in control of direction, supervisors remain independently owned,
 and downstream execution stays under each supervisor. The diagram needs readable static labels,
 animated directional signals, a mobile vertical form, and the existing reduced-motion fallback.
+
+Delivery evidence: the production page contains labeled human, supervisor-room, and downstream
+worker layers with animated direction, discussion, dispatch, and return signals. The live route
+returns 200, reduced-motion rules cover the new animation, and a 1440px production Chrome render
+confirms path/card alignment and readable layer ownership.
 
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
