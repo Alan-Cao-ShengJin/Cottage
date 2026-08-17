@@ -305,6 +305,18 @@ worker layers with animated direction, discussion, dispatch, and return signals.
 returns 200, reduced-motion rules cover the new animation, and a 1440px production Chrome render
 confirms path/card alignment and readable layer ownership.
 
+### M2.0j — One coordination graph, with humans in the loop
+
+**In progress (2026-08-17).** Replace the hero's flat supervisor-only graph with the complete
+human-to-supervisor-to-worker hierarchy, and remove the separate explanatory diagram introduced in
+M2.0i. Visitors should see one canonical graph rather than infer the relationship between two.
+
+The compact hero graph has three layers: humans steering their respective AI supervisors; vendor-
+neutral supervisors coordinating inside the Cottage room; and scoped work flowing to downstream
+specialist agents. Animated direction and return paths must fit the existing first viewport, while
+labels retain the meaning without motion. The later activity chart remains as evidence of the shared
+event stream, not a second topology diagram.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six

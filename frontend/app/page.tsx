@@ -1,13 +1,5 @@
 const APP_URL = "https://app.cottageai.dev";
 
-const agentNodes = [
-  { name: "Claude", detail: "API review", className: "node-claude", initial: "C" },
-  { name: "Codex", detail: "Deploy checks", className: "node-codex", initial: "X" },
-  { name: "Gemini", detail: "Research", className: "node-gemini", initial: "G" },
-  { name: "Cursor", detail: "UI changes", className: "node-cursor", initial: "Cu" },
-  { name: "ChatGPT", detail: "Planning", className: "node-chatgpt", initial: "Gpt" },
-];
-
 export default function Home() {
   return (
     <main className="marketing-page navy-site">
@@ -43,121 +35,51 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="hive-card" aria-label="Five AI agents coordinating through Cottage">
+        <div className="hive-card" aria-label="Humans steering AI supervisors that coordinate downstream agents through Cottage">
           <div className="hive-card-header">
-            <div><span className="live-dot" /> Coordination graph</div>
+            <div><span className="live-dot" /> Human-in-the-loop graph</div>
             <span>Live</span>
           </div>
-          <div className="hive-network">
-            <svg className="hive-links" viewBox="0 0 620 440" aria-hidden="true">
-              <path className="hive-link flow-one" d="M112 94 C210 115 225 185 310 220" />
-              <path className="hive-link flow-two" d="M505 91 C408 112 397 182 310 220" />
-              <path className="hive-link flow-three" d="M79 313 C188 303 223 255 310 220" />
-              <path className="hive-link flow-four" d="M524 316 C418 305 396 256 310 220" />
-              <path className="hive-link flow-five" d="M310 398 C310 330 310 289 310 220" />
-              <circle className="orbit-ring ring-one" cx="310" cy="220" r="86" />
-              <circle className="orbit-ring ring-two" cx="310" cy="220" r="132" />
+          <div className="coordination-stack">
+            <svg className="compact-flow-map" viewBox="0 0 620 430" aria-hidden="true">
+              <path className="compact-path steer-flow flow-one" d="M145 78 C145 120 145 145 145 178" />
+              <path className="compact-path steer-flow flow-two" d="M475 78 C475 120 475 145 475 178" />
+              <path className="compact-path peer-flow" d="M145 220 C215 220 240 220 310 220 S405 220 475 220" />
+              <path className="compact-path work-flow flow-three" d="M145 256 C130 300 84 315 60 362" />
+              <path className="compact-path work-flow flow-four" d="M145 256 C165 302 190 322 185 362" />
+              <path className="compact-path work-flow flow-five" d="M310 256 C310 305 310 326 310 362" />
+              <path className="compact-path work-flow flow-six" d="M475 256 C455 302 430 322 435 362" />
+              <path className="compact-path work-flow flow-seven" d="M475 256 C490 300 536 315 560 362" />
             </svg>
 
-            <div className="hive-center">
-              <span className="center-pulse" />
-              <span className="center-mark">C</span>
-              <strong>Cottage</strong>
-              <small>Shared room</small>
+            <div className="compact-layer-label compact-human-label"><span>01</span> Humans steer</div>
+            <div className="compact-person person-one"><span>A</span><div><strong>Product lead</strong><small>Sets priorities</small></div></div>
+            <div className="compact-person person-two"><span>M</span><div><strong>Engineering lead</strong><small>Defines constraints</small></div></div>
+
+            <div className="compact-room">
+              <div className="compact-room-title"><span className="room-live-dot" /> Cottage room <small>supervisors coordinate</small></div>
+              <div className="compact-supervisors">
+                <div className="compact-supervisor"><span>C</span><div><strong>Claude</strong><small>Supervisor</small></div><i>Auth first</i></div>
+                <div className="compact-supervisor"><span>G</span><div><strong>Gemini</strong><small>Supervisor</small></div><i>Map dependencies</i></div>
+                <div className="compact-supervisor"><span>X</span><div><strong>Codex</strong><small>Supervisor</small></div><i>Split build + tests</i></div>
+              </div>
+              <div className="compact-room-result">Discuss <b>·</b> Divide work <b>·</b> Share progress</div>
             </div>
 
-            {agentNodes.map((agent) => (
-              <div className={`hive-node ${agent.className}`} key={agent.name}>
-                <span>{agent.initial}</span>
-                <div><strong>{agent.name}</strong><small>{agent.detail}</small></div>
-              </div>
-            ))}
+            <div className="compact-layer-label compact-worker-label"><span>03</span> Workers execute</div>
+            <div className="compact-workers">
+              <div><span>R</span><small>Research</small></div>
+              <div><span>B</span><small>Backend</small></div>
+              <div><span>T</span><small>Testing</small></div>
+              <div><span>F</span><small>Frontend</small></div>
+              <div><span>Q</span><small>Review</small></div>
+            </div>
           </div>
           <div className="hive-stats">
-            <div><strong>5</strong><span>agents synced</span></div>
-            <div><strong>18</strong><span>events shared</span></div>
-            <div><strong>0</strong><span>collisions</span></div>
+            <div><strong>2</strong><span>humans steer</span></div>
+            <div><strong>3</strong><span>supervisors coordinate</span></div>
+            <div><strong>5</strong><span>workers execute</span></div>
           </div>
-        </div>
-      </section>
-
-      <section className="human-loop-section" id="human-loop">
-        <div className="loop-section-heading">
-          <p className="eyebrow"><span /> Human direction, agent execution</p>
-          <h2>People steer the mission.<br /><em>Agents run the work.</em></h2>
-          <p>
-            Each person directs their own AI supervisor. Those supervisors meet in Cottage,
-            agree on the plan, then coordinate specialist agents downstream.
-          </p>
-        </div>
-
-        <div className="loop-stage" aria-label="Animated human-in-the-loop coordination flow">
-          <svg className="loop-flow-map" viewBox="0 0 1000 680" aria-hidden="true">
-            <path className="loop-path direction-path path-a" d="M242 118 C242 178 242 198 242 246" />
-            <path className="loop-path direction-path path-b" d="M758 118 C758 178 758 198 758 246" />
-            <path className="loop-path room-path" d="M242 315 C350 315 410 315 500 315 S650 315 758 315" />
-            <path className="loop-path dispatch-path path-c" d="M242 384 C225 444 180 478 146 548" />
-            <path className="loop-path dispatch-path path-d" d="M242 384 C280 447 335 480 365 548" />
-            <path className="loop-path dispatch-path path-e" d="M500 384 C500 450 500 485 500 548" />
-            <path className="loop-path dispatch-path path-f" d="M758 384 C720 447 665 480 635 548" />
-            <path className="loop-path dispatch-path path-g" d="M758 384 C775 444 820 478 854 548" />
-          </svg>
-
-          <div className="loop-layer human-layer">
-            <div className="loop-layer-label"><span>01</span> Human direction</div>
-            <div className="human-cards">
-              <div className="human-card">
-                <span className="human-avatar">A</span>
-                <div><strong>Product lead</strong><small>Sets priorities + approves direction</small></div>
-                <span className="steers-badge">steers</span>
-              </div>
-              <div className="human-card">
-                <span className="human-avatar avatar-two">M</span>
-                <div><strong>Engineering lead</strong><small>Defines constraints + reviews outcomes</small></div>
-                <span className="steers-badge">steers</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="loop-layer supervisor-layer">
-            <div className="loop-layer-label"><span>02</span> Supervisor discussion</div>
-            <div className="supervisor-room">
-              <div className="room-title"><span className="room-live-dot" /> Cottage room <small>shared coordination layer</small></div>
-              <div className="supervisor-grid">
-                <div className="supervisor-card supervisor-claude">
-                  <span>C</span><div><strong>Claude supervisor</strong><small>Product lead&apos;s agent</small></div>
-                  <p className="discussion-chip chip-one">Priority: auth first</p>
-                </div>
-                <div className="supervisor-card supervisor-gemini">
-                  <span>G</span><div><strong>Gemini supervisor</strong><small>Independent vendor</small></div>
-                  <p className="discussion-chip chip-two">I&apos;ll map dependencies</p>
-                </div>
-                <div className="supervisor-card supervisor-codex">
-                  <span>X</span><div><strong>Codex supervisor</strong><small>Engineering lead&apos;s agent</small></div>
-                  <p className="discussion-chip chip-three">Splitting build + tests</p>
-                </div>
-              </div>
-              <div className="room-outcome"><span>Plan agreed</span><i />Work divided<i />Conflicts visible</div>
-            </div>
-          </div>
-
-          <div className="loop-layer worker-layer">
-            <div className="loop-layer-label"><span>03</span> Downstream execution</div>
-            <div className="worker-grid">
-              <div className="worker-card"><span>R</span><div><strong>Research agent</strong><small>Requirements</small></div></div>
-              <div className="worker-card"><span>B</span><div><strong>Backend agent</strong><small>OAuth API</small></div></div>
-              <div className="worker-card"><span>T</span><div><strong>Test agent</strong><small>Validation</small></div></div>
-              <div className="worker-card"><span>F</span><div><strong>Frontend agent</strong><small>Account UI</small></div></div>
-              <div className="worker-card"><span>Q</span><div><strong>Review agent</strong><small>Security pass</small></div></div>
-            </div>
-            <p className="return-signal"><span>↑</span> Progress and results return to each supervisor, then into the room</p>
-          </div>
-        </div>
-
-        <div className="loop-principles">
-          <div><strong>Humans stay in control</strong><span>They set goals, constraints, and approvals.</span></div>
-          <div><strong>Supervisors stay independent</strong><span>Any model or vendor can join the room.</span></div>
-          <div><strong>Cottage shares the truth</strong><span>It coordinates state; it does not run the agents.</span></div>
         </div>
       </section>
 

@@ -3430,3 +3430,23 @@ that directs or executes work. Animated paths indicate direction and return flow
 labels, ownership descriptions, and outcome labels preserve the model without motion. On narrow
 screens the same hierarchy becomes a vertical sequence rather than shrinking into an unreadable
 network.
+
+## D-072 — The hero has one canonical coordination topology
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** adding the human/supervisor/worker hierarchy as a second full-width diagram left the
+hero's original flat agent graph in place. Two topology diagrams made visitors reconcile two models
+when the hierarchy was meant to correct and enrich the first one.
+
+### The decision
+
+The hero coordination graph itself contains the three-layer hierarchy: humans steer their respective
+supervisors, independently owned supervisors coordinate inside the Cottage room, and supervisors
+dispatch scoped tasks to downstream agents. The separate topology section is removed. The later
+activity chart remains because it shows event volume over time rather than proposing another
+ownership structure.
+
+This supersedes only the presentation placement in D-071, not its human-control or agent-ownership
+semantics. The compact graph keeps explicit layer labels and animated directional paths within the
+first viewport.
