@@ -385,6 +385,20 @@ adds no client JavaScript or chart dependency. Production Chrome and a 390px Pla
 verify the two-column workbench and single-column container-query form; all seven deployment-shape
 tests pass against Fly release `deployment-01M07BJC3H5R3BH26D672WNRG8`.
 
+### M2.0n — Reduce the graph; make live activity feel live
+
+**In progress (2026-08-17).** Refine the two public coordination visuals without changing their
+product model. The hero graph should stop explaining each actor twice: retain the human,
+supervisor-room, delegated worker, converged product, and review-loop shapes, but reduce labels to
+the payload or verb that the geometry cannot express on its own. The static frame must still answer
+who steers, where supervisors coordinate, how work fans out, and where outputs reunite.
+
+Turn the workbench's Shared Activity panel into a denser CLI-style `watch --follow` stream. The
+human's direction appears as the initiating command; the supervisor's plan becomes terminal output;
+task claims, leases, checkpoints, file changes, conflicts, reviews, and approvals continuously
+scroll upward in one seamless loop. Reduced-motion users receive one complete static event set, and
+the container-query mobile form keeps readable rows without horizontal overflow.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six

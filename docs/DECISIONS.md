@@ -3514,3 +3514,27 @@ workbench is an operational view of one room.
 The workbench is semantic HTML and CSS, retains readable completed events without animation, uses
 container queries to collapse the rail and activity into one mobile column, and participates in the
 existing reduced-motion policy.
+
+## D-076 — Show the hierarchy; stream the evidence
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** the first complete human-in-the-loop graph was accurate but repeated its meaning in
+layer labels, actor descriptions, connector copy, room explanation, and footer principles. The
+workbench had the opposite problem: only five activity rows, each always visible, made a live room
+look like a static mockup.
+
+### The decision
+
+The hero graph keeps its full topology while reducing visible copy to four verbs — steer,
+coordinate, delegate, merge — plus the payload words needed to disambiguate direction. Human and AI
+silhouettes, the Cottage boundary, fan-out paths, convergence paths, and the review loop carry the
+rest. Actor cards name ownership and role without narrating behavior a second time.
+
+The operational visual becomes a real `cottage watch room-42 --follow` terminal. A human command and
+supervisor plan stay pinned above a fourteen-event stream covering task claims, leases,
+checkpoints, file changes, conflict prevention, verification, milestones, and approval. Two
+identical semantic event sets form a seamless upward CSS loop; the second is hidden from assistive
+technology. Under reduced motion the animation stops, the duplicate set is removed, and the first
+complete set remains available in a scrollable viewport. Container queries keep timestamps and
+secondary chrome only when the component has room for them.

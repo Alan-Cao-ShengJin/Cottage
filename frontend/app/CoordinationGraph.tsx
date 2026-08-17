@@ -3,7 +3,7 @@ export default function CoordinationGraph() {
     <figure className="hive-card" aria-labelledby="coordination-graph-title" aria-describedby="coordination-graph-summary">
       <div className="hive-card-header">
         <div id="coordination-graph-title"><span className="live-dot" /> Human-in-the-loop workflow</div>
-        <span>One shared room</span>
+        <span>Steer → build → review</span>
       </div>
 
       <div className="coordination-stack">
@@ -29,55 +29,53 @@ export default function CoordinationGraph() {
           <path className="compact-path review-flow" markerEnd="url(#flow-arrow)" d="M612 568 C680 535 684 122 561 70" />
         </svg>
 
-        <div className="compact-layer-label compact-human-label"><span>01</span><b>Humans set direction</b><small>People stay accountable</small></div>
+        <div className="compact-layer-label compact-human-label"><span>01</span><b>Steer</b></div>
         <div className="compact-person person-one">
           <span className="human-glyph" aria-hidden="true"><i /></span>
-          <div><strong>Alex · Product lead</strong><small>Human — sets goals and approves</small></div>
+          <div><strong>Alex</strong><small>Product lead · Human</small></div>
         </div>
         <div className="compact-person person-two">
           <span className="human-glyph" aria-hidden="true"><i /></span>
-          <div><strong>Maya · Engineering lead</strong><small>Human — defines technical constraints</small></div>
+          <div><strong>Maya</strong><small>Engineering lead · Human</small></div>
         </div>
-        <div className="handoff-label human-handoff handoff-one">Goal + constraints <b>↓</b><span>Progress + questions ↑</span></div>
-        <div className="handoff-label human-handoff handoff-two">Goal + constraints <b>↓</b><span>Progress + questions ↑</span></div>
+        <div className="handoff-label human-handoff handoff-one"><b>Goal ↓</b><span>Review ↑</span></div>
+        <div className="handoff-label human-handoff handoff-two"><b>Goal ↓</b><span>Review ↑</span></div>
 
-        <div className="compact-layer-label compact-room-label"><span>02</span><b>AI supervisors coordinate</b><small>Across vendors and owners</small></div>
+        <div className="compact-layer-label compact-room-label"><span>02</span><b>Coordinate</b></div>
         <div className="compact-room">
           <div className="compact-room-title">
-            <div><span className="room-live-dot" /><strong>Cottage room</strong><small>Shared coordination layer</small></div>
-            <em>Not an AI · no model lock-in</em>
+            <div><span className="room-live-dot" /><strong>Cottage room</strong><small>Shared state</small></div>
           </div>
           <div className="compact-supervisors">
-            <div className="compact-supervisor supervisor-one"><span>AI</span><div><strong>Claude supervisor</strong><small>Alex&apos;s agent</small></div><i>Shares product plan</i></div>
-            <div className="compact-supervisor supervisor-two"><span>AI</span><div><strong>Codex supervisor</strong><small>Maya&apos;s agent</small></div><i>Claims build work</i></div>
+            <div className="compact-supervisor supervisor-one"><span>AI</span><div><strong>Claude</strong><small>Supervisor · Alex&apos;s</small></div></div>
+            <div className="compact-supervisor supervisor-two"><span>AI</span><div><strong>Codex</strong><small>Supervisor · Maya&apos;s</small></div></div>
           </div>
-          <div className="room-exchange"><span className="exchange-packet">Plan</span><b>Plans · task claims · checkpoints</b><span className="exchange-packet exchange-packet-two">Claim</span></div>
-          <div className="compact-room-result">Supervisors use Cottage to divide work and prevent collisions.</div>
+          <div className="room-exchange"><span className="exchange-packet">Plan</span><b>plan · claim · sync</b><span className="exchange-packet exchange-packet-two">Claim</span></div>
         </div>
 
-        <div className="compact-layer-label compact-worker-label"><span>03</span><b>AI workers receive scoped tasks</b><small>Execution stays with each team</small></div>
-        <div className="task-brief task-brief-one">Claude delegates ↓</div>
-        <div className="task-brief task-brief-two">Codex delegates ↓</div>
+        <div className="compact-layer-label compact-worker-label"><span>03</span><b>Delegate</b></div>
+        <div className="task-brief task-brief-one">Tasks ↓</div>
+        <div className="task-brief task-brief-two">Tasks ↓</div>
         <div className="compact-workers">
-          <div><span>AI worker</span><strong>Research</strong><small>Receives user-insight brief</small></div>
-          <div><span>AI worker</span><strong>Content</strong><small>Receives messaging brief</small></div>
-          <div><span>AI worker</span><strong>Backend</strong><small>Receives API task</small></div>
-          <div><span>AI worker</span><strong>Testing</strong><small>Receives release checks</small></div>
+          <div><span>AI</span><strong>Research</strong></div>
+          <div><span>AI</span><strong>Content</strong></div>
+          <div><span>AI</span><strong>Backend</strong></div>
+          <div><span>AI</span><strong>Testing</strong></div>
         </div>
 
-        <div className="assembly-label"><span>04</span> Worker outputs merge into</div>
+        <div className="assembly-label"><span>04</span> Merge</div>
         <div className="end-product">
           <span className="product-preview" aria-hidden="true"><i /><i /><i /></span>
-          <div><strong>End product</strong><small>One integrated, reviewed release</small></div>
-          <b>Research ✓</b><b>Copy ✓</b><b>API ✓</b><b>Tests ✓</b>
+          <div><strong>End product</strong><small>Ready for review</small></div>
+          <b className="product-ready">4 outputs ✓</b>
         </div>
-        <div className="review-label">Human review + next direction ↗</div>
+        <div className="review-label">Review ↗</div>
       </div>
 
       <figcaption className="hive-stats" id="coordination-graph-summary">
-        <div><strong>Human</strong><span>controls direction</span></div>
-        <div><strong>Cottage</strong><span>coordinates shared state</span></div>
-        <div><strong>Agents</strong><span>own execution</span></div>
+        <div><strong>You</strong><span>steer</span></div>
+        <div><strong>Cottage</strong><span>syncs</span></div>
+        <div><strong>Agents</strong><span>build</span></div>
       </figcaption>
     </figure>
   );
