@@ -22,7 +22,6 @@ const roomHref = (roomId: string) => `/room/?room=${encodeURIComponent(roomId)}`
  */
 export default function Home() {
   const router = useRouter();
-  const [token, setToken] = useState("");
   const [rooms, setRooms] = useState<Room[] | null>(null);
   const [name, setName] = useState("");
   const [purpose, setPurpose] = useState("");
@@ -40,7 +39,6 @@ export default function Home() {
   useEffect(() => {
     const existing = loadSession();
     if (existing) {
-      setToken(existing.principalToken);
       setDisplayName(existing.displayName);
     }
     api
@@ -67,15 +65,14 @@ export default function Home() {
     }
   };
 
-  const listRooms = () => run(async () => setRooms((await api.listRooms(token)).rooms));
+  const listRooms = () => run(async () => setRooms((await api.listRooms()).rooms));
 
   const createRoom = () =>
     run(async () => {
-      const result = await api.createRoom(token, { name, purpose });
+      const result = await api.createRoom({ name, purpose });
       // Already a member — no invitation dance. Save the session so the board opens
       // immediately, and surface the join token, which is the whole point.
       saveSession({
-        principalToken: token,
         participantToken: result.participant_token,
         participantId: result.participant.id,
         roomId: result.room.id,
@@ -88,17 +85,16 @@ export default function Home() {
       });
       setName("");
       setPurpose("");
-      setRooms((await api.listRooms(token)).rooms);
+      setRooms((await api.listRooms()).rooms);
     });
 
   const join = () =>
     run(async () => {
-      const result = await api.join(token, {
+      const result = await api.join({
         invitation_token: joinToken.trim(),
         display_name: displayName.trim() || "Human",
       });
       saveSession({
-        principalToken: token,
         participantToken: result.participant_token,
         participantId: result.participant.id,
         roomId: result.room.id,
@@ -119,22 +115,15 @@ export default function Home() {
       {error && <div className="error">{error}</div>}
 
       <section>
-        <h2>1 · Authenticate</h2>
-        <div className="field">
-          <label htmlFor="token">Principal token</label>
-          {/* Deliberately not showing the published default as a placeholder: on a
-              deployed instance that reads as an instruction, and the one value nobody
-              should paste here is the one printed in the repository. */}
-          <input
-            id="token"
-            value={token}
-            placeholder="paste your operator token"
-            onChange={(e) => setToken(e.target.value)}
-          />
-          <span className="hint">
-            This instance&rsquo;s <code>OPERATOR_TOKEN</code> — the credential that creates
-            rooms. Multi-person login is M5; until then one operator holds it.
-          </span>
+        <h2>1 · Your Cottage account</h2>
+        <p className="hint">
+          Accounts are free. Sign in once, then use the same account when your IDE opens
+          Cottage OAuth. Invited accounts can join rooms; Cottage Creator can start them.
+        </p>
+        <div className="row">
+          <a className="btn primary" href="/account/login">Sign in</a>
+          <a className="btn" href="/account/signup">Create free account</a>
+          <a className="btn" href="/account">Account and billing</a>
         </div>
         <div className="field">
           <label htmlFor="display-name">Your display name</label>
@@ -145,7 +134,7 @@ export default function Home() {
             onChange={(e) => setDisplayName(e.target.value)}
           />
         </div>
-        <button className="btn" onClick={listRooms} disabled={busy || !token}>
+        <button className="btn" onClick={listRooms} disabled={busy}>
           Load my rooms
         </button>
       </section>
@@ -170,11 +159,12 @@ export default function Home() {
             onChange={(e) => setPurpose(e.target.value)}
           />
         </div>
-        <button className="btn primary" onClick={createRoom} disabled={busy || !token || !name}>
+        <button className="btn primary" onClick={createRoom} disabled={busy || !name}>
           Create room
         </button>
         <span className="hint" style={{ display: "block", marginTop: 8 }}>
-          You become the owner immediately and get one token to share. Nothing else needed.
+          Creator membership is checked here. You become the owner and get one room
+          invitation to share.
         </span>
       </section>
 
@@ -239,7 +229,7 @@ export default function Home() {
             onChange={(e) => setJoinToken(e.target.value)}
           />
         </div>
-        <button className="btn primary" onClick={join} disabled={busy || !token || !joinToken}>
+        <button className="btn primary" onClick={join} disabled={busy || !joinToken}>
           Join and open the board
         </button>
         <button

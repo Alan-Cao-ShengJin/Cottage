@@ -56,7 +56,7 @@ from ..domain.room import (
     Scope,
 )
 from ..util import from_iso, hash_token, is_past, iso_in, new_token, to_iso, utcnow, utcnow_iso
-from . import authz, eventlog, store
+from . import authz, billing, eventlog, store
 from .actors import SYSTEM_ACTOR, actor_for
 from .dispatch import CommandOutcome, execute_command, publish_committed
 from .errors import Forbidden, InvalidCommand, NotFound, RoomClosed, Unauthenticated
@@ -282,6 +282,10 @@ async def create_room(
             )
         owner_user_id = creator_identity.owner_user_id
         org_id = creator_identity.org_id
+
+    # Billing is an organization capability, not an adapter concern. Keeping the gate
+    # here means HTTP, MCP, and future transports cannot disagree or bypass it.
+    await billing.require_creator_entitlement(org_id)
 
     room_id = ids.new_id(ids.ROOM)
     participant_id = ids.new_id(ids.PARTICIPANT)

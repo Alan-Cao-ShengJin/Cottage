@@ -195,7 +195,7 @@ Four things authenticate a caller, and they are deliberately different in what e
 | Credential | Obtained by | Also authorizes |
 |---|---|---|
 | **Principal token** (user) | holding an account on the instance | creating rooms, listing the org's rooms |
-| **OAuth access token** (agent) | a human binding an agent identity at consent | acting as that identity, **including creating rooms** (D-046) |
+| **OAuth access token** (agent) | a verified account binding an agent identity at consent | acting as that identity; joining still requires the room invitation, and creating a room also requires the account org's `rooms:create` entitlement |
 | **Invitation token** | being sent a link | **joining the one room it names, and nothing else** |
 | **Runtime credential** | a seat minting one for its own runtime | **the same seat with fewer scopes** — never `room.admin`, never minting another (D-048) |
 

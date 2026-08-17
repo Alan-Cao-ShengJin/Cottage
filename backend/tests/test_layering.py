@@ -125,10 +125,22 @@ def test_no_model_provider_sdk_anywhere_in_the_app():
     assert offenders == [], "Agent Rooms performs no inference:\n" + "\n".join(offenders)
 
 
-def test_no_provider_credentials_in_config():
-    """A provider key appearing in config would be a design regression (CLAUDE.md)."""
+def test_no_model_provider_credentials_in_config():
+    """Inference credentials in config would be a design regression (CLAUDE.md).
+
+    Coordination infrastructure may need operational providers such as outbound email or
+    billing; this guard is specifically the no-server-side-inference invariant.
+    """
     config = (APP / "config.py").read_text(encoding="utf-8").lower()
-    for needle in ("openai_api_key", "anthropic_api_key", "api_key", "model_name"):
+    for needle in (
+        "openai_api_key",
+        "anthropic_api_key",
+        "gemini_api_key",
+        "mistral_api_key",
+        "model_api_key",
+        "llm_api_key",
+        "model_name",
+    ):
         assert needle not in config, f"config.py must not carry `{needle}`"
 
 

@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Request
 
-from ..core import rooms, store
+from ..config import settings
+from ..core import accounts, rooms, store
 from ..core.errors import Forbidden, Unauthenticated
 from ..domain.room import Participant
 
@@ -26,14 +27,24 @@ def _bearer(authorization: str | None, explicit: str | None) -> str:
 
 
 async def current_principal(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
     x_arp_token: Annotated[str | None, Header()] = None,
 ) -> rooms.Principal:
-    """An org-level principal: a user or an agent identity. Not yet room-scoped."""
-    return await rooms.authenticate_principal(_bearer(authorization, x_arp_token))
+    """An org-level principal from an API bearer or the signed-in browser session."""
+    token = x_arp_token
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    if token:
+        return await rooms.authenticate_principal(token)
+    session = await accounts.load_session(request.cookies.get("cottage_session"))
+    if session is None:
+        raise Unauthenticated("Sign in to Cottage or send an Authorization bearer token.")
+    return rooms.Principal(kind="user", org_id=session.user.org_id, user=session.user)
 
 
 async def join_credential(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
     x_arp_token: Annotated[str | None, Header()] = None,
 ) -> rooms.Principal | rooms.InvitationCredential:
@@ -48,7 +59,17 @@ async def join_credential(
     invitation is only meaningful here. A token that is neither fails as unauthenticated
     with the same message either way, so probing learns nothing about which kind it was.
     """
-    token = _bearer(authorization, x_arp_token)
+    if settings.require_account_for_join:
+        return await current_principal(request, authorization, x_arp_token)
+
+    token = x_arp_token
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    if not token:
+        session = await accounts.load_session(request.cookies.get("cottage_session"))
+        if session is not None:
+            return rooms.Principal(kind="user", org_id=session.user.org_id, user=session.user)
+        raise Unauthenticated("Missing account session or bearer token.")
     try:
         return await rooms.authenticate_principal(token)
     except Unauthenticated:

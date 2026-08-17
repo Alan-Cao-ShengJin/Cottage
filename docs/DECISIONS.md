@@ -3262,3 +3262,64 @@ in through a fixture rather than being rewritten, so they keep testing what they
 written to test, and the default has its own tests. Rewriting them to assert the redacted
 form would have quietly converted four cost tests into four disclosure tests and left
 batching unpinned.
+
+## D-065 — Human login authenticates OAuth consent; the principal token does not
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** the hosted authorization flow required a person to retrieve and paste the
+organization principal bearer token. That token is intentionally long, stored only as a hashed
+runtime credential after bootstrap, and suited to API automation—not human memory or a password
+manager. Reusing it in a browser also exposed an all-powerful operational credential to the
+consent surface.
+
+### The decision
+
+Existing account-backed users authenticate to the OAuth consent surface with email/password.
+Passwords are provisioned as Argon2id verifiers, never plaintext. Login creates an opaque,
+hashed, eight-hour browser session; OAuth request state lives in a separate, ten-minute,
+single-use server-side record. Login, consent, and logout require CSRF tokens. Errors are generic
+and failed attempts are throttled by hashed account and IP buckets.
+
+The principal token remains unchanged for API and console administration. It is not accepted by
+the browser authorization flow and no existing OAuth access-token semantics change: a human still
+selects an owned agent identity, PKCE still binds the code, and the resource still binds the
+resulting tokens.
+
+### Why local passwords, for now
+
+This was one already-provisioned Hosted-lite operator, not public account creation. D-066 now
+adds the public lifecycle while retaining local Argon2id credentials. An external
+identity provider would add deployment and recovery dependencies before there is a second human
+account to administer. Self-service signup, reset-email delivery, multi-operator administration,
+and OIDC remain M5. Rotation is deliberately operational: generate a new verifier offline and
+replace `OPERATOR_PASSWORD_HASH`; startup installs it and revokes existing browser sessions.
+
+## D-066 — Account login, room invitation, and creator billing are three separate grants
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** public Cottage users need a familiar IDE login, invitees should remain free, and
+only the party starting coordination should pay. Treating a join token as identity would leave
+hosted MCP clients unauthenticated; treating payment as login would charge collaborators merely
+to participate.
+
+### The decision
+
+Every person may create a free, email-verified account. The MCP OAuth flow binds an IDE to an
+account-owned agent identity. A room invitation separately authorizes that identity to join one
+room. Creating a room is the only paid action and requires the creator organization's
+`rooms:create` entitlement.
+
+The initial organization is personal: one is created for each signup. This matches the current
+one-org-per-user data model without pretending team memberships exist. Shared organizations can
+be added later without changing account OAuth or room invitations.
+
+Stripe is an external fact projected into local authorization. Checkout redirects never grant
+access. Only signature-verified, idempotently processed webhooks update subscription rows and the
+effective entitlement; stale provider events cannot rewind newer state. A lapse blocks new room
+creation after the paid period but never destroys or ejects an existing room.
+
+Hosted mode requires account authentication before an invitation may be redeemed. Cottage/local
+mode retains invitation-only joining as an explicit compatibility policy, not as the hosted
+identity model.

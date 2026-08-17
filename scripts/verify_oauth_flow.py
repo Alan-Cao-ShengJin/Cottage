@@ -4,7 +4,7 @@ Given only a server URL, a client must be able to:
   1. get 401 with a resource_metadata pointer,
   2. discover the protected resource, then the authorization server,
   3. register itself dynamically,
-  4. send a human through consent (scripted here as a form POST),
+  4. sign a human in and send them through consent,
   5. exchange the code with PKCE,
   6. call MCP tools with the resulting token,
   7. and be seen in the room under the identity the human chose — not a name it picked.
@@ -29,6 +29,8 @@ here in the same commit.
 
 Usage (server must already be running with MCP_REQUIRE_AUTH=true):
 
+    $env:OPERATOR_EMAIL = "you@example.com"
+    $env:OPERATOR_PASSWORD = "your password"  # omit to be prompted
     backend\\.venv\\Scripts\\python.exe scripts\\verify_oauth_flow.py <base-url> <principal-token>
 
 Against the live instance, which is where it is most meaningful — the container runs a
@@ -41,8 +43,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import getpass
 import hashlib
 import json
+import os
 import re
 import secrets
 import sys
@@ -52,6 +56,7 @@ import httpx
 
 BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8100").rstrip("/")
 PRINCIPAL = sys.argv[2] if len(sys.argv) > 2 else "dev-owner-token"
+EMAIL = os.getenv("OPERATOR_EMAIL", "dev@example.com")
 REDIRECT = "https://chatgpt.com/aip/callback"
 
 
@@ -73,10 +78,78 @@ def unwrap(result):
     return None
 
 
+def hidden(page: str, name: str) -> str:
+    match = re.search(rf'name="{re.escape(name)}" value="([^"]+)"', page)
+    assert match, f"missing hidden field {name!r}"
+    return match.group(1)
+
+
+async def authorize(
+    http: httpx.AsyncClient,
+    endpoint: str,
+    *,
+    client_id: str,
+    resource: str,
+    verifier: str,
+    password: str,
+    state: str | None = None,
+) -> str:
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+        .rstrip(b"=")
+        .decode()
+    )
+    page = await http.get(
+        endpoint,
+        params={
+            "client_id": client_id,
+            "response_type": "code",
+            "redirect_uri": REDIRECT,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "scope": "agent",
+            "state": state or "",
+            "resource": resource,
+        },
+    )
+    assert page.status_code == 200, page.status_code
+
+    if 'name="password"' in page.text:
+        assert "principal_token" not in page.text
+        logged_in = await http.post(
+            f"{BASE}/oauth/login",
+            data={
+                "csrf_token": hidden(page.text, "csrf_token"),
+                "email": EMAIL,
+                "password": password,
+            },
+        )
+        assert logged_in.status_code == 303, logged_in.text[:400]
+        page = await http.get(f"{BASE}/oauth/consent")
+        assert page.status_code == 200, page.status_code
+
+    assert "cannot rename itself" in page.text
+    submitted = await http.post(
+        f"{BASE}/oauth/authorize",
+        data={
+            "csrf_token": hidden(page.text, "csrf_token"),
+            "new_agent_name": "ChatGPT (Alan)",
+        },
+    )
+    assert submitted.status_code == 302, submitted.text[:400]
+    query = parse_qs(urlparse(submitted.headers["location"]).query)
+    if state is not None:
+        assert query["state"][0] == state
+    return query["code"][0]
+
+
 async def main() -> int:
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
 
+    password = os.getenv("OPERATOR_PASSWORD") or getpass.getpass(
+        f"Password for {EMAIL}: "
+    )
     async with httpx.AsyncClient(timeout=20, follow_redirects=False) as http:
         # -- 1. the challenge that starts discovery --------------------------
         print("1. unauthenticated MCP call")
@@ -98,7 +171,9 @@ async def main() -> int:
         auth_server_url = resource["authorization_servers"][0]
         ok("protected resource", resource["resource"])
 
-        meta = (await http.get(f"{auth_server_url}/.well-known/oauth-authorization-server")).json()
+        meta = (
+            await http.get(f"{auth_server_url}/.well-known/oauth-authorization-server")
+        ).json()
         assert meta["code_challenge_methods_supported"] == ["S256"], meta
         ok("authorization server", meta["issuer"])
 
@@ -116,45 +191,16 @@ async def main() -> int:
         # -- 4. consent (a human does this in a browser) ----------------------
         print("4. consent")
         verifier = secrets.token_urlsafe(48)
-        challenge = (
-            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-            .rstrip(b"=")
-            .decode()
-        )
-        page = await http.get(
+        code = await authorize(
+            http,
             meta["authorization_endpoint"],
-            params={
-                "client_id": client_id,
-                "response_type": "code",
-                "redirect_uri": REDIRECT,
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-                "scope": "agent",
-                "state": "opaque",
-                "resource": resource["resource"],
-            },
+            client_id=client_id,
+            resource=resource["resource"],
+            verifier=verifier,
+            password=password,
+            state="opaque",
         )
-        assert page.status_code == 200, page.status_code
-        assert "cannot rename itself" in page.text
-        ok("consent screen rendered, states the identity binding")
-
-        submitted = await http.post(
-            f"{BASE}/oauth/authorize",
-            data={
-                "principal_token": PRINCIPAL,
-                "client_id": client_id,
-                "redirect_uri": REDIRECT,
-                "code_challenge": challenge,
-                "scope": "agent",
-                "state": "opaque",
-                "resource": resource["resource"],
-                "new_agent_name": "ChatGPT (Alan)",
-            },
-        )
-        assert submitted.status_code == 302, submitted.text[:400]
-        query = parse_qs(urlparse(submitted.headers["location"]).query)
-        code = query["code"][0]
-        assert query["state"][0] == "opaque"
+        ok("password login and consent bound the identity")
         ok("code issued, bound to 'ChatGPT (Alan)'")
 
         # -- 5. token exchange ------------------------------------------------
@@ -218,24 +264,14 @@ async def main() -> int:
         # -- 6. a clean run, then use the token over MCP -----------------------
         print("6. fresh authorization, then MCP with the token")
         verifier = secrets.token_urlsafe(48)
-        challenge = (
-            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-            .rstrip(b"=")
-            .decode()
+        code = await authorize(
+            http,
+            meta["authorization_endpoint"],
+            client_id=client_id,
+            resource=resource["resource"],
+            verifier=verifier,
+            password=password,
         )
-        submitted = await http.post(
-            f"{BASE}/oauth/authorize",
-            data={
-                "principal_token": PRINCIPAL,
-                "client_id": client_id,
-                "redirect_uri": REDIRECT,
-                "code_challenge": challenge,
-                "scope": "agent",
-                "resource": resource["resource"],
-                "new_agent_name": "ChatGPT (Alan)",
-            },
-        )
-        code = parse_qs(urlparse(submitted.headers["location"]).query)["code"][0]
         tokens = (
             await http.post(
                 meta["token_endpoint"],

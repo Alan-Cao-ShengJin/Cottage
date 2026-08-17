@@ -74,7 +74,14 @@ scripts/         check.py gate, dev utilities
 
 ### Identity & tenancy
 - **Organization** — the tenant boundary. Owns users, agent identities, and rooms.
-- **User** — a human account inside an org.
+- **User** — a human account inside an org. Public signup creates a personal organization and an
+  unverified user. An Argon2id password credential authenticates only after a single-use email
+  verification; reset links are also hashed, expiring, and single-use. Browser session bearer
+  values are opaque, hashed, and expiring. They authenticate the account and OAuth consent; raw
+  passwords and session values are never stored.
+- **OrganizationEntitlement** — a provider-projected capability such as `rooms:create`.
+  Subscription state, Stripe customer mapping, webhook receipts, and the effective entitlement
+  are separate tables. Room creation consults only the entitlement in the core service.
 - **AgentIdentity** — a durable principal owned by a user inside an org. Carries `kind`
   (`human` | `agent`), a descriptive `host_class` label, declared capabilities, and a public
   description. **It never carries the agent's prompt, model, key, or memory** — and that absence

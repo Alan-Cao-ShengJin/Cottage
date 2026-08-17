@@ -714,6 +714,12 @@ async def _resolve_identity(
         # we know whether the caller was authenticated.
         return principal.identity, principal.identity.display_name
 
+    if settings.require_account_for_join:
+        raise Unauthenticated(
+            "Sign in to Cottage when connecting this MCP server before joining a room. "
+            "The account is free; the invitation still decides which room you may enter."
+        )
+
     credential = await rooms.authenticate_invitation(invitation_token)
     identity = await rooms.provision_guest_identity(
         credential,

@@ -146,13 +146,38 @@ class Settings:
     #: this switch cannot quietly leave a reachable endpoint open.
     mcp_require_auth: bool = field(default_factory=lambda: _bool("MCP_REQUIRE_AUTH", False))
 
+    # --- hosted accounts and billing -----------------------------------
+    #: Hosted commercial mode: every join arrives through an account-bound OAuth token.
+    #: Kept off by default for Cottage/local compatibility; fly.toml enables it.
+    require_account_for_join: bool = field(
+        default_factory=lambda: _bool("REQUIRE_ACCOUNT_FOR_JOIN", False)
+    )
+    #: Enforce the rooms:create entitlement in the shared service used by every adapter.
+    enforce_creator_subscription: bool = field(
+        default_factory=lambda: _bool("ENFORCE_CREATOR_SUBSCRIPTION", False)
+    )
+    public_signup_enabled: bool = field(
+        default_factory=lambda: _bool("PUBLIC_SIGNUP_ENABLED", False)
+    )
+    resend_api_key: str = field(default_factory=lambda: os.getenv("RESEND_API_KEY", "").strip())
+    email_from: str = field(
+        default_factory=lambda: os.getenv("EMAIL_FROM", "Cottage <onboarding@resend.dev>").strip()
+    )
+    stripe_secret_key: str = field(
+        default_factory=lambda: os.getenv("STRIPE_SECRET_KEY", "").strip()
+    )
+    stripe_webhook_secret: str = field(
+        default_factory=lambda: os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+    )
+    stripe_creator_price_id: str = field(
+        default_factory=lambda: os.getenv("STRIPE_CREATOR_PRICE_ID", "").strip()
+    )
+
     # --- the instance operator ------------------------------------------
     #: Seed an org, a user, and a principal token for that user at boot.
     #:
-    #: This is deliberately not "dev only". On a Hosted-lite instance (D-020) it *is* the
-    #: identity model: one operator creates rooms, and everyone else is invited — an
-    #: invitation token is the invitee's whole credential, so no account is needed to join.
-    #: Multi-operator login is M5, wanted only when a second person must create rooms here.
+    #: This is deliberately not "dev only": it remains a local administration/recovery
+    #: principal. Commercial hosted users authenticate through public accounts (D-066).
     #:
     #: What makes that safe is not this flag but `check_public_safety`: a publicly reachable
     #: instance may not run on the *published* default token. So the rule is about secrecy,
@@ -160,6 +185,12 @@ class Settings:
     bootstrap_operator: bool = field(default_factory=lambda: _bool("BOOTSTRAP_OPERATOR", True))
     operator_token: str = field(
         default_factory=lambda: os.getenv("OPERATOR_TOKEN", "dev-owner-token")
+    )
+    #: Argon2id verifier generated offline by scripts/hash_password.py. A verifier is still
+    #: sensitive because it can be attacked offline, so deployments provide it as a secret.
+    #: An empty value leaves browser login unconfigured without weakening bearer-token auth.
+    operator_password_hash: str = field(
+        default_factory=lambda: os.getenv("OPERATOR_PASSWORD_HASH", "").strip()
     )
     #: Who that operator is. Worth configuring on a deployed instance: in a cross-company
     #: room the org name is one of the few fields deliberately *not* minimised away, so it
@@ -193,6 +224,10 @@ class Settings:
         would break the layering rule.
         """
         return f"{self.public_base_url.rstrip('/')}/mcp"
+
+    @property
+    def account_url(self) -> str:
+        return f"{self.public_base_url.rstrip('/')}/account"
 
     @property
     def is_publicly_reachable(self) -> bool:
@@ -260,6 +295,20 @@ UNSAFE_PUBLIC_MCP = (
     "The MCP endpoint would accept tool calls from anyone who found the URL. Set "
     "MCP_REQUIRE_AUTH=true so clients must complete the OAuth flow, or keep "
     "PUBLIC_BASE_URL on localhost."
+)
+
+UNSAFE_PUBLIC_SIGNUP_EMAIL = (
+    "Refusing to start: public signup is enabled on a reachable instance but "
+    "RESEND_API_KEY is missing.\n\n"
+    "Without outbound email, new accounts cannot verify and can never sign in. Set "
+    "RESEND_API_KEY and EMAIL_FROM, or disable PUBLIC_SIGNUP_ENABLED."
+)
+
+UNSAFE_PUBLIC_BILLING = (
+    "Refusing to start: creator subscriptions are enforced but Stripe is not fully "
+    "configured.\n\n"
+    "Set STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and STRIPE_CREATOR_PRICE_ID, or "
+    "disable ENFORCE_CREATOR_SUBSCRIPTION."
 )
 
 UNDECLARED_PUBLIC_BASE_URL = (
@@ -335,6 +384,16 @@ def check_public_safety(config: Settings) -> None:
         raise RuntimeError(UNSAFE_PUBLIC_OPERATOR)
     if not config.mcp_require_auth:
         raise RuntimeError(UNSAFE_PUBLIC_MCP)
+    if config.public_signup_enabled and not config.resend_api_key:
+        raise RuntimeError(UNSAFE_PUBLIC_SIGNUP_EMAIL)
+    if config.enforce_creator_subscription and not all(
+        (
+            config.stripe_secret_key,
+            config.stripe_webhook_secret,
+            config.stripe_creator_price_id,
+        )
+    ):
+        raise RuntimeError(UNSAFE_PUBLIC_BILLING)
 
 
 settings = Settings()

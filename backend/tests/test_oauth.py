@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import secrets
 
 import httpx
 import pytest
 
 from app.api.oauth import authorization_server_metadata, protected_resource_metadata
-from app.core import oauth, rooms
+from app.core import accounts, oauth, rooms
 from app.core.errors import Forbidden, Unauthenticated
 from app.core.oauth import OAuthError
 from app.db import database as db
@@ -33,6 +34,7 @@ from app.util import iso_in
 pytestmark = pytest.mark.asyncio
 
 REDIRECT = "https://chatgpt.com/aip/callback"
+TEST_PASSWORD = "correct horse battery staple"
 
 
 def _pkce() -> tuple[str, str]:
@@ -54,7 +56,7 @@ async def registered(fresh_db):
 
 @pytest.fixture
 async def owner(fresh_db, org):
-    """A human with a principal token, as the consent screen requires."""
+    """The account owner; its principal token remains useful outside browser consent."""
     org_id, user_id = org
     token = await rooms.issue_principal_token(
         subject_kind="user", subject_id=user_id, org_id=org_id, label="test"
@@ -471,53 +473,48 @@ async def test_a_human_cannot_authorize_an_identity_they_do_not_own(fresh_db, or
         await oauth.load_identity_for_user(someone_elses.id, owner["user_id"])
 
 
-async def test_consent_requires_a_user_principal_not_an_agent_token(registered, owner):
-    """An agent must not be able to authorize another agent."""
-    identity = await rooms.ensure_identity(
-        org_id=owner["org_id"], owner_user_id=owner["user_id"], display_name="Agent A"
-    )
-    agent_token = await rooms.issue_principal_token(
-        subject_kind="agent_identity",
-        subject_id=identity.id,
-        org_id=owner["org_id"],
-        label="agent",
-    )
+def _hidden_csrf(page: str) -> str:
+    match = re.search(r'name="csrf_token" value="([^"]+)"', page)
+    assert match is not None
+    return match.group(1)
+
+
+async def _login_browser(client, registered, owner, *, state: str = "xyz") -> str:
+    await accounts.set_password_hash(owner["user_id"], accounts.hash_password(TEST_PASSWORD))
     _, challenge = _pkce()
+    started = await client.get(
+        "/oauth/authorize",
+        params={
+            "client_id": registered.client_id,
+            "response_type": "code",
+            "redirect_uri": REDIRECT,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "scope": "agent",
+            "state": state,
+        },
+    )
+    assert started.status_code == 200
+    assert 'name="principal_token"' not in started.text
+    logged_in = await client.post(
+        "/oauth/login",
+        data={
+            "email": "owner@acme.test",
+            "password": TEST_PASSWORD,
+            "csrf_token": _hidden_csrf(started.text),
+        },
+        follow_redirects=False,
+    )
+    assert logged_in.status_code == 303
+    consent = await client.get(logged_in.headers["location"])
+    assert consent.status_code == 200
+    return consent.text
 
-    async with await _client() as client:
-        response = await client.post(
-            "/oauth/authorize",
-            data={
-                "principal_token": agent_token,
-                "client_id": registered.client_id,
-                "redirect_uri": REDIRECT,
-                "code_challenge": challenge,
-                "scope": "agent",
-                "new_agent_name": "Sneaky",
-            },
-        )
-    assert response.status_code == 400
-    assert "cannot authorize another agent" in response.text
 
-
-async def test_consent_screen_states_what_the_client_will_be_able_to_do(registered):
+async def test_consent_screen_states_what_the_client_will_be_able_to_do(registered, owner):
     """A consent screen that does not say what it grants is a speed bump."""
-    _, challenge = _pkce()
     async with await _client() as client:
-        response = await client.get(
-            "/oauth/authorize",
-            params={
-                "client_id": registered.client_id,
-                "response_type": "code",
-                "redirect_uri": REDIRECT,
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-                "scope": "agent",
-                "state": "xyz",
-            },
-        )
-    assert response.status_code == 200
-    page = response.text
+        page = await _login_browser(client, registered, owner)
     assert "ChatGPT" in page
     assert "cannot rename itself" in page
     assert "join token" in page.lower()
@@ -545,17 +542,12 @@ async def test_invalid_authorize_request_does_not_redirect(registered):
 
 
 async def test_successful_consent_redirects_with_a_code_and_state(registered, owner):
-    _, challenge = _pkce()
     async with await _client() as client:
+        page = await _login_browser(client, registered, owner, state="opaque-state")
         response = await client.post(
             "/oauth/authorize",
             data={
-                "principal_token": owner["token"],
-                "client_id": registered.client_id,
-                "redirect_uri": REDIRECT,
-                "code_challenge": challenge,
-                "scope": "agent",
-                "state": "opaque-state",
+                "csrf_token": _hidden_csrf(page),
                 "new_agent_name": "ChatGPT (Alan)",
             },
             follow_redirects=False,

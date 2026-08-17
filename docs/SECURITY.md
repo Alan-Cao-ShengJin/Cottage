@@ -179,7 +179,10 @@ such a client cannot attach at all.
 | `/.well-known/oauth-protected-resource` | RFC 9728 — names the authorization server guarding `/mcp` |
 | `/.well-known/oauth-authorization-server` | RFC 8414 — endpoint metadata |
 | `/oauth/register` | RFC 7591 dynamic client registration, public clients only |
-| `/oauth/authorize` | consent screen (GET) and submission (POST) |
+| `/oauth/authorize` | begin authorization (GET) and submit consent (POST) |
+| `/oauth/login` | email/password authentication for an authorization flow |
+| `/oauth/consent` | resume consent with an authenticated browser session |
+| `/oauth/logout` | revoke the current browser session |
 | `/oauth/token` | authorization-code exchange and refresh rotation |
 | `/oauth/revoke` | RFC 7009 |
 
@@ -191,6 +194,13 @@ such a client cannot attach at all.
   display name is what other participants trust. The consent screen refuses an identity the
   consenting human does not own, and refuses an agent token outright (an agent must not
   authorize another agent).
+- **The browser authenticates the human, not the agent.** Passwords are stored only as
+  Argon2id verifiers. Successful login creates a random, hashed, eight-hour browser session in
+  an `HttpOnly`, `SameSite=Lax` cookie (`Secure` on public deployments). The OAuth request stays
+  server-side in a separate ten-minute, single-use flow record; login, consent, and logout are
+  CSRF-protected. Generic failures and hashed account/IP throttling avoid disclosing whether an
+  email exists and slow online guessing. The organization principal token is not accepted by the
+  browser flow.
 - **Public clients, so PKCE is mandatory.** No client secret is issued because there is
   nowhere safe to keep one. `S256` only; `plain` is refused rather than tolerated, and the
   metadata advertises only `S256` so a client is not invited to try.
@@ -225,8 +235,26 @@ open the endpoint.
   which is why the startup guard, not documentation, is what prevents that.
 - **Access tokens are opaque and checked against the database on every request.** Simple and
   revocable, but it means no stateless verification and one read per call.
-- **The consent screen authenticates with a principal token pasted into a form.** Adequate
-  for development; a real login belongs to M5.
+- **Public accounts use local credentials.** Self-service signup requires email verification;
+  password reset and verification links are random, stored only as hashes, expire, and are
+  single-use. Reset revokes every browser session for that user. Delivery is through Resend, and
+  public startup fails closed if signup is enabled without an API key.
+- **External identity providers remain future work.** Local Argon2id credentials are the current
+  account authority; OIDC/social login can be added without changing OAuth client tokens.
+
+## 8.1 Billing is authorization, not authentication
+
+Every verified account may authorize an MCP client and join a room for which it has a valid
+invitation. Creating a room is the separate `rooms:create` organization entitlement. The shared
+room service checks it, so HTTP and MCP adapters cannot bypass or disagree about billing.
+
+Stripe Checkout redirects are never trusted as payment evidence. Only a webhook whose raw body
+passes Stripe signature verification may update subscription state. Webhook event IDs are stored
+for idempotency, older subscription events cannot overwrite newer provider state, and only
+`active` or `trialing` subscriptions grant the entitlement through their current period end.
+Cancellation or lapse blocks future room creation; it does not eject participants or destroy
+existing rooms. Billing portal and checkout forms require the logged-in browser session's CSRF
+token.
 
 ## 9. Operational security
 

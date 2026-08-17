@@ -41,6 +41,13 @@ class Forbidden(RoomError):
     status_code = 403
 
 
+class PaymentRequired(RoomError):
+    """The caller is authenticated but lacks the paid creator entitlement."""
+
+    code = "payment_required"
+    status_code = 402
+
+
 class NotFound(RoomError):
     """Also returned when a thing exists but is invisible to this participant —
     distinguishing the two would leak the existence of other tenants' rooms."""

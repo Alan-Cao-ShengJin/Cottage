@@ -21,6 +21,11 @@ primary_region = "sin"
   # Any agent host reaching a public URL must present an OAuth token. The startup guard
   # refuses to boot a reachable instance without this, so it is stated rather than assumed.
   MCP_REQUIRE_AUTH = "true"
+  # Internal beta: accounts are free and required to join. Room creation remains free
+  # until Stripe is configured and ENFORCE_CREATOR_SUBSCRIPTION is deliberately enabled.
+  PUBLIC_SIGNUP_ENABLED = "true"
+  REQUIRE_ACCOUNT_FOR_JOIN = "true"
+  ENFORCE_CREATOR_SUBSCRIPTION = "false"
   # PUBLIC_BASE_URL and OPERATOR_TOKEN are deliberately absent — see docs/DEPLOY.md. The
   # first is per-app, the second is a secret and belongs in `fly secrets`, never in a file
   # that gets committed.

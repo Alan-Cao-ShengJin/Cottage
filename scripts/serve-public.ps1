@@ -9,7 +9,7 @@
       2. start a tunnel in another and copy its URL,
       3. set PUBLIC_BASE_URL to that URL and restart the server -- in a shell that also
          has the token, which the second shell did not,
-      4. remember the token to paste at the consent screen.
+      4. sign in at the consent screen with an email and password.
 
     This does all of it: starts the tunnel, waits for the URL, exports the environment the
     server needs, starts the server, and prints the two values you paste into ChatGPT.
@@ -27,6 +27,8 @@
 param(
     [int]$Port = 8000,
     [string]$Token = "",
+    [string]$Email = "dev@example.com",
+    [string]$PasswordHash = "",
     [switch]$SkipVerify,
     # cloudflare quick tunnels need no account but do go dead under you: the process stays
     # alive while the edge stops forwarding, so the URL times out with no local symptom.
@@ -60,7 +62,21 @@ if (-not $Token) {
     $Token = -join ((48..57) + (97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })
 }
 $env:OPERATOR_TOKEN = $Token
+$env:OPERATOR_EMAIL = $Email
 $env:MCP_REQUIRE_AUTH = 'true'
+
+# Store only an Argon2id verifier. If one was not supplied, ask interactively; the helper
+# repeats the password and never writes the plaintext to stdout or shell history.
+if (-not $PasswordHash) {
+    Write-Host 'Choose the password for the OAuth consent screen.' -ForegroundColor Cyan
+    $PasswordHash = (& $python (Join-Path $root 'scripts\hash_password.py') |
+        Select-Object -Last 1).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $PasswordHash) {
+        Write-Host 'Could not create the password verifier.' -ForegroundColor Yellow
+        exit 1
+    }
+}
+$env:OPERATOR_PASSWORD_HASH = $PasswordHash
 
 # --- the port must be free BEFORE we burn a tunnel URL -----------------------
 # Learned the hard way: with the port already taken, the server died at startup, the
@@ -171,8 +187,9 @@ try {
     Write-Host "    Connection (Server URL) : $publicUrl/mcp"
     Write-Host '    Authentication          : OAuth   (leave discovery alone)'
     Write-Host ''
-    Write-Host '  Paste at the consent screen ("prove it is you"):' -ForegroundColor Cyan
-    Write-Host "    $Token"
+    Write-Host '  Sign in at the consent screen:' -ForegroundColor Cyan
+    Write-Host "    Email : $Email"
+    Write-Host '    Password: the password you chose when this script started'
     Write-Host ''
     Write-Host '  Then name the identity, e.g. "ChatGPT (Alan)". It cannot rename itself.' -ForegroundColor DarkGray
     Write-Host ''

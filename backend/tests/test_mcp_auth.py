@@ -123,6 +123,21 @@ async def test_garbage_token_gets_401_invalid_token(fresh_db):
     assert 'error="invalid_token"' in response.headers.get("www-authenticate", "")
 
 
+async def test_hosted_account_policy_refuses_invitation_as_mcp_auth(make_room):
+    room = await make_room()
+    original = settings.require_account_for_join
+    object.__setattr__(settings, "require_account_for_join", True)
+    try:
+        with require_auth(True):
+            response = await _through_middleware(
+                token=room.join_token, audience="https://rooms.test/mcp"
+            )
+    finally:
+        object.__setattr__(settings, "require_account_for_join", original)
+    assert response.status_code == 401
+    assert "invalid_token" in response.text
+
+
 async def test_non_bearer_authorization_is_treated_as_absent(fresh_db):
     with require_auth(True):
         async with await _client() as client:

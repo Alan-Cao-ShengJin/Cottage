@@ -156,3 +156,7 @@ def test_descriptor_advertises_the_configured_public_url() -> None:
     assert body["mcp"] == original.mcp_resource_url
     assert body["publicly_reachable"] == original.is_publicly_reachable
     assert body["mcp_requires_auth"] == original.mcp_require_auth
+    assert body["account"] == original.account_url
+    assert body["account_required_for_join"] == original.require_account_for_join
+    assert body["public_signup_enabled"] == original.public_signup_enabled
+    assert body["creator_subscription_required"] == original.enforce_creator_subscription

@@ -51,7 +51,8 @@ start** with it once `PUBLIC_BASE_URL` is public. It also refuses to start publi
 ```powershell
 $env:OPERATOR_TOKEN = -join ((48..57)+(97..122) | Get-Random -Count 40 | % {[char]$_})
 $env:MCP_REQUIRE_AUTH = "true"
-$env:OPERATOR_TOKEN     # keep this: it is what you paste at the consent screen
+$env:OPERATOR_EMAIL = "you@example.com"
+$env:OPERATOR_PASSWORD_HASH = & backend\.venv\Scripts\python.exe scripts\hash_password.py
 ```
 
 ## 2. Open a tunnel
@@ -96,7 +97,8 @@ Tick the risk acknowledgement and create. ChatGPT will register itself, then sen
 consent screen.
 
 **On the consent screen:**
-1. Paste your `OPERATOR_TOKEN` (this proves you are you — an agent token is refused).
+1. Sign in to your Cottage account. If you do not have one, create it for free and verify the
+   email; when signup began from OAuth, verification returns you to the authorization flow.
 2. Name the identity ChatGPT will act as, e.g. `ChatGPT (Alan)`. **This is the binding that
    matters**: it becomes ChatGPT's identity in every room and it cannot rename itself.
 3. The screen states what the client will and will not be able to do. It cannot list your
@@ -143,8 +145,8 @@ never do unprompted, and its leases expire mid-task.
 - **Quick-tunnel URLs rotate** on every restart. When it changes: update `PUBLIC_BASE_URL`,
   restart, and re-add the plugin — the old tokens are bound to the old audience and will be
   refused with 403 by design.
-- **The consent screen takes a pasted token rather than a login.** Fine for development; a
-  real login is M5.
+- **There is no self-service password reset yet.** Rotate `OPERATOR_PASSWORD_HASH` with the
+  offline helper; changing it revokes existing browser sessions.
 - **Consent binds an identity; it does not verify the client is what it claims.** It proves a
   human authorized *this* client to act as *that* identity, which is what makes the display
   name trustworthy inside a room.
@@ -160,7 +162,7 @@ never do unprompted, and its leases expire mid-task.
 | Server refuses to start | A startup guard fired: default token, or `MCP_REQUIRE_AUTH` off, with a public URL. The message says which |
 | `403 ... different resource` | Token minted for a previous tunnel URL. Re-add the plugin |
 | `401` on every call | `MCP_REQUIRE_AUTH=true` and the client has not completed OAuth. Check the discovery documents are reachable |
-| Consent rejects your token | You pasted an agent token, not a user principal token |
+| Login always fails | `OPERATOR_EMAIL` does not match, or no `OPERATOR_PASSWORD_HASH` was configured before startup |
 | `Errno 10048` on startup | Port already held by a leftover server. `serve-public.ps1` now names the PID before opening a tunnel |
 
 ### Cloudflare quick tunnels go dead while looking alive

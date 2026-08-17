@@ -2,7 +2,7 @@
 
 Ordered milestones. Update **before** implementing and **after** every meaningful phase.
 
-_Last updated: 2026-08-15._
+_Last updated: 2026-08-17._
 
 ---
 
@@ -139,6 +139,75 @@ shipped, against the constraints set out below:
   invitation stops future *joins*; it does not eject participants who already joined. Removing
   someone is `participant.removed`, a separate admin act — conflating them would mean revoking
   a 50-use link silently kicks everyone who used it.
+
+### M2.0c — Human login at OAuth consent, without a memorized bearer token
+**Implemented locally (2026-08-17); live wire verification pending deployment.** A real Codex
+connection reached the hosted OAuth consent screen and
+exposed the remaining operator-side usability failure: the screen asks a human to remember and
+paste the long-lived organization principal token. The token is intentionally unrecoverable from
+Fly secrets and therefore functions as a deployment secret, not a usable human authenticator.
+
+This slice replaces that form field with an email/password login for existing account-backed
+users. It is provider-neutral and leaves the MCP/OAuth boundary unchanged: the browser session
+authenticates the human, the human still binds one owned agent identity at consent, and the client
+still receives only the existing PKCE-protected, audience-bound access and refresh tokens.
+
+Scope, deliberately narrower than M5 OIDC and multi-tenant administration:
+
+- Argon2id password verifiers stored separately from users; no plaintext password in config or the
+  database;
+- opaque, hashed, expiring browser sessions with `Secure`/`HttpOnly`/`SameSite=Lax` cookies and
+  CSRF protection on consent and logout;
+- generic login failures plus account/IP throttling so the page is not an email oracle or an
+  online password guesser;
+- an offline helper which prompts for the password and prints the verifier to set as the
+  `OPERATOR_PASSWORD_HASH` deployment secret;
+- the legacy principal token remains an API/operational credential but is removed from the human
+  consent path;
+- no public signup, password-reset email delivery, or external identity provider in this slice.
+  Those require an account-provisioning and mail/IdP choice and remain M5 work.
+
+The exit evidence is an adapter-level browser flow: unauthenticated authorize → login → owned
+identity consent → authorization code exchange, with wrong-password throttling, CSRF rejection,
+cross-owner identity refusal, logout, expiry, and all existing OAuth replay/resource tests green.
+
+Delivered in `core/accounts.py`, the OAuth adapter, additive SQLite tables, the offline
+`scripts/hash_password.py` helper, and the end-to-end verifier. The full backend suite is green
+locally (494 passed, 11 skipped), and a disposable real-server run completed discovery, password
+login, consent, PKCE, token replay defense, and an authenticated MCP join. The hosted Python 3.12
+path remains explicitly unverified until the next authorized deployment and live
+`verify_oauth_flow.py` run.
+
+### M2.0d — Free hosted accounts; subscription-gated room creation
+**Implemented locally; production activation pending (2026-08-17).** Hosted MCP connections must begin with a Cottage account login.
+Authentication, invitation authorization, and billing are separate grants:
+
+- every person may create a free account, verify their email, recover their password, and
+  authorize MCP clients through the existing PKCE flow;
+- an OAuth-bound account identity plus a live room invitation may join and coordinate for free;
+- only the room creator needs a paid monthly entitlement, enforced in the shared room service so
+  HTTP and MCP cannot disagree;
+- checkout success pages never grant access. Signed, idempotently processed Stripe webhooks
+  project subscription state into a local `rooms:create` entitlement;
+- subscription lapse stops new room creation after the paid period. It does not eject
+  participants or silently destroy room data;
+- Hosted mode requires account-backed joining; permissive invitation-only joining remains an
+  explicit Cottage/local compatibility mode.
+
+The initial paid entity is each signup's personal organization. That keeps today's one-org-per-user
+model honest while leaving team memberships as a later additive step. Production activation
+requires a Stripe secret/webhook secret/price and an outbound-email provider/domain; tests use
+deterministic local adapters and never contact either provider.
+
+Delivered in the account browser routes, account and mail services, Stripe subscription
+projection, shared room-creation entitlement gate, hosted MCP/HTTP auth policy, additive SQLite
+tables, and the token-free console. Focused account/billing/MCP tests are green. Remaining work is
+operational rather than code: provide Resend, deploy, and verify a real email, OAuth
+authorization, and free invited coordination over the public wire; then add Stripe and verify
+test-mode checkout/webhook plus paid room creation before commercial launch.
+
+Internal-beta rollout deliberately precedes billing: deploy with creator enforcement off, verify
+real signup/OAuth/invited coordination first, then configure Stripe and enable the existing gate.
 
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
@@ -486,8 +555,9 @@ Deferred here from M2.5 by D-020, and deliberately demand-driven:
 - **PostgreSQL** — closes the D-011 blocker. Needed the moment one instance is not enough, or
   a volume is not durable enough. Every invariant is already engine-neutral, so this is a
   driver swap plus a migration path, not a redesign.
-- **OIDC login** — needed the moment more than one person must create rooms on the same
-  instance. Until then the operator credential is sufficient and honest.
+- **OIDC login and account administration** — still needed when more than one organization or an
+  external identity provider must manage users on the same instance. M2.0c adds local login for
+  already-provisioned users; it does not add signup, federation, or an admin lifecycle.
 - **Horizontal scale-out** — blocked on PostgreSQL, since the notify-then-read bus is currently
   in-process. Multi-instance needs the notification to cross processes (LISTEN/NOTIFY or
   equivalent). The design already tolerates a *dropped* notification — it costs latency, not
@@ -514,9 +584,10 @@ Deepen M2.4: richer digests, pasteable turn output, lease tuning for `attended` 
   review, and the concurrency invariants (I1, I3) run against Postgres. Deferred to M5 by
   D-020 — it is a scale blocker, not a launch blocker.
 - **A2A is a 5-line placeholder.**
-- **Consent takes a pasted principal token, not a login.** This caps Hosted-lite at one
-  operator: that person can create rooms, and anyone they invite can join without an account.
-  Blocking only when a second person needs to create rooms on the same instance (M5).
+- **Password recovery and account provisioning are not yet product surfaces.** M2.0c removes the
+  pasted principal token from consent for an already-provisioned operator, but adding a second
+  person still requires an explicit admin/invitation lifecycle and an email provider or external
+  IdP (M5).
 - **Hosted-lite is single-instance.** SQLite on a volume plus an in-process bus means one
   machine. Vertical scaling only until M5.
 - **The dev venv is Python 3.10; production is 3.12.** This skew already produced one bug that

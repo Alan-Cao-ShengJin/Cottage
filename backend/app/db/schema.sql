@@ -95,6 +95,129 @@ CREATE TABLE IF NOT EXISTS principal_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_tokens_subject ON principal_tokens(subject_kind, subject_id);
 
+-- Human authentication is deliberately separate from principal bearer tokens. A password
+-- establishes a short-lived browser session; the OAuth client still receives only its own
+-- audience-bound agent access token after consent.
+CREATE TABLE IF NOT EXISTS user_password_credentials (
+    user_id              TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    password_hash        TEXT NOT NULL,
+    created_at           TEXT NOT NULL,
+    password_changed_at  TEXT NOT NULL
+);
+
+-- Session tokens are high-entropy bearers and are stored only as SHA-256 hashes. The CSRF
+-- value is not an authenticator by itself; it is stored so server-rendered forms can submit it
+-- alongside the HttpOnly session cookie.
+CREATE TABLE IF NOT EXISTS web_sessions (
+    token_hash    TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    csrf_token    TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    last_seen_at  TEXT NOT NULL,
+    expires_at    TEXT NOT NULL,
+    revoked_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions(user_id);
+
+-- Account state is separate from `users` so it can be added to an existing Hosted-lite
+-- database without rewriting the original identity table. Bootstrap/provisioned operators
+-- are verified explicitly; public signups remain unusable until their email challenge wins.
+CREATE TABLE IF NOT EXISTS account_status (
+    user_id             TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    email_verified_at   TEXT,
+    disabled_at         TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL
+);
+
+-- Verification and recovery values are high-entropy bearers, stored only as hashes and
+-- consumed with guarded updates. A reset token never doubles as a login session.
+CREATE TABLE IF NOT EXISTS account_action_tokens (
+    token_hash    TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    purpose       TEXT NOT NULL CHECK (purpose IN ('verify_email', 'reset_password')),
+    created_at    TEXT NOT NULL,
+    expires_at    TEXT NOT NULL,
+    consumed_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_action_user
+    ON account_action_tokens(user_id, purpose);
+
+-- One-shot CSRF state for standalone account forms. OAuth has its own request-bound flow;
+-- signup/login/recovery need the same property without pretending an OAuth request exists.
+CREATE TABLE IF NOT EXISTS account_browser_flows (
+    flow_hash     TEXT PRIMARY KEY,
+    purpose       TEXT NOT NULL,
+    csrf_token    TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    expires_at    TEXT NOT NULL,
+    consumed_at   TEXT
+);
+
+-- No email or IP address is retained in the throttle ledger. Each bucket is a hash of a
+-- namespace plus the normalized value, which is sufficient to enforce account- and IP-level
+-- limits without turning this table into an identity log.
+CREATE TABLE IF NOT EXISTS login_attempts (
+    bucket_hash    TEXT PRIMARY KEY,
+    failures       INTEGER NOT NULL DEFAULT 0,
+    first_failed_at TEXT NOT NULL,
+    last_failed_at  TEXT NOT NULL,
+    blocked_until   TEXT
+);
+
+-- ---------------------------------------------------------------------------
+-- Billing and creator entitlements
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS billing_customers (
+    org_id                 TEXT PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
+    provider               TEXT NOT NULL,
+    provider_customer_id   TEXT NOT NULL UNIQUE,
+    created_at             TEXT NOT NULL,
+    updated_at             TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS billing_subscriptions (
+    provider_subscription_id TEXT PRIMARY KEY,
+    org_id                    TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    provider                  TEXT NOT NULL,
+    price_id                  TEXT NOT NULL DEFAULT '',
+    status                    TEXT NOT NULL,
+    current_period_end        TEXT,
+    cancel_at_period_end      INTEGER NOT NULL DEFAULT 0,
+    provider_event_created_at INTEGER NOT NULL DEFAULT 0,
+    created_at                TEXT NOT NULL,
+    updated_at                TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_subscriptions_org
+    ON billing_subscriptions(org_id, status);
+
+-- Generic rather than plan-named: room creation asks for one entitlement, while checkout
+-- and bootstrap provisioning are merely sources that can grant it.
+CREATE TABLE IF NOT EXISTS organization_entitlements (
+    org_id         TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    entitlement    TEXT NOT NULL,
+    source         TEXT NOT NULL,
+    active_until   TEXT,
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (org_id, entitlement, source)
+);
+
+-- Stripe retries and may reorder deliveries. The unique event id makes processing
+-- idempotent; provider_event_created_at on subscriptions prevents an older event from
+-- overwriting newer state.
+CREATE TABLE IF NOT EXISTS billing_webhook_events (
+    provider_event_id TEXT PRIMARY KEY,
+    event_type        TEXT NOT NULL,
+    event_created_at  INTEGER NOT NULL,
+    received_at       TEXT NOT NULL,
+    processed_at      TEXT
+);
+
 -- ---------------------------------------------------------------------------
 -- OAuth 2.1 for MCP clients (docs/SECURITY.md §9)
 -- ---------------------------------------------------------------------------
@@ -133,6 +256,27 @@ CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_oauth_codes_client ON oauth_authorization_codes(client_id);
+
+-- A browser authorization flow holds only a request that already passed OAuth validation.
+-- Keeping it server-side means login and consent forms do not have to trust hidden copies of
+-- redirect URIs, PKCE challenges, or state. The opaque cookie is hashed at rest and expires
+-- before an authorization code would be useful.
+CREATE TABLE IF NOT EXISTS oauth_browser_flows (
+    flow_hash       TEXT PRIMARY KEY,
+    csrf_token      TEXT NOT NULL,
+    client_id       TEXT NOT NULL,
+    redirect_uri    TEXT NOT NULL,
+    code_challenge  TEXT NOT NULL,
+    scope           TEXT NOT NULL DEFAULT '',
+    state           TEXT,
+    resource        TEXT,
+    created_at      TEXT NOT NULL,
+    expires_at      TEXT NOT NULL,
+    consumed_at     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_browser_flows_client
+    ON oauth_browser_flows(client_id);
 
 CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
     token_hash         TEXT PRIMARY KEY,

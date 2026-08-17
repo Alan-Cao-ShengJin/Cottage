@@ -36,7 +36,7 @@ from typing import Any
 
 from ..db import database as db
 from ..domain.identity import AgentIdentity
-from ..util import hash_token, is_past, iso_in, new_token, utcnow_iso
+from ..util import hash_token, is_past, iso_in, new_token, tokens_equal, utcnow_iso
 from . import store
 from .errors import Forbidden, InvalidCommand, Unauthenticated
 
@@ -47,6 +47,7 @@ log = logging.getLogger(__name__)
 CODE_TTL_SECONDS = 300
 ACCESS_TOKEN_TTL_SECONDS = 8 * 3600
 REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 3600
+BROWSER_FLOW_TTL_SECONDS = 10 * 60
 
 #: What a client may ask for. Deliberately coarse: fine-grained scopes belong to the
 #: room's own scope model (`domain.room.Scope`), which is enforced per participant and is
@@ -179,6 +180,16 @@ class AuthorizationRequest:
     resource: str | None
 
 
+@dataclass(frozen=True)
+class BrowserAuthorizationFlow:
+    """A validated OAuth request held server-side while a human logs in and consents."""
+
+    token_hash: str
+    csrf_token: str
+    request: AuthorizationRequest
+    expires_at: str
+
+
 async def validate_authorization_request(
     *,
     client_id: str,
@@ -240,6 +251,78 @@ async def validate_authorization_request(
     )
 
 
+async def create_browser_authorization_flow(
+    request: AuthorizationRequest,
+) -> tuple[str, BrowserAuthorizationFlow]:
+    """Persist a validated request and return the opaque browser cookie value."""
+    flow_token = new_token()
+    csrf_token = new_token()
+    now = utcnow_iso()
+    expires_at = iso_in(BROWSER_FLOW_TTL_SECONDS)
+    await db.execute(
+        """
+        INSERT INTO oauth_browser_flows (
+            flow_hash, csrf_token, client_id, redirect_uri, code_challenge, scope,
+            state, resource, created_at, expires_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            hash_token(flow_token),
+            csrf_token,
+            request.client_id,
+            request.redirect_uri,
+            request.code_challenge,
+            request.scope,
+            request.state,
+            request.resource,
+            now,
+            expires_at,
+        ),
+    )
+    return flow_token, BrowserAuthorizationFlow(
+        token_hash=hash_token(flow_token),
+        csrf_token=csrf_token,
+        request=request,
+        expires_at=expires_at,
+    )
+
+
+async def load_browser_authorization_flow(flow_token: str | None) -> BrowserAuthorizationFlow:
+    """Load and revalidate a live browser flow without trusting form fields."""
+    if not flow_token:
+        raise OAuthError(
+            "invalid_request",
+            "The authorization session is missing or expired. Restart the MCP connection.",
+        )
+    token_hash = hash_token(flow_token)
+    row = await db.fetch_one("SELECT * FROM oauth_browser_flows WHERE flow_hash = ?", (token_hash,))
+    if row is None or row["consumed_at"] or is_past(row["expires_at"]):
+        raise OAuthError(
+            "invalid_request",
+            "The authorization session is missing or expired. Restart the MCP connection.",
+        )
+    request = await validate_authorization_request(
+        client_id=row["client_id"],
+        redirect_uri=row["redirect_uri"],
+        response_type="code",
+        code_challenge=row["code_challenge"],
+        code_challenge_method=ONLY_SUPPORTED_CHALLENGE_METHOD,
+        scope=row["scope"],
+        state=row["state"],
+        resource=row["resource"],
+    )
+    return BrowserAuthorizationFlow(
+        token_hash=token_hash,
+        csrf_token=row["csrf_token"],
+        request=request,
+        expires_at=row["expires_at"],
+    )
+
+
+def browser_flow_csrf_matches(flow: BrowserAuthorizationFlow, candidate: str) -> bool:
+    return bool(candidate) and tokens_equal(hash_token(candidate), hash_token(flow.csrf_token))
+
+
 async def issue_authorization_code(
     request: AuthorizationRequest, *, agent_identity: AgentIdentity
 ) -> str:
@@ -268,6 +351,53 @@ async def issue_authorization_code(
     )
     log.info(
         "issued authorization code for client=%s identity=%s",
+        request.client_id,
+        agent_identity.id,
+    )
+    return code
+
+
+async def issue_authorization_code_for_browser_flow(
+    flow: BrowserAuthorizationFlow, *, agent_identity: AgentIdentity
+) -> str:
+    """Consume the browser flow and issue exactly one code in the same transaction."""
+    code = new_token(32)
+    now = utcnow_iso()
+    request = flow.request
+    async with db.transaction() as tx:
+        affected = await tx.execute(
+            "UPDATE oauth_browser_flows SET consumed_at = ? "
+            "WHERE flow_hash = ? AND consumed_at IS NULL AND expires_at > ?",
+            (now, flow.token_hash, now),
+        )
+        if affected == 0:
+            raise OAuthError(
+                "invalid_request",
+                "The authorization session was already used or expired. Restart the MCP connection.",
+            )
+        await tx.execute(
+            """
+            INSERT INTO oauth_authorization_codes (
+                code_hash, client_id, redirect_uri, code_challenge, code_challenge_method,
+                scope, resource, agent_identity_id, org_id, created_at, expires_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                hash_token(code),
+                request.client_id,
+                request.redirect_uri,
+                request.code_challenge,
+                ONLY_SUPPORTED_CHALLENGE_METHOD,
+                request.scope,
+                request.resource,
+                agent_identity.id,
+                agent_identity.org_id,
+                now,
+                iso_in(CODE_TTL_SECONDS),
+            ),
+        )
+    log.info(
+        "issued authorization code for client=%s identity=%s through browser login",
         request.client_id,
         agent_identity.id,
     )

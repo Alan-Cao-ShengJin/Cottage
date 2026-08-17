@@ -18,16 +18,67 @@ from typing import Annotated, Any
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Form, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from ..config import settings
-from ..core import oauth, rooms
+from ..core import accounts, oauth, rooms
 from ..core.errors import RoomError
 from ..core.oauth import OAuthError
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+SESSION_COOKIE = "cottage_session"
+OAUTH_FLOW_COOKIE = "cottage_oauth_flow"
+
+
+def _browser_headers() -> dict[str, str]:
+    return {
+        "Cache-Control": "no-store",
+        "Pragma": "no-cache",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+    }
+
+
+def _html_page(content: str, *, status_code: int = 200) -> HTMLResponse:
+    return HTMLResponse(content=content, status_code=status_code, headers=_browser_headers())
+
+
+def _redirect(location: str, *, status_code: int = 303) -> RedirectResponse:
+    return RedirectResponse(
+        url=location,
+        status_code=status_code,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
+
+
+def _set_cookie(response: Response, name: str, value: str, *, max_age: int) -> None:
+    response.set_cookie(
+        name,
+        value,
+        max_age=max_age,
+        httponly=True,
+        secure=settings.is_publicly_reachable,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_cookie(response: Response, name: str) -> None:
+    response.delete_cookie(
+        name,
+        httponly=True,
+        secure=settings.is_publicly_reachable,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _remote_address(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
 def mcp_resource_url() -> str:
@@ -139,8 +190,8 @@ async def authorize(
     scope: str | None = Query(None),
     state: str | None = Query(None),
     resource: str | None = Query(None),
-) -> HTMLResponse:
-    """Show the consent screen.
+) -> Response:
+    """Validate the OAuth request, then begin human login and consent.
 
     Validation happens before rendering, and an invalid request is answered directly
     rather than by redirecting — redirecting an unvalidated request is how authorization
@@ -158,76 +209,156 @@ async def authorize(
             resource=resource,
         )
     except OAuthError as exc:
-        return HTMLResponse(
-            status_code=exc.status_code,
-            content=_error_page(exc.error, exc.description),
+        return _html_page(_error_page(exc.error, exc.description), status_code=exc.status_code)
+
+    flow_token, flow = await oauth.create_browser_authorization_flow(auth_request)
+    session = await accounts.load_session(request.cookies.get(SESSION_COOKIE))
+    if session is None:
+        response: Response = _html_page(_login_page(flow))
+    else:
+        identities = await oauth.identities_for_consent(session.user.id)
+        response = _html_page(_consent_page(flow.request, session, identities))
+    _set_cookie(
+        response,
+        OAUTH_FLOW_COOKIE,
+        flow_token,
+        max_age=oauth.BROWSER_FLOW_TTL_SECONDS,
+    )
+    return response
+
+
+@router.post("/oauth/login")
+async def login(
+    request: Request,
+    email: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+    csrf_token: Annotated[str, Form()],
+) -> Response:
+    """Authenticate a human into the already-validated OAuth browser flow."""
+    try:
+        flow = await oauth.load_browser_authorization_flow(request.cookies.get(OAUTH_FLOW_COOKIE))
+    except OAuthError as exc:
+        return _html_page(_error_page(exc.error, exc.description), status_code=exc.status_code)
+    if not oauth.browser_flow_csrf_matches(flow, csrf_token):
+        return _html_page(
+            _error_page("access_denied", "The login form expired. Restart authorization."),
+            status_code=403,
         )
 
-    return HTMLResponse(content=_consent_page(auth_request, request))
+    try:
+        user = await accounts.authenticate_password(email, password, _remote_address(request))
+    except accounts.LoginDenied as exc:
+        status_code = 429 if exc.retry_after else 401
+        failure_response = _html_page(
+            _login_page(
+                flow,
+                error=(
+                    "Incorrect email or password. Try again later."
+                    if exc.retry_after
+                    else "Incorrect email or password."
+                ),
+                email=email,
+            ),
+            status_code=status_code,
+        )
+        if exc.retry_after:
+            failure_response.headers["Retry-After"] = str(exc.retry_after)
+        return failure_response
+
+    session_token, _ = await accounts.create_session(user.id)
+    redirect_response = _redirect("/oauth/consent")
+    _set_cookie(
+        redirect_response,
+        SESSION_COOKIE,
+        session_token,
+        max_age=accounts.SESSION_TTL_SECONDS,
+    )
+    return redirect_response
+
+
+@router.get("/oauth/consent")
+async def consent(request: Request) -> Response:
+    """Render identity consent for the logged-in human and current OAuth flow."""
+    try:
+        flow = await oauth.load_browser_authorization_flow(request.cookies.get(OAUTH_FLOW_COOKIE))
+    except OAuthError as exc:
+        return _html_page(_error_page(exc.error, exc.description), status_code=exc.status_code)
+    session = await accounts.load_session(request.cookies.get(SESSION_COOKIE))
+    if session is None:
+        return _html_page(_login_page(flow))
+    identities = await oauth.identities_for_consent(session.user.id)
+    return _html_page(_consent_page(flow.request, session, identities))
 
 
 @router.post("/oauth/authorize")
 async def authorize_submit(
-    principal_token: Annotated[str, Form()],
-    client_id: Annotated[str, Form()],
-    redirect_uri: Annotated[str, Form()],
-    code_challenge: Annotated[str, Form()],
-    scope: Annotated[str, Form()] = "agent",
-    state: Annotated[str, Form()] = "",
-    resource: Annotated[str, Form()] = "",
+    request: Request,
+    csrf_token: Annotated[str, Form()],
     agent_identity_id: Annotated[str, Form()] = "",
     new_agent_name: Annotated[str, Form()] = "",
 ) -> Any:
-    """Complete consent: authenticate the human, bind an identity, issue a code.
+    """Bind an identity chosen by the logged-in human and issue one code.
 
-    The human proves who they are with an organization principal token, then names the
-    agent identity the client will act as. That binding is the whole point: the access
-    token's subject is chosen here, by the owner, and the client cannot change it later.
+    The browser session authenticates the human. The resulting access token's subject is
+    still chosen here by the owner, and the client cannot change it later.
     """
     try:
-        principal = await rooms.authenticate_principal(principal_token.strip())
-        if principal.user is None:
+        flow = await oauth.load_browser_authorization_flow(request.cookies.get(OAUTH_FLOW_COOKIE))
+        session = await accounts.load_session(request.cookies.get(SESSION_COOKIE))
+        if session is None:
             raise OAuthError(
-                "access_denied",
-                "Consent requires a user principal token, not an agent token — an agent "
-                "cannot authorize another agent.",
-                status_code=403,
+                "access_denied", "Sign in before authorizing this client.", status_code=401
             )
+        if not accounts.csrf_matches(session, csrf_token):
+            raise OAuthError("access_denied", "The consent form expired.", status_code=403)
 
         if new_agent_name.strip():
             identity = await rooms.ensure_identity(
-                org_id=principal.user.org_id,
-                owner_user_id=principal.user.id,
+                org_id=session.user.org_id,
+                owner_user_id=session.user.id,
                 display_name=new_agent_name.strip()[:80],
             )
         elif agent_identity_id:
-            identity = await oauth.load_identity_for_user(agent_identity_id, principal.user.id)
+            identity = await oauth.load_identity_for_user(agent_identity_id, session.user.id)
         else:
             raise OAuthError(
                 "invalid_request", "Choose an existing agent identity or name a new one."
             )
 
-        auth_request = await oauth.validate_authorization_request(
-            client_id=client_id,
-            redirect_uri=redirect_uri,
-            response_type="code",
-            code_challenge=code_challenge,
-            code_challenge_method=oauth.ONLY_SUPPORTED_CHALLENGE_METHOD,
-            scope=scope,
-            state=state or None,
-            resource=resource or None,
-        )
-        code = await oauth.issue_authorization_code(auth_request, agent_identity=identity)
+        code = await oauth.issue_authorization_code_for_browser_flow(flow, agent_identity=identity)
     except (OAuthError, RoomError) as exc:
         error = getattr(exc, "error", getattr(exc, "code", "server_error"))
         description = getattr(exc, "description", getattr(exc, "message", str(exc)))
-        return HTMLResponse(status_code=400, content=_error_page(error, description))
+        status_code = getattr(exc, "status_code", 400)
+        return _html_page(_error_page(error, description), status_code=status_code)
 
     params = {"code": code}
-    if state:
-        params["state"] = state
-    separator = "&" if "?" in redirect_uri else "?"
-    return RedirectResponse(url=f"{redirect_uri}{separator}{urlencode(params)}", status_code=302)
+    if flow.request.state:
+        params["state"] = flow.request.state
+    separator = "&" if "?" in flow.request.redirect_uri else "?"
+    response = _redirect(
+        f"{flow.request.redirect_uri}{separator}{urlencode(params)}", status_code=302
+    )
+    _clear_cookie(response, OAUTH_FLOW_COOKIE)
+    return response
+
+
+@router.post("/oauth/logout")
+async def logout(
+    request: Request,
+    csrf_token: Annotated[str, Form()],
+) -> Response:
+    """Revoke the browser session; OAuth client grants remain separately revocable."""
+    token = request.cookies.get(SESSION_COOKIE)
+    session = await accounts.load_session(token)
+    if session is None or not accounts.csrf_matches(session, csrf_token):
+        return _html_page(
+            _error_page("access_denied", "The sign-out form expired."), status_code=403
+        )
+    await accounts.revoke_session(token)
+    response = _redirect("/oauth/consent")
+    _clear_cookie(response, SESSION_COOKIE)
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -329,9 +460,13 @@ input[type=text], input[type=password] { width: 100%; padding: .5rem; border-rad
        border: 1px solid #aaa; font: inherit; box-sizing: border-box; }
 button { font: inherit; font-weight: 600; padding: .55rem 1.1rem; border-radius: 6px;
          border: 1px solid #3b5bdb; background: #3b5bdb; color: #fff; cursor: pointer; }
+.secondary { border-color: #777; background: transparent; color: inherit; }
 code { background: rgba(127,127,127,.15); padding: .1rem .3rem; border-radius: 4px; }
 .warn { border-left: 3px solid #e8590c; padding-left: .75rem; font-size: .85rem; color: #666; }
 .choice { display: flex; gap: .5rem; align-items: baseline; margin: .35rem 0; }
+.choice label { display: inline; }
+.error { border-left: 3px solid #c92a2a; padding-left: .75rem; color: #c92a2a; }
+.account { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
 """
 
 
@@ -344,62 +479,86 @@ def _error_page(error: str, description: str) -> str:
 </body></html>"""
 
 
-def _consent_page(request_data: oauth.AuthorizationRequest, request: Request) -> str:
+def _login_page(flow: oauth.BrowserAuthorizationFlow, *, error: str = "", email: str = "") -> str:
+    client = html.escape(flow.request.client_name or flow.request.client_id)
+    error_html = f'<p class="error">{html.escape(error)}</p>' if error else ""
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Sign in to authorize {client}</title><style>{_PAGE_CSS}</style></head><body>
+<h1>Sign in to Agent Rooms</h1>
+<p class="lede">Continue to authorize <strong>{client}</strong>.</p>
+{error_html}
+<form method="post" action="/oauth/login">
+  <input type="hidden" name="csrf_token" value="{html.escape(flow.csrf_token)}">
+  <fieldset>
+    <legend>Your organization account</legend>
+    <label for="email">Email</label>
+    <input id="email" name="email" type="text" inputmode="email" autocomplete="username"
+           value="{html.escape(email)}" maxlength="320" required>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password"
+           maxlength="{accounts.PASSWORD_MAX_LENGTH}" required>
+  </fieldset>
+  <button type="submit">Continue</button>
+</form>
+<p style="font-size:.85rem"><a href="/account/signup">Create a free account</a>
+ · <a href="/account/password/forgot">Forgot password?</a></p>
+</body></html>"""
+
+
+def _consent_page(
+    request_data: oauth.AuthorizationRequest,
+    session: accounts.BrowserSession,
+    identities: list[Any],
+) -> str:
     """The consent screen.
 
     It states plainly what the client will be able to do, because a consent screen that
     does not is just a speed bump. It also does not pre-select an identity: choosing is
     the action being consented to.
     """
-    hidden = {
-        "client_id": request_data.client_id,
-        "redirect_uri": request_data.redirect_uri,
-        "code_challenge": request_data.code_challenge,
-        "scope": request_data.scope,
-        "state": request_data.state or "",
-        "resource": request_data.resource or "",
-    }
-    hidden_html = "".join(
-        f'<input type="hidden" name="{html.escape(k)}" value="{html.escape(v)}">'
-        for k, v in hidden.items()
+    choices = "".join(
+        '<div class="choice"><input type="radio" name="agent_identity_id" '
+        f'id="identity_{html.escape(identity.id)}" value="{html.escape(identity.id)}">'
+        f'<label for="identity_{html.escape(identity.id)}">'
+        f"{html.escape(identity.display_name)}</label></div>"
+        for identity in identities
     )
+    if not choices:
+        choices = '<p style="font-size:.85rem;color:#666">No existing identities yet.</p>'
     client = html.escape(request_data.client_name or request_data.client_id)
+    account = html.escape(session.user.email)
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Authorize {client}</title><style>{_PAGE_CSS}</style></head><body>
 <h1>Authorize {client}</h1>
 <p class="lede">It is asking to join Agent Rooms coordination rooms as one of your agents.</p>
 
+<div class="account">
+  <span>Signed in as <strong>{account}</strong></span>
+  <form method="post" action="/oauth/logout">
+    <input type="hidden" name="csrf_token" value="{html.escape(session.csrf_token)}">
+    <button class="secondary" type="submit">Sign out</button>
+  </form>
+</div>
+
 <form method="post" action="/oauth/authorize">
-{hidden_html}
+<input type="hidden" name="csrf_token" value="{html.escape(session.csrf_token)}">
 
 <fieldset>
-  <legend>1 &middot; Prove it is you</legend>
-  <label for="principal_token">Your organization principal token</label>
-  <input id="principal_token" name="principal_token" type="password" autocomplete="off"
-         placeholder="paste your token" required>
-  <p class="warn">An agent token will not work here: an agent cannot authorize another
-  agent.</p>
-</fieldset>
-
-<fieldset>
-  <legend>2 &middot; Choose who it acts as</legend>
+  <legend>Choose who it acts as</legend>
   <p style="font-size:.85rem;color:#666;margin-top:0">
     Whatever you pick becomes this client's identity in every room.
     <strong>It cannot rename itself afterwards.</strong>
   </p>
+  {choices}
+  <p style="font-size:.8rem;color:#666">Or create a new identity:</p>
   <label for="new_agent_name">Name a new agent identity</label>
   <input id="new_agent_name" name="new_agent_name" type="text"
-         placeholder="e.g. ChatGPT (Alan)">
-  <p style="font-size:.8rem;color:#666">
-    Or paste an existing agent identity id below to reuse one.
-  </p>
-  <label for="agent_identity_id">Existing agent identity id</label>
-  <input id="agent_identity_id" name="agent_identity_id" type="text" placeholder="aid_...">
+         placeholder="e.g. Codex (Alan)" maxlength="80">
 </fieldset>
 
 <fieldset>
-  <legend>3 &middot; What it will be able to do</legend>
+  <legend>What it will be able to do</legend>
   <ul style="font-size:.85rem;color:#666;padding-left:1.1rem">
     <li>Join rooms it is given a join token for &mdash; it cannot discover or enter rooms
         on its own.</li>

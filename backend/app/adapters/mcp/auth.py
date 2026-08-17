@@ -221,7 +221,7 @@ class McpAuthMiddleware:
             # `create_room` takes an explicit `principal_token` argument, and every other
             # tool needs a participant token that only joining produces. `join_room` then
             # re-resolves the invitation itself.
-            if await _is_live_invitation(token):
+            if not settings.require_account_for_join and await _is_live_invitation(token):
                 await self.app(scope, receive, send)
                 return
             await self._challenge(send, status=401, error="invalid_token", description=exc.message)

@@ -2,7 +2,7 @@
  * ARP HTTP client.
  *
  * Two token kinds, deliberately not interchangeable:
- *   - a **principal token** (a user) creates rooms and redeems invitations;
+ *   - an **account session or OAuth token** authenticates a user/agent at org scope;
  *   - a **participant token** is scoped to one room and does everything inside it.
  * Keeping them separate in the client mirrors the server, so a room-scoped token is
  * never accidentally sent to an org-level endpoint.
@@ -39,6 +39,7 @@ async function request<T>(
   const { token, headers, ...rest } = init;
   const response = await fetch(`${API_BASE}${path}`, {
     ...rest,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -77,15 +78,13 @@ export const api = {
       mcp_url: string;
     }>("/api/capabilities"),
 
-  listRooms: (token: string) =>
-    request<{ rooms: Room[] }>("/api/rooms", { token }),
+  listRooms: () => request<{ rooms: Room[] }>("/api/rooms"),
 
   /**
-   * Creates the room, joins you as owner, and mints a shareable join token — one call.
-   * `join_token` is the only thing you hand to anyone else.
+   * Creates the room under the signed-in account, joins it as owner, and mints the
+   * room-scoped invitation handed to collaborators.
    */
   createRoom: (
-    token: string,
     input: { name: string; purpose?: string; visibility?: "internal" | "cross_org" },
   ) =>
     request<{
@@ -96,7 +95,6 @@ export const api = {
       mcp_url: string;
     }>("/api/rooms", {
       method: "POST",
-      token,
       body: JSON.stringify(input),
     }),
 
@@ -111,7 +109,6 @@ export const api = {
     ),
 
   join: (
-    token: string,
     input: {
       invitation_token: string;
       display_name: string;
@@ -126,7 +123,6 @@ export const api = {
       participant_token: string;
     }>("/api/rooms/join", {
       method: "POST",
-      token,
       body: JSON.stringify({
         kind: "human",
         host_class: "browser_human",
@@ -282,7 +278,6 @@ export const api = {
 
 /** Local session: which participant this browser is, per room. */
 export interface Session {
-  principalToken: string;
   participantToken: string;
   participantId: string;
   roomId: string;

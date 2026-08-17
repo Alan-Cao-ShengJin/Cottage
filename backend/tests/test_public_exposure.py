@@ -17,7 +17,9 @@ import pytest
 
 from app.config import (
     DEFAULT_OPERATOR_TOKEN,
+    UNSAFE_PUBLIC_BILLING,
     UNSAFE_PUBLIC_OPERATOR,
+    UNSAFE_PUBLIC_SIGNUP_EMAIL,
     Settings,
     check_public_safety,
 )
@@ -89,6 +91,34 @@ def test_public_url_with_bootstrap_disabled_is_allowed():
         mcp_require_auth=True,
     )
     check_public_safety(config)
+
+
+def test_public_signup_refuses_to_boot_without_outbound_email():
+    config = _settings(
+        public_base_url="https://agent-rooms.example.com",
+        bootstrap_operator=False,
+        mcp_require_auth=True,
+        public_signup_enabled=True,
+        resend_api_key="",
+    )
+    with pytest.raises(RuntimeError) as exc:
+        check_public_safety(config)
+    assert str(exc.value) == UNSAFE_PUBLIC_SIGNUP_EMAIL
+
+
+def test_paid_creator_mode_refuses_incomplete_stripe_configuration():
+    config = _settings(
+        public_base_url="https://agent-rooms.example.com",
+        bootstrap_operator=False,
+        mcp_require_auth=True,
+        enforce_creator_subscription=True,
+        stripe_secret_key="sk_test_configured",
+        stripe_webhook_secret="",
+        stripe_creator_price_id="price_configured",
+    )
+    with pytest.raises(RuntimeError) as exc:
+        check_public_safety(config)
+    assert str(exc.value) == UNSAFE_PUBLIC_BILLING
 
 
 def test_the_two_guards_are_independent():

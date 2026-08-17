@@ -21,12 +21,13 @@ from fastapi.staticfiles import StaticFiles
 
 from .adapters.mcp.auth import McpAuthMiddleware, NormalizeMcpPath
 from .adapters.mcp.server import mcp
+from .api.account import router as account_router
 from .api.gpt_schema import build_gpt_schema
 from .api.oauth import mcp_resource_url
 from .api.oauth import router as oauth_router
 from .api.routes import router
 from .config import check_public_safety, settings
-from .core import presence, rooms, tasks, work
+from .core import accounts, billing, presence, rooms, tasks, work
 from .core.bus import bus
 from .core.errors import RoomError
 from .db.database import init_db
@@ -99,6 +100,21 @@ async def _bootstrap_operator_identity() -> None:
         org_id=org_id,
         label="instance operator",
     )
+    await accounts.mark_email_verified(user_id)
+    # Bootstrap is an explicit operator grant, not a fake paid subscription. Public
+    # signups receive no such row and must earn rooms:create through billing webhooks.
+    await billing.grant_creator_entitlement(org_id, source="bootstrap")
+    if settings.operator_password_hash:
+        changed = await accounts.set_password_hash(user_id, settings.operator_password_hash)
+        if changed:
+            log.info(
+                "operator %s password verifier installed; prior browser sessions revoked", user_id
+            )
+    else:
+        log.warning(
+            "operator password login is not configured. Set OPERATOR_PASSWORD_HASH using "
+            "scripts/hash_password.py before using hosted OAuth consent."
+        )
     # Only alarming in the case that is actually alarming. `check_public_safety` has
     # already refused to boot if this token is the published default while reachable.
     if settings.operator_token_is_default:
@@ -160,7 +176,11 @@ def service_descriptor(*, console: bool) -> dict[str, Any]:
         "mcp": f"{base}/mcp",
         "openapi_for_chatgpt_actions": f"{base}/openapi-gpt.json",
         "oauth_protected_resource": f"{base}/.well-known/oauth-protected-resource",
+        "account": settings.account_url,
         "mcp_requires_auth": settings.mcp_require_auth,
+        "account_required_for_join": settings.require_account_for_join,
+        "public_signup_enabled": settings.public_signup_enabled,
+        "creator_subscription_required": settings.enforce_creator_subscription,
         "publicly_reachable": settings.is_publicly_reachable,
         "console": console,
     }
@@ -205,6 +225,7 @@ def build_app(console_dir: Path | None = _CONFIGURED_CONSOLE_DIR) -> FastAPI:
 
     app.include_router(router)
     app.include_router(oauth_router)
+    app.include_router(account_router)
 
     # The MCP app is wrapped, not mounted bare: unauthenticated requests must not reach
     # the protocol machinery, and the 401 challenge that points clients at the

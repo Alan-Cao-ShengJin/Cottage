@@ -33,6 +33,10 @@ public internet on 2026-08-15:
 
 You do **not** need Docker locally: `fly deploy --remote-only` builds on Fly's builder.
 
+**Commercial account/billing update:** implemented and locally verified on 2026-08-17, but not
+yet claimed as live. The next deployment must supply the Resend and Stripe values in §2.1 and
+then repeat OAuth/MCP plus a Stripe test-mode webhook/checkout verification.
+
 **The first deploy failed, and it is worth knowing why** (D-022). The container runs Python
 3.12 while the dev venv is 3.10, and `aiosqlite` drives its connection from a worker thread
 while the `isolation_level` property setter runs on the caller's thread — a same-thread
@@ -53,17 +57,25 @@ second deployment to keep in sync.
 | `/mcp` | the MCP join path — this is what an agent host connects to |
 | `/api/...` | the ARP HTTP + SSE surface |
 | `/.well-known/oauth-*` | OAuth 2.1 discovery, so a client can register itself |
+| `/account/...` | signup, verification, login, recovery, and billing management |
+| `/billing/stripe/webhook` | signature-verified Stripe subscription projection |
 | `/openapi-gpt.json` | the function-calling / Action schema |
 
-## 2. Two settings that are not optional
+## 2. Three settings that are not optional
 
-The server **refuses to boot** with a public `PUBLIC_BASE_URL` unless both are right. That
-is on purpose: each failure is silent, total, and only discovered after the damage.
+The first two are enforced by public-startup guards. The third is required for a human to
+complete OAuth login; without it the server starts but deliberately authenticates nobody.
 
 1. **`OPERATOR_TOKEN`** must not be the published default. It is a bearer credential for the
    account that creates rooms; the default is printed in this repo.
 2. **`MCP_REQUIRE_AUTH=true`**, or `/mcp` would accept tool calls from anyone who found the
    URL.
+3. **`OPERATOR_PASSWORD_HASH`** must contain the Argon2id verifier for the password used at
+   OAuth login. Generate it interactively so the password never enters shell history:
+
+   ```powershell
+   backend\.venv\Scripts\python.exe scripts\hash_password.py
+   ```
 
 Generate a token:
 
@@ -77,8 +89,33 @@ Generate a token:
 openssl rand -hex 20
 ```
 
-Keep it. You paste it into the console to sign in, and into the OAuth consent screen to
-prove an agent is acting for you.
+Keep the principal token for API/console administration. OAuth consent uses
+`OPERATOR_EMAIL` and the password whose verifier you generated; the browser never asks for
+the principal token.
+
+### 2.1 Commercial hosted settings
+
+`fly.toml` currently enables free public signup and account-required joining while leaving room
+creation free for the internal beta. Resend is required now. Stripe can be added later; when it
+is ready, set `ENFORCE_CREATOR_SUBSCRIPTION=true`, at which point public startup deliberately
+refuses incomplete Stripe configuration.
+
+| Setting | Value |
+|---|---|
+| `RESEND_API_KEY` | a Resend API key allowed to send verification/reset email |
+| `EMAIL_FROM` | `Cottage <hello@your-verified-domain>` |
+| `STRIPE_SECRET_KEY` | Later: Stripe secret key (`sk_test_...` first, then live) |
+| `STRIPE_WEBHOOK_SECRET` | Later: signing secret for this endpoint (`whsec_...`) |
+| `STRIPE_CREATOR_PRICE_ID` | Later: recurring monthly Creator Price (`price_...`) |
+
+In Stripe, create a monthly recurring Creator product/price, enable the customer portal, and add
+`https://<app>.fly.dev/billing/stripe/webhook`. Subscribe the endpoint to
+`checkout.session.completed`, `customer.subscription.created`,
+`customer.subscription.updated`, and `customer.subscription.deleted`. Checkout redirects do not
+grant access; the signed webhook is the only activation path.
+
+In Resend, verify the sending domain and use an address on it for `EMAIL_FROM`. Never paste these
+secret values into source files or commit them; use `fly secrets set --stage`.
 
 ## 3. Fly.io — the fast path
 
@@ -100,6 +137,7 @@ fly volumes create agent_rooms_data --app <app> --region <region> --size 1 --yes
 # which is what stops the first boot from crash-looping on check_public_safety.
 fly secrets set --app <app> --stage \
   "OPERATOR_TOKEN=<the token from step 2>" \
+  'OPERATOR_PASSWORD_HASH=<the Argon2id verifier from step 2>' \
   "PUBLIC_BASE_URL=https://<app>.fly.dev" \
   "OPERATOR_ORG_NAME=<your company>" \
   "OPERATOR_EMAIL=<you@example.com>" \
@@ -171,17 +209,20 @@ docker run -p 8080:8080 \
 
 ## 5. Inviting someone
 
-1. Open `https://<your-host>/`, paste your `OPERATOR_TOKEN`, create a room. You are joined as
-   owner and handed a **join token** in the same step.
+1. Open `https://<your-host>/account`, create and verify your free account, and upgrade it to
+   Creator. Open `/` and create a room; you are joined as owner and receive a **join token**.
 2. Send that token to the other person along with your `/mcp` URL. Any channel — it is scoped
    to one room and can do nothing else.
-3. Their agent points at `/mcp` with the join token as its bearer and calls
-   `join_room(invitation_token, display_name, execution_mode)`.
+3. Their IDE points at `/mcp`, completes the Cottage account OAuth login, and calls
+   `join_room(invitation_token, execution_mode)`. The OAuth-bound identity wins over any
+   caller-supplied display name.
 
-**They need no account on your instance.** The invitation *is* their credential (D-025), which
-is what makes a stranger's agent joinable and why OIDC login is not on the critical path.
+**Commercial hosted mode requires a free account.** The OAuth login authenticates the person and
+binds the agent identity; the invitation authorizes that identity to this room. Cottage/local
+compatibility mode may still treat the invitation as the complete credential.
 
-Two things the room does with a guest, both deliberate:
+In Cottage/local compatibility mode, a bearer invitation still creates a guest. Two properties
+of that legacy path remain deliberate:
 
 - **They can work.** A guest gets `task.claim` and full-length leases if their execution mode
   earns them. An invited collaborator who could only watch would defeat the point of inviting
@@ -220,8 +261,9 @@ unprompted.
 
 - **One instance.** SQLite on a volume plus an in-process notify-then-read bus. Two machines
   would each hold half the truth. Scale up, not out, until M5 brings PostgreSQL.
-- **One operator.** Whoever holds `OPERATOR_TOKEN` creates rooms; everyone else is invited.
-  A second person needing to create rooms is the trigger for the M5 login work.
+- **One personal organization per signup for now.** Any verified account can join invited rooms;
+  only an organization with an active Creator entitlement can create one. Shared organization
+  membership and seat administration remain additive work.
 - **Back up the volume.** One machine and no replication means a lost volume is lost rooms.
   Fly takes scheduled volume snapshots automatically (5-day retention by default), which
   covers the "volume died" case. For a copy you hold yourself, do **not** `cat` the file: a
