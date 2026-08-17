@@ -3386,3 +3386,24 @@ library, video, or bitmap payload. Motion is decorative rather than the sole car
 labels and numbers preserve the explanation when animation is unavailable, and the
 `prefers-reduced-motion` media query resolves every animation to a readable static state. This
 decision applies only to the public site and does not reskin the authenticated connection surface.
+
+## D-070 — Product onboarding is one action; pricing states only current facts
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** the first connection guide correctly removed browser room operations, but three equally
+weighted cards still made setup look like a workflow to study. The public visual identity also
+stopped at the product boundary, and there was no normal place to answer the predictable pricing
+question during internal beta.
+
+### The decision
+
+The app entry has one dominant control: copy the canonical MCP URL. Three compact labels explain
+where it goes, OAuth supplies signup/login when the client connects, and one prompt demonstrates the
+first successful outcome. Setup and Pricing are first-class tabs; Sign in and Sign up are direct
+shortcuts, not additional requirements before MCP OAuth.
+
+The pricing page distinguishes free identity/collaboration from the creator entitlement. It says
+Creator is $0 during internal beta and that monthly billing is coming later, but publishes no amount
+until one is actually chosen and enforced. Invited collaborators are explicitly free. This keeps the
+commercial model visible without allowing a presentation page to get ahead of authorization state.

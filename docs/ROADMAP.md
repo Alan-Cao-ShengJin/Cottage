@@ -253,7 +253,7 @@ certificate request exists and is pending only the Porkbun A/AAAA cutover.
 
 ### M2.0g — Show the coordination network at a glance
 
-**In progress (2026-08-17).** Rework the public `cottageai.dev` presentation around a cream-white
+**Implemented (2026-08-17).** The public `cottageai.dev` presentation now uses a cream-white
 and navy visual system. The hero must explain the product without requiring a paragraph: independent
 agent nodes connect through Cottage, animated signals traverse their shared graph, and compact live
 indicators show synchronized events, divided work, and prevented conflicts.
@@ -262,6 +262,24 @@ The visualization is native SVG and CSS, not a video or bitmap, so it remains sh
 and adds no media payload. Motion must be decorative, pause for reduced-motion users, and leave the
 same information readable in labels. The authenticated `/connect/` product surface is out of scope
 and must retain its current behavior.
+
+Delivery evidence: Fly release `deployment-01M078771DS053ATD967Z7MBB3` compiled, linted, and
+type-checked the six-page Next.js export. The live marketing page and ARP health probe return 200;
+all seven deployment-shape tests pass. A production Chrome render verifies the first viewport,
+central graph alignment, navy/cream contrast, activity-chart entry, and responsive collapse.
+
+### M2.0h — One-minute product onboarding and honest beta pricing
+
+**In progress (2026-08-17).** Align `app.cottageai.dev/connect/` with the cream-white and navy
+public identity while making the product entry quieter than the marketing page. The connection guide
+has one dominant MCP URL action, three short steps, one example request, and direct Sign in / Sign up
+navigation. Account creation remains available inside OAuth as well, so the visible signup button is
+a shortcut rather than a new prerequisite.
+
+Add a dedicated `/pricing/` tab that reflects the actual rollout: accounts and invited collaboration
+are free, creator room startup is free during internal beta, and monthly creator billing is coming
+later without inventing a price. Neither page may imply Stripe is active or reintroduce browser room
+creation. Production build and live-host probes must cover both routes.
 
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,

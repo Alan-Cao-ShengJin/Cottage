@@ -56,6 +56,7 @@ same image, not a second deployment.
 | `cottageai.dev/` | the public Cottage website |
 | `app.cottageai.dev/` | redirects to the product connection guide |
 | `app.cottageai.dev/connect/` | copy the MCP endpoint, then create/join through the AI |
+| `app.cottageai.dev/pricing/` | free collaborator and internal-beta creator plans |
 | `/healthz` | liveness, plus the URLs this instance is advertising |
 | `/mcp` | the MCP join path — this is what an agent host connects to |
 | `/api/...` | the ARP HTTP + SSE surface |

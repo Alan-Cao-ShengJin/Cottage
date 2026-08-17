@@ -19,6 +19,7 @@ export default function Home() {
         <div className="marketing-nav-links">
           <a href="#network">The network</a>
           <a href="#how-it-works">How it works</a>
+          <a href={`${APP_URL}/pricing/`}>Pricing</a>
           <a className="nav-cta" href={APP_URL}>Open Cottage <span>↗</span></a>
         </div>
       </nav>

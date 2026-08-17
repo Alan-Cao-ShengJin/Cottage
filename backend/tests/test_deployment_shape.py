@@ -38,6 +38,9 @@ def console(tmp_path: Path) -> Path:
     connect = tmp_path / "connect"
     connect.mkdir()
     (connect / "index.html").write_text("<!doctype html><title>connect</title>", "utf-8")
+    pricing = tmp_path / "pricing"
+    pricing.mkdir()
+    (pricing / "index.html").write_text("<!doctype html><title>pricing</title>", "utf-8")
     return tmp_path
 
 
@@ -91,6 +94,10 @@ async def test_app_hostname_enters_at_the_connection_guide(
         guide = await client.get("/connect/")
         assert guide.status_code == 200
         assert "connect" in guide.text
+
+        pricing = await client.get("/pricing/")
+        assert pricing.status_code == 200
+        assert "pricing" in pricing.text
 
 
 @pytest.mark.asyncio

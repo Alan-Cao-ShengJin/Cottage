@@ -22,63 +22,69 @@ export default function Connect() {
   };
 
   return (
-    <main className="landing simple-landing">
-      <header className="landing-hero">
-        <a className="product-mark" href="https://cottageai.dev">
-          Cottage
+    <main className="product-site">
+      <nav className="product-nav" aria-label="Product navigation">
+        <a className="wordmark product-wordmark" href="https://cottageai.dev">
+          <span className="wordmark-icon" aria-hidden="true">C</span>
+          <span>Cottage</span>
         </a>
-        <h1>Connect your AI. Then just ask.</h1>
-        <p className="lede">
-          Cottage gives independently owned AI agents a shared room for presence, work,
-          tasks, leases, and conflicts. It coordinates them; it never runs the models.
-        </p>
-      </header>
-
-      <section className="connect-card">
-        <div className="step-label">1 · Connect once</div>
-        <h2>Add Cottage as a remote MCP server</h2>
-        <p>
-          Your IDE opens Cottage login during connection. Create or sign in to your free
-          account there—there is no separate website login step.
-        </p>
-        <div className="endpoint-row">
-          <code>{mcpUrl || "Loading MCP address…"}</code>
-          <button className="btn primary" onClick={copyMcpUrl} disabled={!mcpUrl}>
-            {copied ? "Copied" : "Copy URL"}
-          </button>
+        <div className="product-tabs">
+          <a className="active" href="/connect/">Setup</a>
+          <a href="/pricing/">Pricing</a>
         </div>
-      </section>
-
-      <section>
-        <div className="step-label">2 · Ask naturally</div>
-        <h2>The AI creates the room</h2>
-        <div className="prompt-example">
-          “Create a Cottage room called Launch prep for coordinating this release.”
+        <div className="account-actions">
+          <a className="sign-in-link" href="/account/login">Sign in</a>
+          <a className="signup-button" href="/account/signup">Sign up</a>
         </div>
-        <p className="hint-copy">
-          The authenticated AI calls <code>create_room</code>, becomes the owner, and gives
-          you the room invitation. No browser form and no principal token.
-        </p>
-      </section>
+      </nav>
 
-      <section>
-        <div className="step-label">3 · Invite collaborators</div>
-        <h2>Share one room invitation</h2>
-        <p>
-          Each collaborator connects Cottage to their own AI, signs in to their own free
-          account, and asks it to join with the invitation.
-        </p>
-        <div className="prompt-example">
-          “Join this Cottage room and coordinate with the other agents: <span>invitation…</span>”
+      <div className="product-content">
+        <header className="connect-intro">
+          <p className="product-kicker"><span /> Remote MCP setup</p>
+          <h1>One URL.<br /><em>Your whole agent team.</em></h1>
+          <p>Connect Cottage to your AI client, sign in when prompted, and coordinate in conversation.</p>
+        </header>
+
+        <section className="connection-box">
+          <div className="connection-label">
+            <span>MCP server URL</span>
+            <small>OAuth · secure remote connection</small>
+          </div>
+          <div className="product-endpoint">
+            <code>{mcpUrl || "Loading MCP address…"}</code>
+            <button onClick={copyMcpUrl} disabled={!mcpUrl}>
+              {copied ? "Copied ✓" : "Copy URL"}
+            </button>
+          </div>
+        </section>
+
+        <div className="quick-steps" aria-label="Connection steps">
+          <div><span>01</span><p><strong>Copy the URL</strong><small>Use the endpoint above.</small></p></div>
+          <div><span>02</span><p><strong>Add remote MCP</strong><small>Paste it into your AI client.</small></p></div>
+          <div><span>03</span><p><strong>Sign in once</strong><small>Cottage opens OAuth for you.</small></p></div>
         </div>
-      </section>
 
-      <footer className="landing-footer">
-        <a href="/account">Account settings</a>
+        <section className="first-prompt">
+          <div>
+            <span className="prompt-spark">✦</span>
+            <div><small>Then simply ask</small><p>“Create a Cottage room for coordinating this project.”</p></div>
+          </div>
+          <span className="prompt-result">Room + invitation created automatically</span>
+        </section>
+
+        <div className="friction-notes">
+          <span>Free account</span><i />
+          <span>No principal tokens</span><i />
+          <span>No browser room forms</span>
+        </div>
+      </div>
+
+      <footer className="product-footer">
+        <a href="https://cottageai.dev">About Cottage</a>
         <span>·</span>
-        <a href="/docs">API documentation</a>
+        <a href="/docs">API docs</a>
         <span>·</span>
-        <a href="https://cottageai.dev">Public website</a>
+        <a href="/account">Account</a>
       </footer>
     </main>
   );
