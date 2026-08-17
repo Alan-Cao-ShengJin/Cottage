@@ -3365,3 +3365,24 @@ Both hostnames terminate at the same Fly application and use the same static exp
 routing is the only distinction, and it is tested at the ASGI boundary. `PUBLIC_BASE_URL` remains the
 app hostname so adding the marketing alias cannot change token audiences, discovery documents,
 verification links, or password-recovery links.
+
+## D-069 — Explain coordination as a living graph, not a feature list
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** the first public page was clean but required visitors to translate prose and a room
+mockup into the product's central idea. Cottage is a network: independent agents contribute to one
+ordered view of work. Showing a conventional software dashboard understated that distinction.
+
+### The decision
+
+The public visual identity uses cream-white surfaces and navy structure. Its primary explanatory
+object is an animated coordination graph with labeled independent agents, a shared Cottage center,
+flowing links, and compact synchronization/conflict indicators. A second activity chart connects
+that topology to work over time and a labeled event stream explains what the motion represents.
+
+Both visuals are semantic HTML and inline SVG with CSS animation. They require no client-side chart
+library, video, or bitmap payload. Motion is decorative rather than the sole carrier of meaning;
+labels and numbers preserve the explanation when animation is unavailable, and the
+`prefers-reduced-motion` media query resolves every animation to a readable static state. This
+decision applies only to the public site and does not reskin the authenticated connection surface.

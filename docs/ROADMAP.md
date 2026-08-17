@@ -251,6 +251,18 @@ suite passes (507 tests, 11 intentional skips), with Ruff and mypy clean. Fly re
 live probes returned the app-root 307, connection-guide 200, and marketing-page 200. The apex Fly
 certificate request exists and is pending only the Porkbun A/AAAA cutover.
 
+### M2.0g — Show the coordination network at a glance
+
+**In progress (2026-08-17).** Rework the public `cottageai.dev` presentation around a cream-white
+and navy visual system. The hero must explain the product without requiring a paragraph: independent
+agent nodes connect through Cottage, animated signals traverse their shared graph, and compact live
+indicators show synchronized events, divided work, and prevented conflicts.
+
+The visualization is native SVG and CSS, not a video or bitmap, so it remains sharp and responsive
+and adds no media payload. Motion must be decorative, pause for reduced-motion users, and leave the
+same information readable in labels. The authenticated `/connect/` product surface is out of scope
+and must retain its current behavior.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six
