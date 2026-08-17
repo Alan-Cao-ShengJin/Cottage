@@ -24,6 +24,7 @@ from ..config import settings
 from ..core import accounts, oauth, rooms
 from ..core.errors import RoomError
 from ..core.oauth import OAuthError
+from .browser_ui import page as browser_page
 
 log = logging.getLogger(__name__)
 
@@ -447,62 +448,44 @@ async def revoke(
 # Minimal HTML (no template engine, no external assets)
 # ---------------------------------------------------------------------------
 
-_PAGE_CSS = """
-:root { color-scheme: light dark; }
-body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-       max-width: 34rem; margin: 3rem auto; padding: 0 1.25rem; line-height: 1.5; }
-h1 { font-size: 1.35rem; margin-bottom: .25rem; }
-p.lede { color: #666; margin-top: 0; }
-fieldset { border: 1px solid #ccc; border-radius: 8px; padding: 1rem; margin: 1.25rem 0; }
-legend { font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: #666; }
-label { display: block; margin: .5rem 0 .2rem; font-size: .85rem; font-weight: 600; }
-input[type=text], input[type=password] { width: 100%; padding: .5rem; border-radius: 6px;
-       border: 1px solid #aaa; font: inherit; box-sizing: border-box; }
-button { font: inherit; font-weight: 600; padding: .55rem 1.1rem; border-radius: 6px;
-         border: 1px solid #3b5bdb; background: #3b5bdb; color: #fff; cursor: pointer; }
-.secondary { border-color: #777; background: transparent; color: inherit; }
-code { background: rgba(127,127,127,.15); padding: .1rem .3rem; border-radius: 4px; }
-.warn { border-left: 3px solid #e8590c; padding-left: .75rem; font-size: .85rem; color: #666; }
-.choice { display: flex; gap: .5rem; align-items: baseline; margin: .35rem 0; }
-.choice label { display: inline; }
-.error { border-left: 3px solid #c92a2a; padding-left: .75rem; color: #c92a2a; }
-.account { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
-"""
-
 
 def _error_page(error: str, description: str) -> str:
-    return f"""<!doctype html><html><head><meta charset="utf-8">
-<title>Authorization error</title><style>{_PAGE_CSS}</style></head><body>
-<h1>Authorization error</h1>
+    return browser_page(
+        "Authorization error",
+        f"""<h1>We could not connect this client</h1>
 <p class="lede"><code>{html.escape(error)}</code></p>
 <p>{html.escape(description)}</p>
-</body></html>"""
+<p class="form-note">Return to your AI client and restart the Cottage connection.</p>""",
+        context="Secure MCP authorization",
+    )
 
 
 def _login_page(flow: oauth.BrowserAuthorizationFlow, *, error: str = "", email: str = "") -> str:
     client = html.escape(flow.request.client_name or flow.request.client_id)
     error_html = f'<p class="error">{html.escape(error)}</p>' if error else ""
-    return f"""<!doctype html><html><head><meta charset="utf-8">
-<title>Sign in to authorize {client}</title><style>{_PAGE_CSS}</style></head><body>
-<h1>Sign in to Agent Rooms</h1>
-<p class="lede">Continue to authorize <strong>{client}</strong>.</p>
+    return browser_page(
+        f"Sign in to authorize {client}",
+        f"""<div class="auth-progress"><span class="active">1 Sign in</span><i></i><span>2 Choose agent</span><i></i><span>3 Return</span></div>
+<h1>Connect your AI client</h1>
+<p class="lede"><span class="client-pill">{client}</span> wants to connect to Cottage. Sign in to continue.</p>
 {error_html}
 <form method="post" action="/oauth/login">
   <input type="hidden" name="csrf_token" value="{html.escape(flow.csrf_token)}">
   <fieldset>
-    <legend>Your organization account</legend>
+    <legend>Your Cottage account</legend>
     <label for="email">Email</label>
-    <input id="email" name="email" type="text" inputmode="email" autocomplete="username"
+    <input id="email" name="email" type="email" inputmode="email" autocomplete="username"
            value="{html.escape(email)}" maxlength="320" required>
     <label for="password">Password</label>
     <input id="password" name="password" type="password" autocomplete="current-password"
            maxlength="{accounts.PASSWORD_MAX_LENGTH}" required>
   </fieldset>
-  <button type="submit">Continue</button>
+  <button type="submit">Sign in and continue</button>
 </form>
-<p style="font-size:.85rem"><a href="/account/signup">Create a free account</a>
- · <a href="/account/password/forgot">Forgot password?</a></p>
-</body></html>"""
+<p class="muted"><a href="/account/signup">Create a free account</a> · <a href="/account/password/forgot">Forgot password?</a></p>
+<p class="form-note">Your password stays with Cottage. The client receives an OAuth token only after you choose an agent identity.</p>""",
+        context="Secure MCP authorization",
+    )
 
 
 def _consent_page(
@@ -524,14 +507,15 @@ def _consent_page(
         for identity in identities
     )
     if not choices:
-        choices = '<p style="font-size:.85rem;color:#666">No existing identities yet.</p>'
+        choices = '<p class="form-note">No existing agent identities yet. Name one below.</p>'
     client = html.escape(request_data.client_name or request_data.client_id)
     account = html.escape(session.user.email)
 
-    return f"""<!doctype html><html><head><meta charset="utf-8">
-<title>Authorize {client}</title><style>{_PAGE_CSS}</style></head><body>
-<h1>Authorize {client}</h1>
-<p class="lede">It is asking to join Agent Rooms coordination rooms as one of your agents.</p>
+    return browser_page(
+        f"Authorize {client}",
+        f"""<div class="auth-progress"><span>1 Signed in</span><i></i><span class="active">2 Choose agent</span><i></i><span>3 Return</span></div>
+<h1>Choose the agent this client can use</h1>
+<p class="lede"><span class="client-pill">{client}</span> will connect to Cottage as exactly one independently owned agent.</p>
 
 <div class="account">
   <span>Signed in as <strong>{account}</strong></span>
@@ -546,20 +530,20 @@ def _consent_page(
 
 <fieldset>
   <legend>Choose who it acts as</legend>
-  <p style="font-size:.85rem;color:#666;margin-top:0">
+  <p class="form-note">
     Whatever you pick becomes this client's identity in every room.
     <strong>It cannot rename itself afterwards.</strong>
   </p>
   {choices}
-  <p style="font-size:.8rem;color:#666">Or create a new identity:</p>
+  <p class="muted">Or create a new identity</p>
   <label for="new_agent_name">Name a new agent identity</label>
   <input id="new_agent_name" name="new_agent_name" type="text"
-         placeholder="e.g. Codex (Alan)" maxlength="80">
+         placeholder="e.g. My coding supervisor" maxlength="80">
 </fieldset>
 
 <fieldset>
   <legend>What it will be able to do</legend>
-  <ul style="font-size:.85rem;color:#666;padding-left:1.1rem">
+  <ul class="permission-list">
     <li>Join rooms it is given a join token for &mdash; it cannot discover or enter rooms
         on its own.</li>
     <li>Read those rooms: participants, current work, tasks, and the event stream.</li>
@@ -570,6 +554,9 @@ def _consent_page(
   a room, or act as any identity other than the one you chose above.</p>
 </fieldset>
 
-<button type="submit">Authorize</button>
+<button type="submit">Authorize and return to {client}</button>
 </form>
-</body></html>"""
+<p class="form-note">Cottage coordinates shared work. It never receives the client's private model context or your password.</p>""",
+        wide=True,
+        context="Secure MCP authorization",
+    )

@@ -3450,3 +3450,67 @@ ownership structure.
 This supersedes only the presentation placement in D-071, not its human-control or agent-ownership
 semantics. The compact graph keeps explicit layer labels and animated directional paths within the
 first viewport.
+
+## D-073 — A coordination animation is a labeled handoff system
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** the compact three-layer graph named the participants but still asked a new viewer to
+infer what crossed each boundary, how worker results became a product, and where human review
+returned. Adding more unlabeled nodes or decorative motion would make the topology denser without
+answering those questions.
+
+### The decision
+
+The canonical hero graph uses one top-to-bottom story: humans send goals and constraints to their
+owned supervisors and receive progress and questions back; supervisors exchange plans, claims, and
+checkpoints inside the explicit Cottage room boundary; supervisors send scoped task briefs to their
+own workers; worker outputs converge into one end product; and a review path returns direction to
+the humans. Nodes name actors and connectors name payloads. Cottage is explicitly labeled as a
+shared coordination layer, not an AI.
+
+The graph is a semantic React component with presentational SVG routing and CSS motion. A still
+frame carries the whole explanation. Container queries recompose the graph into a vertical mobile
+sequence rather than shrinking desktop typography, and reduced-motion leaves the final labeled
+state intact. This refines D-071 and D-072 without adding another topology.
+
+## D-074 — MCP authorization has one provider-neutral Cottage shell
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** the protocol already gives every dynamically registered MCP client the same browser
+authorization endpoints, but the pages looked like unstyled backend forms and still used the old
+Agent Rooms product name. Styling one vendor's launch path would contradict the interoperability
+claim and create drift between otherwise identical security flows.
+
+### The decision
+
+Account creation, verification, recovery, login, OAuth login, error, and consent pages share one
+server-rendered cream-white and navy Cottage shell. OAuth copy names the dynamically registered
+client rather than branching on vendor, shows the sign-in → choose-agent → return sequence, states
+that the Cottage password never goes to the client, and retains explicit identity and permission
+selection before authorization.
+
+This is a presentation refactor only. Validated redirect URIs, PKCE, CSRF, expiring browser-flow
+cookies, no-store headers, CSP, password verification, and authorization-code issuance are
+unchanged. The shell uses inline CSS and no remote assets so the existing CSP remains narrow.
+
+## D-075 — Shared activity is shown as a workbench, not a chart
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** a line chart suggested volume but did not show what a human actually does while a team
+of AI agents works. It made presence and events visible without connecting them to steering,
+delegation, task ownership, file checkpoints, or conflict prevention.
+
+### The decision
+
+The second public visual becomes a familiar IDE/CLI-style Cottage workbench. The human's high-level
+instruction is the first event, a supervisor explains the split, an agent rail shows role and live
+state, the room activity terminal shows task claims and worker checkpoints, and a persistent prompt
+makes the next human steering action visible. The hero remains the only ownership topology; this
+workbench is an operational view of one room.
+
+The workbench is semantic HTML and CSS, retains readable completed events without animation, uses
+container queries to collapse the rail and activity into one mobile column, and participates in the
+existing reduced-motion policy.

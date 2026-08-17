@@ -323,6 +323,50 @@ downstream workers; animated steer, peer-discussion, and task-dispatch paths con
 release `deployment-01M079H47DRJ4BFNVQ0P5D0BA9` compiled and type-checked all seven pages, the live
 route returns 200, and a production Chrome render confirms the hierarchy fits the first viewport.
 
+### M2.0k — Make the full handoff legible in one frame
+
+**In progress (2026-08-17).** Refine the existing hero graph so a first-time visitor can identify
+the complete operating model without decoding generic nodes or relying on motion: named humans
+exchange goals, constraints, progress, and approvals with their own AI supervisors; those
+independently owned supervisors use a clearly bounded Cottage room to share plans, task claims, and
+checkpoints; each supervisor delegates scoped task briefs to its own AI workers; worker outputs
+converge into one end product; and the review path returns to the humans who steer the next cycle.
+
+The graph remains the single canonical topology and uses one dominant top-to-bottom reading
+direction. Human, supervisor, Cottage, worker, and product shapes must be visually distinct and
+directly labeled. Connector labels name their payloads, animation reveals direction and causality,
+and the complete story stays understandable in a static frame, on a narrow screen, and with reduced
+motion enabled. No chart library or client runtime is required.
+
+### M2.0l — One Cottage authentication surface for every MCP client
+
+**In progress (2026-08-17).** Restyle the shared browser account, OAuth login, and OAuth consent
+pages with the same cream-white and navy identity as `cottageai.dev` and `app.cottageai.dev`.
+This is one provider-neutral authorization journey discovered through the MCP OAuth protocol, not a
+Claude-, ChatGPT-, Codex-, or IDE-specific screen. Every compatible client receives the same clear
+sequence: sign in or create a free account, choose the independently owned agent identity the client
+may use, review its exact coordination permissions, authorize, and return to the requesting client.
+
+The security boundary does not change. CSRF, validated redirect URIs, browser-flow expiry, explicit
+identity binding, least-privilege permission copy, and no-store/CSP headers remain intact. The UI
+must use no remote assets, keep account recovery and verification visually consistent, preserve
+keyboard-visible focus and mobile layouts, and state that the client never receives the Cottage
+password.
+
+### M2.0m — Show coordination through a familiar AI workbench
+
+**In progress (2026-08-17).** Replace the abstract Shared Activity line chart with a cream-and-navy
+workbench inspired by the tools people already use to supervise AI work: an agent rail showing live
+roles and status, the human's high-level direction as the first event, supervisor planning and task
+claims in the shared room, worker progress and file checkpoints streaming below, and a persistent
+prompt that makes continued human steering visible.
+
+This remains an operational view of one room, not a second ownership topology. The hero graph owns
+the structural explanation; the workbench demonstrates what that model feels like while work is in
+motion. Static labels must explain every event, CSS motion may stage new activity but cannot carry
+meaning alone, reduced-motion must retain the completed state, and the layout must collapse into a
+single readable activity column on narrow screens.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six

@@ -13,26 +13,13 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 
 from ..config import settings
 from ..core import accounts, billing, mailer
+from .browser_ui import page as browser_page
 
 router = APIRouter()
 
 SESSION_COOKIE = "cottage_session"
 ACCOUNT_FLOW_COOKIE = "cottage_account_flow"
 OAUTH_FLOW_COOKIE = "cottage_oauth_flow"
-
-_CSS = """
-:root { color-scheme: light dark; font-family: system-ui,sans-serif; }
-body { max-width: 42rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
-form, .panel { border: 1px solid #8885; border-radius: .7rem; padding: 1.2rem; margin: 1rem 0; }
-label { display:block; font-weight:600; margin-top:.8rem; }
-input { box-sizing:border-box; width:100%; padding:.7rem; margin-top:.25rem; }
-button, .button { display:inline-block; margin-top:1rem; padding:.65rem 1rem; border-radius:.45rem;
-  border:1px solid #666; background:#2255cc; color:white; text-decoration:none; cursor:pointer; }
-.secondary { background:transparent; color:inherit; }
-.error { border-left:3px solid #c92a2a; padding-left:.75rem; }
-.muted { color:#777; font-size:.9rem; }
-.row { display:flex; gap:.8rem; flex-wrap:wrap; align-items:center; }
-"""
 
 
 def _headers() -> dict[str, str]:
@@ -47,8 +34,7 @@ def _headers() -> dict[str, str]:
 
 def _page(title: str, body: str, *, status_code: int = 200) -> HTMLResponse:
     return HTMLResponse(
-        f'<!doctype html><html><head><meta charset="utf-8"><title>{html.escape(title)}</title>'
-        f"<style>{_CSS}</style></head><body>{body}</body></html>",
+        browser_page(title, body),
         status_code=status_code,
         headers=_headers(),
     )
@@ -116,7 +102,8 @@ def _account_form(
 ) -> str:
     error_html = f'<p class="error">{html.escape(error)}</p>' if error else ""
     return f"""
-<h1>{html.escape(heading)}</h1>{error_html}
+<h1>{html.escape(heading)}</h1>
+<p class="lede">One free account connects every compatible AI client.</p>{error_html}
 <form method="post" action="{html.escape(action, quote=True)}">
   <input type="hidden" name="csrf_token" value="{html.escape(csrf)}">
   {fields}

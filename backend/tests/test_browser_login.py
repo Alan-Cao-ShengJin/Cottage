@@ -199,13 +199,13 @@ async def test_logout_and_expiry_end_the_browser_session(fresh_db, org):
         )
         assert logged_out.status_code == 303
         after_logout = await client.get(logged_out.headers["location"])
-        assert "Sign in to Agent Rooms" in after_logout.text
+        assert "Connect your AI client" in after_logout.text
 
         consent = await _login(client, await _begin(client, registered))
         del consent
         await db.execute("UPDATE web_sessions SET expires_at = ?", (iso_in(-1),))
         after_expiry = await client.get("/oauth/consent")
-    assert "Sign in to Agent Rooms" in after_expiry.text
+    assert "Connect your AI client" in after_expiry.text
 
 
 async def test_a_browser_flow_can_issue_only_one_code(fresh_db, org):
