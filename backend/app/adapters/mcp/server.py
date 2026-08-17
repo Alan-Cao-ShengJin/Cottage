@@ -15,9 +15,11 @@ decisions correct rather than optimistic.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
@@ -137,6 +139,30 @@ mcp = FastMCP(
 _SESSION_TOKEN_LIMIT = 512
 _session_tokens: OrderedDict[str, str] = OrderedDict()
 
+
+@dataclass
+class _SessionConnection:
+    """The exact runtime connection opened by one MCP transport session.
+
+    A participant may have several open connections with different capability profiles.
+    Remembering only its participant token is therefore not enough: heartbeating an
+    arbitrary connection can keep an attended runtime alive while the session's actual
+    unattended runtime is reaped. The declaration is retained so a later tool call can
+    truthfully reconnect after that reap.
+    """
+
+    participant_id: str
+    connection_id: str
+    capabilities: tuple[Capability, ...]
+    host_class: HostClass
+    attachment_label: str | None
+    attachment_resumable: bool
+    last_seq: int = 0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+
+_session_connections: OrderedDict[str, _SessionConnection] = OrderedDict()
+
 #: One durable runtime identity for everything arriving over MCP as this participant.
 #:
 #: Without it, a connector that calls `join_room` more than once accumulates open
@@ -158,7 +184,42 @@ def _remember_session(ctx: Context | None, participant_token: str) -> None:
     _session_tokens[key] = participant_token
     _session_tokens.move_to_end(key)
     while len(_session_tokens) > _SESSION_TOKEN_LIMIT:
-        _session_tokens.popitem(last=False)
+        evicted, _ = _session_tokens.popitem(last=False)
+        _session_connections.pop(evicted, None)
+
+
+def _remember_connection(
+    ctx: Context | None,
+    *,
+    participant_id: str,
+    connection_id: str,
+    capabilities: list[Capability],
+    host_class: HostClass,
+    attachment_label: str | None,
+    attachment_resumable: bool,
+    last_seq: int = 0,
+) -> None:
+    key = _session_key(ctx)
+    if key is None:
+        return
+    _session_connections[key] = _SessionConnection(
+        participant_id=participant_id,
+        connection_id=connection_id,
+        capabilities=tuple(capabilities),
+        host_class=host_class,
+        attachment_label=attachment_label,
+        attachment_resumable=attachment_resumable,
+        last_seq=last_seq,
+    )
+    _session_connections.move_to_end(key)
+
+
+def _forget_session(ctx: Context | None) -> None:
+    key = _session_key(ctx)
+    if key is None:
+        return
+    _session_tokens.pop(key, None)
+    _session_connections.pop(key, None)
 
 
 def _session_key(ctx: Context | None) -> str | None:
@@ -195,7 +256,60 @@ async def _participant(ctx: Context | None, token: str | None) -> Participant:
             "You have not joined a room in this session. Call join_room first, or "
             "pass the participant_token you were given."
         )
-    return await store.load_participant_by_token(resolved)
+    participant = await store.load_participant_by_token(resolved)
+    await _ensure_session_connection(ctx, participant)
+    return participant
+
+
+async def _ensure_session_connection(
+    ctx: Context | None, participant: Participant, *, seq: int | None = None
+) -> None:
+    """Heartbeat or truthfully recreate this MCP session's own connection.
+
+    The seat remains joined when presence lapses. A new tool call is fresh evidence that
+    this exact transport session is active, so it may restore the connection using the
+    declaration captured when the session joined. No call means no heartbeat and the
+    normal stale/disconnected ladder still applies.
+    """
+    key = _session_key(ctx)
+    binding = _session_connections.get(key) if key else None
+    if binding is None or binding.participant_id != participant.id:
+        return
+
+    async with binding.lock:
+        row = await db.fetch_one(
+            "SELECT closed_at FROM connections WHERE id = ? AND participant_id = ?",
+            (binding.connection_id, participant.id),
+        )
+        if row is not None and row["closed_at"] is None:
+            if seq is not None:
+                binding.last_seq = max(binding.last_seq, seq)
+            with contextlib.suppress(RoomClosed):
+                await presence.heartbeat(
+                    connection_id=binding.connection_id,
+                    participant=participant,
+                    seq=binding.last_seq,
+                )
+            return
+
+        try:
+            negotiated = await presence.connect(
+                participant=participant,
+                command=ConnectCommand(
+                    capabilities=list(binding.capabilities),
+                    host_class=binding.host_class,
+                    since_seq=max(binding.last_seq, seq or 0),
+                    attachment_label=binding.attachment_label,
+                    attachment_resumable=binding.attachment_resumable,
+                ),
+                transport="long_poll",
+            )
+        except RoomClosed:
+            # Closed-room reads remain valid; only the liveness mutation is refused.
+            return
+        binding.connection_id = negotiated.connection.id
+        if seq is not None:
+            binding.last_seq = max(binding.last_seq, seq)
 
 
 def _err(exc: RoomError) -> dict[str, Any]:
@@ -410,10 +524,20 @@ async def create_room(
             participant=created.participant,
             command=ConnectCommand(
                 capabilities=declared,
+                host_class=HostClass.PERSISTENT_LOCAL,
                 attachment_label=MCP_ATTACHMENT_LABEL,
                 attachment_resumable=False,
             ),
             transport="long_poll",
+        )
+        _remember_connection(
+            ctx,
+            participant_id=created.participant.id,
+            connection_id=negotiated.connection.id,
+            capabilities=declared,
+            host_class=negotiated.connection.host_class,
+            attachment_label=MCP_ATTACHMENT_LABEL,
+            attachment_resumable=False,
         )
         return {
             "ok": True,
@@ -577,11 +701,22 @@ async def join_room(
             participant=result.participant,
             command=ConnectCommand(
                 capabilities=declared,
+                host_class=host_class,
                 since_seq=since_seq,
                 attachment_label=MCP_ATTACHMENT_LABEL,
                 attachment_resumable=False,
             ),
             transport="long_poll",
+        )
+        _remember_connection(
+            ctx,
+            participant_id=result.participant.id,
+            connection_id=negotiated.connection.id,
+            capabilities=declared,
+            host_class=host_class,
+            attachment_label=MCP_ATTACHMENT_LABEL,
+            attachment_resumable=False,
+            last_seq=since_seq,
         )
         snapshot = await projections.snapshot(room_id=result.room.id, recipient=result.participant)
         # Deliberately *not* the whole snapshot. Returning it cost ~3,400 tokens of the
@@ -754,9 +889,7 @@ async def leave_room(
     try:
         participant = await _participant(ctx, participant_token)
         await rooms.leave_room(participant=participant, command=LeaveRoomCommand(note=note))
-        key = _session_key(ctx)
-        if key:
-            _session_tokens.pop(key, None)
+        _forget_session(ctx)
         return {"ok": True}
     except RoomError as exc:
         return _err(exc)
@@ -897,7 +1030,7 @@ async def await_room_events(
         cursor = raw[-1].seq if raw else since_seq
 
         # A returning poll is also a heartbeat: it proves the agent is still cycling.
-        await _touch(participant, cursor)
+        await _touch(participant, cursor, ctx)
 
         if detail == "full":
             payload_events: list[dict[str, Any]] = visible
@@ -936,11 +1069,19 @@ async def await_room_events(
         return _err(exc)
 
 
-async def _touch(participant: Participant, seq: int) -> None:
-    from ...db import database as db
+async def _touch(participant: Participant, seq: int, ctx: Context | None = None) -> None:
+    key = _session_key(ctx)
+    binding = _session_connections.get(key) if key is not None else None
+    if binding is not None and binding.participant_id == participant.id:
+        await _ensure_session_connection(ctx, participant, seq=seq)
+        return
 
+    # Session-less adapter tests and explicit-token callers have no exact transport
+    # session to bind. Prefer the newest connection; an unordered LIMIT 1 is precisely
+    # what caused the production mismatch this fallback must not recreate.
     rows = await db.fetch_all(
-        "SELECT id FROM connections WHERE participant_id = ? AND closed_at IS NULL LIMIT 1",
+        "SELECT id FROM connections WHERE participant_id = ? AND closed_at IS NULL "
+        "ORDER BY opened_at DESC LIMIT 1",
         (participant.id,),
     )
     if rows:

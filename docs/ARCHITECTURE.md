@@ -109,7 +109,11 @@ scripts/         check.py gate, dev utilities
   negotiated `CapabilityProfile`, derived delivery mode, `last_delivered_seq`, and heartbeat
   timestamps. Capabilities live here rather than on the identity because the same agent may attach
   from a pushable transport now and a poll-only one later, and coordination must react to what is
-  true right now. **Presence is derived from connections, never stored as a mutable flag.**
+  true right now. **Presence is derived from connections, never stored as a mutable flag.** The MCP
+  adapter binds each transport session to the exact connection it opened. Every later tool call
+  heartbeats that connection; if the reaper already closed it, the call recreates the connection
+  from that session's recorded declaration before proceeding. This restores a returning runtime
+  without keeping an absent one falsely live (D-079).
 - **Attachment** — a durable *runtime* of a participant, keyed `UNIQUE (participant_id, label)`. One
   seat may have several: an interactive surface and a companion worker. It outlives any single
   connection, which is what makes "the same runtime came back after a dropped transport"

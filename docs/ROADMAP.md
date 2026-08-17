@@ -448,6 +448,28 @@ loopback authorization `200`, the Secure/HttpOnly/SameSite=Lax flow cookie, refu
 completion, and refusal of a fragment-bearing registered redirect. A real outside client's token
 exchange is deliberately not claimed until the next Claude Code run produces `/oauth/token`.
 
+### M2.0q — MCP sessions resume their own connection, not an arbitrary one
+
+**Implemented locally; live verification pending (2026-08-17).** A live Codex join exposed a lifecycle contradiction. Rejoining the
+same seat as `unattended_loop` returned a new pollable connection and `may_claim=true`, but
+`await_room_events` heartbeated `SELECT ... LIMIT 1`: an arbitrary older attended connection. The
+unattended connection was then reaped while the attended one stayed live, so the board contradicted
+the join response and the joiner appeared to auto-disconnect.
+
+Bind each MCP session to the exact connection it opened and to the capability declaration needed to
+recreate it. Every tool call is genuine evidence that this session is present, so it heartbeats that
+connection. If the reaper already closed it, the next call reconnects the same session and attachment
+before proceeding. The seat remains joined throughout; while no call or poll arrives, presence still
+decays honestly to stale/disconnected and leases are still reclaimed. No server-generated heartbeat,
+vendor branch, or fake background execution is introduced.
+
+Local evidence: the regression exercises attended join, unattended rejoin, exact-connection
+heartbeat, reap, and automatic recovery through the public `get_room_state` tool. The focused MCP,
+presence, and end-to-end sets pass (65 passed and 10 skipped in the wider MCP slice); the complete
+backend suite has 514 passing and 11 skipped tests. Mypy, Ruff lint, worker lint/format, and frontend
+typecheck pass. The standing unrelated failures remain the Windows abrupt-worker descendant test
+and three pre-existing backend format findings.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six

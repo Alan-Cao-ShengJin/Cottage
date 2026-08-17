@@ -42,8 +42,10 @@ def ctx_for(session_id: str | None):
 @pytest.fixture(autouse=True)
 def clean_session_map():
     mcp_server._session_tokens.clear()
+    mcp_server._session_connections.clear()
     yield
     mcp_server._session_tokens.clear()
+    mcp_server._session_connections.clear()
 
 
 def test_distinct_sessions_never_share_a_slot() -> None:
@@ -124,3 +126,81 @@ def test_the_map_is_bounded_and_evicts_oldest_first() -> None:
     assert mcp_server._session_key(ctx_for(f"{0:032d}")) not in mcp_server._session_tokens
     newest = mcp_server._session_key(ctx_for(f"{limit + 9:032d}"))
     assert mcp_server._session_tokens[newest] == f"ptok_{limit + 9}"
+
+
+@pytest.mark.asyncio
+async def test_reaped_session_reconnects_its_exact_declared_runtime(make_room) -> None:
+    """A returning tool call revives this session, not an arbitrary sibling connection.
+
+    This is the live failure that prompted the guard: one seat first joined attended and
+    then rejoined unattended. The old implementation heartbeated ``LIMIT 1`` (the attended
+    row), so the unattended row was reaped and the board contradicted the join response.
+    """
+    from app.core import presence, store
+    from app.db import database as db
+    from app.domain.room import Liveness
+    from app.util import iso_in
+
+    room = await make_room()
+    ctx = ctx_for("ffffffffffffffffffffffffffffffff")
+    attended = await mcp_server.join_room(
+        invitation_token=room.join_token,
+        execution_mode="human_turn_only",
+        display_name="Switchable agent",
+        ctx=ctx,
+    )
+    unattended = await mcp_server.join_room(
+        invitation_token=room.join_token,
+        execution_mode="unattended_loop",
+        display_name="Switchable agent",
+        ctx=ctx,
+    )
+    assert attended["ok"] and unattended["ok"]
+    assert attended["participant_id"] == unattended["participant_id"]
+
+    key = mcp_server._session_key(ctx)
+    assert key is not None
+    binding = mcp_server._session_connections[key]
+    assert binding.connection_id == unattended["connection_id"]
+
+    participant = await store.load_participant(unattended["participant_id"])
+    same_old_beat = iso_in(-30)
+    await db.execute(
+        "UPDATE connections SET last_heartbeat_at = ? WHERE id IN (?, ?)",
+        (same_old_beat, attended["connection_id"], unattended["connection_id"]),
+    )
+
+    # Poll completion must beat the connection opened by this session. The attended
+    # sibling remains untouched rather than winning an unordered LIMIT 1.
+    await mcp_server._touch(participant, unattended["cursor"], ctx)
+    attended_row = await db.fetch_one(
+        "SELECT last_heartbeat_at FROM connections WHERE id = ?", (attended["connection_id"],)
+    )
+    unattended_row = await db.fetch_one(
+        "SELECT last_heartbeat_at FROM connections WHERE id = ?", (unattended["connection_id"],)
+    )
+    assert attended_row is not None and attended_row["last_heartbeat_at"] == same_old_beat
+    assert unattended_row is not None and unattended_row["last_heartbeat_at"] > same_old_beat
+
+    # Once that exact runtime really lapses, the reaper may close it. Membership remains,
+    # and the next tool call recreates the same unattended declaration automatically.
+    await db.execute(
+        "UPDATE connections SET last_heartbeat_at = ? WHERE id = ?",
+        (iso_in(-90), unattended["connection_id"]),
+    )
+    reaped = await presence.reap_dead_connections()
+    assert reaped
+    closed = await store.load_connection(unattended["connection_id"])
+    assert closed.closed_at is not None
+
+    resumed = await mcp_server.get_room_state(ctx=ctx)
+    assert resumed["ok"] is True
+    assert resumed["you"] == participant.id
+    assert binding.connection_id != unattended["connection_id"]
+    replacement = await store.load_connection(binding.connection_id)
+    assert replacement.closed_at is None
+    assert replacement.host_class.value == "persistent_local"
+
+    view = (await presence.presence_for_room(await room.refresh()))[participant.id]
+    assert view.liveness == Liveness.LIVE_POLL
+    assert view.runtime is not None and view.runtime.may_claim is True

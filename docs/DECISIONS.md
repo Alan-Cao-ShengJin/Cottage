@@ -3581,3 +3581,29 @@ return remains the primary action; the copy action exposes the same callback the
 have navigated to and exists for clients with a manual URL fallback. Rejected: storing a plaintext
 code for later recovery, weakening single-use/PKCE rules, automatically rewriting `localhost` to
 an IP literal, adding a vendor branch, or changing hosted-client redirects.
+
+## D-079 — An MCP session owns one connection lifecycle
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** a live Codex seat joined first as `human_turn_only` and then as `unattended_loop`.
+The second join returned a pollable connection with claim authority, but the adapter's heartbeat
+used an unordered `SELECT ... LIMIT 1` across every open connection for the participant. It kept the
+older attended connection alive, allowed the new unattended one to be reaped, and made the board
+contradict the join response. More generally, a seat can legitimately have several attachments and
+connection profiles, so participant-level session affinity is too coarse for liveness.
+
+### The decision
+
+The MCP adapter records, in its bounded per-session map, both the participant token and the exact
+connection opened for that transport session, together with the capability, host-class, attachment,
+and resume-cursor declaration needed to recreate it. Every MCP tool call heartbeats that exact
+connection. If it has been reaped, the call reconnects under the same declaration before executing;
+concurrent calls serialize that repair per session. Session-less compatibility calls use the newest
+open connection rather than an unordered row, but receive no fabricated session affinity.
+
+This is resume-on-action, not synthetic presence. With no call or long-poll return, the reaper still
+grades and closes the connection, work becomes stale, and leases are released. The participant seat
+remains joined and the event log retains the transition. Rejected: a server heartbeat emitted on
+behalf of a silent client, never reaping MCP connections, treating the participant's best connection
+as every session's connection, or branching on Claude/Codex/vendor names.

@@ -157,6 +157,12 @@ Presence is derived, never asserted.
   one produced a room that graded a participant `live_poll` while calling its declared work
   `heartbeat_lapsed`, and two independent hosts hit it inside a single step. It refreshes
   `heartbeat_at` only — never `progress_at`, below.
+- **An MCP tool call is a heartbeat for that MCP session's exact connection** (D-079). The adapter
+  does not select an arbitrary open connection belonging to the same seat: one participant may have
+  attended and unattended runtimes simultaneously. If the reaper already closed the session's
+  connection, the next call recreates it from the capabilities and attachment declaration captured
+  at join, then continues. With no call or poll, the normal ladder still reaches `disconnected` and
+  claims are reclaimed; membership remains `joined`, so returning does not require another invite.
 
 ### Work freshness — two clocks (D-059)
 
