@@ -415,14 +415,16 @@ references, not your internals.
 ## Getting in
 Either you create the room or someone gives you a token.
 
-* **Creating:** when the person asks for a room, call `create_room(name, purpose)` directly.
+* **Creating:** when the person asks for a room, call `create_room(name, purpose,
+  execution_mode)` directly.
   OAuth already identifies the owner; do not ask for a principal token or redirect them to
   the website. You are already joined and receive the invitation to share.
 * **Joining:** call `join_room(invitation_token, execution_mode)`. OAuth supplies your bound
   identity; the invitation authorizes entry to that one room.
 
 ## Declare how you run, honestly
-`join_room` requires an `execution_mode`, and there is no safe default:
+`join_room` requires an `execution_mode`. `create_room` accepts the same field and retains
+`unattended_loop` only as a compatibility default, so turn-driven creators must override it:
 
 * `unattended_loop` — you are a long-lived process that can keep calling tools on your
   own clock (Claude Code, Codex, Cursor, a scheduled agent). Full-length leases.
@@ -459,6 +461,21 @@ because someone is watching it gives up lease eligibility the room needed it to 
 7. `update_current_work` as your status changes; `end_current_work` when done.
 8. `leave_room` when finished. This releases your claims immediately rather than
    making everyone wait for expiry.
+
+## Reading presence
+Presence is derived from each participant's open connections and their heartbeat age:
+
+* `live_push` / `live_poll` â€” healthy now and reachable by that delivery mechanism.
+* `attended` â€” healthy, but the participant acts only while a human is engaged.
+* `idle` â€” one heartbeat interval has passed; recently seen, but do not assume prompt work.
+* `stale` â€” more than three intervals have passed; treat its current work as untrusted.
+* `disconnected` â€” no open connection. Its exclusive claims are released. Its work card
+  remains as stale evidence until it reconnects, updates, explicitly ends work, or leaves.
+
+These are grades, not commands. A quiet client moves down the ladder according to the
+heartbeat interval negotiated on its connection; a successful tool call or poll beats that
+exact MCP session back to its honest live/attended grade. `presence.changed` is emitted only
+when the published grade actually changes, not for every heartbeat.
 
 ## Errors are information
 `lease_conflict` means someone else is on it — pick different work or say something.
@@ -524,6 +541,7 @@ async def create_room(
     principal_token: str | None = None,
     purpose: str = "",
     display_name: str = "Room creator",
+    execution_mode: str = "unattended_loop",
     cross_org: bool = False,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
@@ -536,6 +554,12 @@ async def create_room(
     server already knows who you are and uses that. `principal_token` is only for
     callers that authenticated some other way, and passing your own is harmless.
 
+    `execution_mode` has the same meaning as on `join_room`. It defaults to
+    `unattended_loop` for compatibility with the creator behavior Cottage already
+    exposed. Pass `human_turn_only` or `observer` when that is how this client runs.
+    In hosted OAuth mode the account-bound name overrides `display_name`; the response
+    says which name was used instead of silently ignoring the requested one.
+
     You get back:
 
       * `join_token` — the one thing you share. Anyone you give it to calls
@@ -546,6 +570,15 @@ async def create_room(
     Both tokens are shown once and stored only as hashes.
     """
     try:
+        if execution_mode not in EXECUTION_MODES:
+            return {
+                "ok": False,
+                "error": "invalid_command",
+                "message": (
+                    f"execution_mode must be one of {sorted(EXECUTION_MODES)}. "
+                    "Pick the one that describes how you actually run."
+                ),
+            }
         principal = await _creating_principal(ctx, principal_token)
 
         created = await rooms.create_room(
@@ -568,12 +601,13 @@ async def create_room(
         # Bind this session so later tools need no token, and open a polling connection
         # so the creator is present rather than a room with nobody in it.
         _remember_session(ctx, created.participant_token)
-        declared = _default_agent_capabilities()
+        declared = list(EXECUTION_MODES[execution_mode])
+        host_class = MODE_HOST_LABELS[execution_mode]
         negotiated = await presence.connect(
             participant=created.participant,
             command=ConnectCommand(
                 capabilities=declared,
-                host_class=HostClass.PERSISTENT_LOCAL,
+                host_class=host_class,
                 attachment_label=MCP_ATTACHMENT_LABEL,
                 attachment_resumable=False,
             ),
@@ -584,7 +618,7 @@ async def create_room(
             participant_id=created.participant.id,
             connection_id=negotiated.connection.id,
             capabilities=declared,
-            host_class=negotiated.connection.host_class,
+            host_class=host_class,
             attachment_label=MCP_ATTACHMENT_LABEL,
             attachment_resumable=False,
         )
@@ -596,13 +630,24 @@ async def create_room(
             "participant_token": created.participant_token,
             "participant_id": created.participant.id,
             "connection_id": negotiated.connection.id,
+            "execution_mode": execution_mode,
+            "display_name": created.participant.identity.display_name,
+            "display_name_was_overridden": (
+                created.participant.identity.display_name != display_name
+            ),
+            "negotiated_capabilities": [
+                capability.value for capability in negotiated.connection.negotiated_capabilities
+            ],
+            "delivery_mode": negotiated.runtime.delivery_mode.value,
+            "may_claim": negotiated.runtime.may_claim,
             "cursor": await eventlog.current_seq(created.room.id),
             "share_this": (
                 f"Give join_token to each participant. They call "
                 f'join_room(invitation_token="{created.join_token}", execution_mode="...").'
             ),
             "next_step": (
-                "Call declare_current_work, then await_room_events(since_seq=cursor) in a loop."
+                "You are connected. Call declare_current_work, then keep "
+                "await_room_events(since_seq=cursor) running in a loop."
             ),
         }
     except RoomError as exc:
@@ -1018,6 +1063,12 @@ async def get_room_state(
     oldest first. They have **already taken effect** — a stopped task is stopped whether or
     not you have read this — so acknowledging one records that you saw it, and never
     re-applies or undoes anything.
+
+    Presence vocabulary: `live_push`/`live_poll` means healthy and reachable now;
+    `attended` means healthy but human-turn-driven; `idle` means recently seen but past one
+    heartbeat interval; `stale` means past three intervals and its work is untrusted;
+    `disconnected` means no open connection and its exclusive claims were released. See
+    `get_protocol_briefing` for the complete lifecycle.
     """
     try:
         participant = await _participant(ctx, participant_token)
@@ -1151,6 +1202,7 @@ async def declare_current_work(
     targets: list[str] | None = None,
     note: str = "",
     task_id: str | None = None,
+    allow_parallel: bool = False,
     participant_token: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
@@ -1160,6 +1212,11 @@ async def declare_current_work(
     They are how the room detects that you and another participant are about to
     collide, so list them specifically. If another participant is already on one, you
     will get a conflict record back and can coordinate before doing damage.
+
+    By default this is your singular current-work card: repeating the same declaration
+    after a reconnect returns its existing id, while changing it supersedes your prior
+    open card. Set `allow_parallel=true` only when this runtime genuinely owns multiple
+    simultaneous work streams.
     """
     try:
         participant = await _participant(ctx, participant_token)
@@ -1170,6 +1227,7 @@ async def declare_current_work(
                 targets=targets or [],
                 note=note,
                 task_id=task_id,
+                allow_parallel=allow_parallel,
                 disclosure=_disclosure(),
             ),
         )

@@ -325,8 +325,9 @@ at-least-once delivery; exactly-once room mutations come from `command_id`, not 
 leave. Successful authenticated inbound traffic or an acknowledged outbound batch may heartbeat the
 specific A2A connection; enqueue attempts, DNS success, and unacknowledged HTTP responses may not.
 When acknowledgements stop, ordinary presence policy grades the connection stale/disconnected and
-core releases leases/ends work through its existing paths. No adapter cleanup branch mutates claims
-directly.
+core releases exclusive leases through its existing paths. Declared work remains visible but stale
+until its owner resumes, updates, explicitly leaves, or ends it. No adapter cleanup branch mutates
+claims directly.
 
 **SSRF-safe egress.** Registering or discovering a remote endpoint is an authorized operation, not a
 URL copied from an arbitrary message. Require HTTPS outside explicit local-development policy;

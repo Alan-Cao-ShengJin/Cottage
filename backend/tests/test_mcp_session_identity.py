@@ -247,3 +247,73 @@ async def test_explicit_token_restores_mcp_profile_after_server_restart(make_roo
     view = (await presence.presence_for_room(await room.refresh()))[joined["participant_id"]]
     assert view.liveness == Liveness.LIVE_POLL
     assert view.runtime is not None and view.runtime.may_claim is True
+
+
+@pytest.mark.asyncio
+async def test_two_sessions_for_one_participant_keep_independent_connections(make_room) -> None:
+    """A one-off side call must not steal or replace the session doing the polling.
+
+    Real clients may open a second MCP transport for discovery or a single tool call.
+    Both transports represent the same seat, but each is separate evidence of liveness.
+    """
+    from app.core import presence, store
+    from app.db import database as db
+    from app.util import iso_in
+
+    room = await make_room()
+    polling_ctx = ctx_for("33333333333333333333333333333330")
+    side_ctx = ctx_for("44444444444444444444444444444440")
+    joined = await mcp_server.join_room(
+        invitation_token=room.join_token,
+        execution_mode="unattended_loop",
+        display_name="Two-session agent",
+        ctx=polling_ctx,
+    )
+    assert joined["ok"] is True
+
+    side = await mcp_server.get_room_state(
+        participant_token=joined["participant_token"], ctx=side_ctx
+    )
+    assert side["ok"] is True
+
+    polling_key = mcp_server._session_key(polling_ctx)
+    side_key = mcp_server._session_key(side_ctx)
+    assert polling_key is not None and side_key is not None
+    polling_binding = mcp_server._session_connections[polling_key]
+    side_binding = mcp_server._session_connections[side_key]
+    assert polling_binding.connection_id == joined["connection_id"]
+    assert side_binding.connection_id != polling_binding.connection_id
+
+    old_side_beat = iso_in(-30)
+    await db.execute(
+        "UPDATE connections SET last_heartbeat_at = ? WHERE id = ?",
+        (old_side_beat, side_binding.connection_id),
+    )
+    participant = await store.load_participant(joined["participant_id"])
+    await mcp_server._touch(participant, joined["cursor"], polling_ctx)
+
+    side_row = await db.fetch_one(
+        "SELECT closed_at, last_heartbeat_at FROM connections WHERE id = ?",
+        (side_binding.connection_id,),
+    )
+    polling_row = await db.fetch_one(
+        "SELECT closed_at FROM connections WHERE id = ?", (polling_binding.connection_id,)
+    )
+    assert polling_row is not None and polling_row["closed_at"] is None
+    assert side_row is not None and side_row["closed_at"] is None
+    assert side_row["last_heartbeat_at"] == old_side_beat
+
+    # Reaping one old session while its sibling is healthy is not a participant
+    # transition. In particular it must not publish another live_poll event or flap
+    # through disconnected during the handover.
+    await db.execute(
+        "UPDATE connections SET last_heartbeat_at = ? WHERE id = ?",
+        (iso_in(-90), side_binding.connection_id),
+    )
+    seq_before_reap = (await room.refresh()).event_seq
+    await presence.reap_dead_connections()
+    rows = await db.fetch_all(
+        "SELECT type, payload FROM room_events WHERE room_id = ? AND seq > ? ORDER BY seq",
+        (room.room.id, seq_before_reap),
+    )
+    assert [row["type"] for row in rows] == []

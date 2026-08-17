@@ -774,7 +774,7 @@ async def test_i7_reaper_is_idempotent(make_room, join):
     assert second == [], "a second pass must not emit a duplicate expiry event"
 
 
-async def test_i7_dead_connection_reaper_releases_claims_and_ends_work(make_room, join):
+async def test_i7_dead_connection_reaper_releases_claims_but_preserves_work(make_room, join):
     """The ungraceful case: nobody said goodbye, the heartbeat just stopped."""
     room = await make_room()
     alice = await join(room, display_name="Alice")
@@ -794,14 +794,20 @@ async def test_i7_dead_connection_reaper_releases_claims_and_ends_work(make_room
     events = await presence.reap_dead_connections()
     types = {e.type.value for e in events}
     assert "task.claim_released" in types
-    assert "work.ended" in types
+    assert "work.ended" not in types
     assert "presence.changed" in types
 
     assert (await store.load_task(task_id)).claim is None
     assert (await store.load_task(task_id)).status == TaskStatus.OPEN
-    ended = await store.load_work(declaration.id)
-    assert ended.ended_at is not None
-    assert ended.end_reason.value == "presence_lost"
+    preserved = await store.load_work(declaration.id)
+    assert preserved.ended_at is None
+    assert preserved.end_reason is None
+
+    # The normal freshness pass can now mark the recoverable card as untrusted,
+    # without erasing what the participant said it was doing.
+    stale = await work.mark_stale_declarations(await room.refresh())
+    assert [event.type.value for event in stale] == ["work.stale"]
+    assert stale[0].payload["reason"] == "owner_presence_lost"
 
 
 async def test_i7_graceful_leave_releases_immediately(make_room, join):

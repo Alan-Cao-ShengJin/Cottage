@@ -442,6 +442,11 @@ async def test_rejoining_never_demotes_an_existing_participant(fresh_db, org, ma
     identity_row = await db.fetch_one(
         "SELECT * FROM agent_identities WHERE id = ?", (owner_identity_id,)
     )
+    invitation_before = await db.fetch_one(
+        "SELECT redemptions FROM invitations WHERE token_hash = ?",
+        (rooms.hash_token(room.join_token),),
+    )
+    seq_before = (await room.refresh()).event_seq
     rejoined = await rooms.join_room(
         identity=store.to_identity(identity_row),
         command=JoinRoomCommand(invitation_token=room.join_token, display_name="Room Owner"),
@@ -453,9 +458,69 @@ async def test_rejoining_never_demotes_an_existing_participant(fresh_db, org, ma
     assert rejoined.participant.role.value == "owner"
     assert Scope.ROOM_ADMIN in rejoined.participant.scopes
 
+    invitation_after = await db.fetch_one(
+        "SELECT redemptions FROM invitations WHERE token_hash = ?",
+        (rooms.hash_token(room.join_token),),
+    )
+    assert invitation_before is not None and invitation_after is not None
+    assert invitation_after["redemptions"] == invitation_before["redemptions"]
+    replay_events = await eventlog.read_since(room.room.id, seq_before)
+    assert [event.type.value for event in replay_events] == ["participant.joined"]
+
     # The returned token works; the old one is rotated out, which is expected on rejoin.
     reloaded = await store.load_participant_by_token(rejoined.participant_token)
     assert reloaded.id == room.owner.id
+
+
+async def test_reusing_an_exhausted_invite_is_idempotent_for_the_same_identity(
+    fresh_db, org, make_room
+):
+    """A reconnect is not another person and must not burn another invitation place."""
+    from app.domain.commands import CreateInvitationCommand, JoinRoomCommand
+
+    room = await make_room()
+    invitation = await rooms.create_invitation(
+        participant=room.owner, command=CreateInvitationCommand(max_redemptions=1)
+    )
+    identity = await rooms.create_identity(
+        org_id=room.org_id,
+        owner_user_id=room.owner_user_id,
+        display_name="Returning client",
+    )
+    first = await rooms.join_room(
+        identity=identity,
+        command=JoinRoomCommand(invitation_token=invitation.token, display_name="Returning client"),
+    )
+    seq_after_first = (await room.refresh()).event_seq
+    second = await rooms.join_room(
+        identity=identity,
+        command=JoinRoomCommand(invitation_token=invitation.token, display_name="Returning client"),
+    )
+
+    assert second.participant.id == first.participant.id
+    stored = await db.fetch_one(
+        "SELECT redemptions, max_redemptions FROM invitations WHERE id = ?",
+        (invitation.invitation.id,),
+    )
+    assert stored is not None
+    assert stored["redemptions"] == stored["max_redemptions"] == 1
+    reconnect_events = await eventlog.read_since(room.room.id, seq_after_first)
+    assert [event.type.value for event in reconnect_events] == ["participant.joined"]
+
+    newcomer = await rooms.create_identity(
+        org_id=room.org_id,
+        owner_user_id=room.owner_user_id,
+        display_name="Actually another seat",
+    )
+    from app.core.errors import Forbidden
+
+    with pytest.raises(Forbidden):
+        await rooms.join_room(
+            identity=newcomer,
+            command=JoinRoomCommand(
+                invitation_token=invitation.token, display_name="Actually another seat"
+            ),
+        )
 
 
 async def test_a_higher_role_invitation_still_promotes(fresh_db, org, make_room):
@@ -662,6 +727,26 @@ async def test_mcp_long_poll_returns_missed_events_and_advances_its_cursor(
     )
     assert again["events"] == []
     del created
+
+
+async def test_mcp_message_unicode_round_trips_without_transcoding(fresh_db, org, make_room):
+    """The server preserves typographic punctuation, accents, and non-Latin text."""
+    room = await make_room()
+    joined = await mcp_tools.join_room(
+        invitation_token=room.join_token,
+        display_name="Unicode sender",
+        execution_mode="unattended_loop",
+    )
+    token = joined["participant_token"]
+    body = "I\u2019m coordinating \u2014 caf\u00e9 review \u6771\u4eac"
+    posted = await mcp_tools.post_message(body=body, participant_token=token)
+    assert posted["ok"] is True
+
+    got = await mcp_tools.await_room_events(
+        since_seq=joined["cursor"], timeout_seconds=1, participant_token=token
+    )
+    messages = [event for event in got["events"] if event["type"] == "message.posted"]
+    assert messages[-1]["body"] == body
 
 
 async def test_mcp_errors_are_actionable_data_not_exceptions(fresh_db, org, make_room, join):

@@ -314,15 +314,15 @@ async def connect(
         if attachment_event is not None:
             events.append(attachment_event)
         if after != before:
-            events.append(
-                await _append_presence_changed(
-                    tx,
-                    room=live_room,
-                    participant=participant,
-                    liveness=after,
-                    runtime=runtime,
-                )
+            changed = await _append_presence_changed(
+                tx,
+                room=live_room,
+                participant=participant,
+                liveness=after,
+                runtime=runtime,
             )
+            if changed is not None:
+                events.append(changed)
         return CommandOutcome(
             result={"connection_id": connection_id, "attachment_id": attachment_id},
             events=events,
@@ -392,7 +392,7 @@ async def heartbeat(
 
 
 async def disconnect(*, connection_id: str, participant: Participant) -> None:
-    """Close one connection. Losing the *last* one ends work and releases claims."""
+    """Close one connection. Losing the *last* one releases exclusive claims."""
     room = await store.load_room(participant.room_id)
 
     async def body(tx: db.Tx) -> CommandOutcome:
@@ -408,11 +408,11 @@ async def disconnect(*, connection_id: str, participant: Participant) -> None:
         liveness = await _grade_participant(tx, participant.id, room)
         if liveness == Liveness.DISCONNECTED:
             events += await _on_disconnected_tx(tx, participant=participant, room=room)
-        events.append(
-            await _append_presence_changed(
-                tx, room=room, participant=participant, liveness=liveness, runtime=None
-            )
+        changed = await _append_presence_changed(
+            tx, room=room, participant=participant, liveness=liveness, runtime=None
         )
+        if changed is not None:
+            events.append(changed)
         return CommandOutcome(events=events)
 
     await execute_command(
@@ -436,17 +436,18 @@ async def close_all_connections_tx(tx: db.Tx, *, participant: Participant) -> li
 async def _on_disconnected_tx(
     tx: db.Tx, *, participant: Participant, room: Room
 ) -> list[EventEnvelope]:
-    """A participant lost its last connection: release its holds.
+    """A participant lost its last connection: release its exclusive holds.
 
     Doing this here rather than waiting for lease expiry is what makes a clean
     disconnect fast. The reaper remains the backstop for the ungraceful case, where
-    nobody told us anything.
+    nobody told us anything. A work declaration is not an exclusive hold, however:
+    it records the participant's stated intent and survives a transport restart. The
+    freshness pass marks it untrusted while the owner is absent; explicit leave and
+    actual work/task exits are what end it.
     """
-    from . import tasks, work
+    from . import tasks
 
-    events = await tasks.release_all_claims_tx(tx, participant=participant, reason="presence_lost")
-    events += await work.end_all_open_tx(tx, participant=participant, reason="presence_lost")
-    return events
+    return await tasks.release_all_claims_tx(tx, participant=participant, reason="presence_lost")
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +514,25 @@ async def _append_presence_changed(
     participant: Participant,
     liveness: Liveness,
     runtime: RuntimePolicy | None,
-) -> EventEnvelope:
+) -> EventEnvelope | None:
+    # Presence is derived rather than stored, so a heartbeat can observe ``idle``
+    # immediately before refreshing itself back to ``live_poll`` even though no
+    # ``idle`` transition was ever published. Compare with the last public state,
+    # not only with that transient pre-beat grade, or every poll produces an
+    # identical live event and teaches consumers to ignore the stream.
+    previous_row = await tx.fetch_one(
+        """
+        SELECT payload FROM room_events
+        WHERE room_id = ? AND type = ? AND actor_participant_id = ?
+        ORDER BY seq DESC LIMIT 1
+        """,
+        (room.id, EventType.PRESENCE_CHANGED.value, participant.id),
+    )
+    if previous_row is not None:
+        previous_payload = db.loads(previous_row["payload"], {})
+        if previous_payload.get("liveness") == liveness.value:
+            return None
+
     rows = await tx.fetch_all(
         "SELECT * FROM connections WHERE participant_id = ? AND closed_at IS NULL",
         (participant.id,),
@@ -1072,11 +1091,11 @@ async def reap_dead_connections() -> list[EventEnvelope]:
                 batch: list[EventEnvelope] = []
                 if liveness == Liveness.DISCONNECTED:
                     batch += await _on_disconnected_tx(tx, participant=participant, room=room)
-                batch.append(
-                    await _append_presence_changed(
-                        tx, room=room, participant=participant, liveness=liveness, runtime=None
-                    )
+                changed = await _append_presence_changed(
+                    tx, room=room, participant=participant, liveness=liveness, runtime=None
                 )
+                if changed is not None:
+                    batch.append(changed)
             events += batch
             log.info(
                 "reaped connection %s for participant %s (%s)",

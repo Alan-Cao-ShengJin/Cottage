@@ -206,6 +206,10 @@ class DeclareWorkCommand(CommandMeta):
     task_id: str | None = None
     note: str = Field(default="", max_length=2000)
     expected_done_by: str | None = None
+    #: The default models one participant's singular "current work": an identical
+    #: reconnect reuses it and a changed declaration supersedes it. A runtime that
+    #: genuinely performs several concurrent streams must say so explicitly.
+    allow_parallel: bool = False
     disclosure: Disclosure = Field(default_factory=Disclosure)
 
 

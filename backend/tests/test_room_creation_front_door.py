@@ -13,6 +13,8 @@ rooms in that org; an identity minted by redeeming someone's join link may not.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.core import rooms, store
@@ -328,13 +330,33 @@ async def test_the_mcp_tool_itself_creates_a_room_for_an_oauth_agent(fresh_db, o
 
     monkeypatch.setattr(mcp_server, "principal_for_tool", fake_caller)
 
-    result = await mcp_server.create_room(name="unattended proof", principal_token="", ctx=None)
+    request = SimpleNamespace(headers={"mcp-session-id": "55555555555555555555555555555550"})
+    ctx = SimpleNamespace(request_context=SimpleNamespace(request=request), session=object())
+    result = await mcp_server.create_room(
+        name="unattended proof",
+        principal_token="",
+        display_name="Caller-controlled spoof",
+        execution_mode="unattended_loop",
+        ctx=ctx,
+    )
     assert result["ok"] is True, result
     assert result["join_token"], "the one thing a human hands to a friend"
     assert result["participant_token"]
+    assert result["execution_mode"] == "unattended_loop"
+    assert result["display_name"] == "ChatGPT (Alan)"
+    assert result["display_name_was_overridden"] is True
 
     participant = await store.load_participant(result["participant_id"])
     assert Scope.ROOM_ADMIN in participant.scopes, "the creator must be able to steer"
     # The bound name, not the tool's "Room creator" default: the room an agent creates
     # must not be the one place it can call itself anything.
     assert participant.identity.display_name == "ChatGPT (Alan)"
+
+    # Declaring before the first long poll is valid: create_room already connected
+    # this exact MCP session, and every subsequent tool call heartbeats it first.
+    declared = await mcp_server.declare_current_work(
+        headline="Start immediately", targets=["room setup"], ctx=ctx
+    )
+    assert declared["ok"] is True
+    assert declared["work"]["status"] == "active"
+    assert declared["work"]["ended_at"] is None

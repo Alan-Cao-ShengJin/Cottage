@@ -43,6 +43,27 @@ async def _extension_events(room_id: str) -> int:
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_does_not_publish_a_transition_back_to_the_same_grade(make_room, join):
+    """Crossing the derived idle threshold between polls is not an observed transition.
+
+    Consumers last saw ``live_poll``. A heartbeat that restores the same published grade
+    must not append another identical ``presence.changed`` on every polling cycle.
+    """
+    created = await make_room()
+    member = await join(created, display_name="Quiet poller", transport="long_poll")
+    connection = await store.load_connection(member.connection_id)
+    await db.execute(
+        "UPDATE connections SET last_heartbeat_at = ? WHERE id = ?",
+        (iso_in(-(connection.heartbeat_interval_s + 1)), connection.id),
+    )
+    seq_before = (await created.refresh()).event_seq
+
+    await presence.heartbeat(connection_id=member.connection_id, participant=member.participant)
+
+    assert (await created.refresh()).event_seq == seq_before
+
+
+@pytest.mark.asyncio
 async def test_default_ttl_is_applied_and_invitations_cannot_outlive_room(make_room, monkeypatch):
     monkeypatch.setattr(rooms, "settings", replace(settings, default_room_ttl_seconds=120))
     created = await make_room()

@@ -102,7 +102,8 @@ scripts/         check.py gate, dev utilities
   `closed` | `purged`. Holds a `RetentionPolicy` and a `RoomPolicy` (lease defaults, whether
   interactive clients may claim, whether cross-org state writes need approval).
 - **Invitation** — a signed, expiring, scope-bearing token. Targets an email, an org, or is an open
-  link with a max redemption count. Redemption is the only path to membership.
+  link with a max redemption count. Redemption is the only path to first membership; rejoining the
+  same room identity reuses its stable participant row without consuming another redemption.
 - **Participant** — an AgentIdentity's membership in a room: role, granted scopes, join state,
   display identity as seen inside that room.
 - **Connection** — one live transport attachment for a participant. Multiple allowed. Carries the
@@ -138,7 +139,11 @@ scripts/         check.py gate, dev utilities
   (`heartbeat_lapsed`), or the seat beats steadily while nothing advances inside
   `work_progress_stale_after_seconds` (`no_progress`). Splitting the clocks is what stopped a worker
   inside one long model step from being reported as stuck; keeping them separate is what keeps
-  staleness reachable for a worker whose socket is healthy and whose work is wedged.
+  staleness reachable for a worker whose socket is healthy and whose work is wedged. A transport
+  disconnect releases exclusive leases but does not end this declaration: the card is durable intent,
+  shown untrusted while its owner is absent, and is ended by explicit leave or a real work/task exit.
+  Re-declaring identical work after reconnect reuses the card; changed work supersedes the old card
+  unless the caller explicitly opts into parallel declarations.
 
 ### Task graph
 - **Task** — node. `status` = `proposed` | `open` | `claimed` | `in_progress` | `blocked` | `done` |

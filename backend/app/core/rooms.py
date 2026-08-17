@@ -31,7 +31,7 @@ from ..domain.commands import (
     RevokeCredentialCommand,
     SetParticipantRoleCommand,
 )
-from ..domain.events import EventActor, EventType
+from ..domain.events import EventActor, EventEnvelope, EventType
 from ..domain.identity import (
     AgentIdentity,
     IdentityProvenance,
@@ -45,6 +45,7 @@ from ..domain.room import (
     Invitation,
     InvitationTargetKind,
     LeaveReason,
+    MembershipState,
     Participant,
     ParticipantRole,
     RetentionPolicy,
@@ -808,7 +809,11 @@ async def revoke_invitation(*, participant: Participant, invitation_id: str) -> 
 
 
 def _validate_redeemable(
-    invitation: Invitation, identity: AgentIdentity, user_email: str | None
+    invitation: Invitation,
+    identity: AgentIdentity,
+    user_email: str | None,
+    *,
+    allow_exhausted: bool = False,
 ) -> None:
     """Every reason an invitation can be unusable, checked in one place.
 
@@ -820,7 +825,7 @@ def _validate_redeemable(
         raise Forbidden("This invitation has been revoked.")
     if is_past(invitation.expires_at):
         raise Forbidden("This invitation has expired.")
-    if invitation.is_exhausted:
+    if invitation.is_exhausted and not allow_exhausted:
         raise Forbidden("This invitation has already been used.")
     if (
         invitation.target_kind == InvitationTargetKind.ORG
@@ -861,7 +866,13 @@ async def join_room(
 
     room = await store.load_room(invitation.room_id)
     authz.require_writable(room)
-    _validate_redeemable(invitation, identity, owner_email)
+    existing = await store.find_participant_by_identity(room.id, identity.id)
+    _validate_redeemable(
+        invitation,
+        identity,
+        owner_email,
+        allow_exhausted=(existing is not None and existing.state is not MembershipState.REMOVED),
+    )
 
     if room.visibility == RoomVisibility.INTERNAL and identity.org_id != room.org_id:
         raise Forbidden(
@@ -877,8 +888,6 @@ async def join_room(
             if invitation.target_kind == InvitationTargetKind.ORG
             else TrustTier.UNTRUSTED
         )
-
-    existing = await store.find_participant_by_identity(room.id, identity.id)
 
     # Redeeming an invitation must never *reduce* standing in a room. An owner who
     # clicks the room's own collaborator join link would otherwise demote themselves
@@ -912,22 +921,35 @@ async def join_room(
         if live_invitation_row is None:
             raise Forbidden("This invitation is no longer usable.")
         live_invitation = store.to_invitation(live_invitation_row)
-        _validate_redeemable(live_invitation, identity, owner_email)
-
-        # Consume a redemption with a guarded update. The CHECK on the table plus
-        # this predicate mean two concurrent redemptions of a single-use invitation
-        # cannot both succeed on any engine.
-        affected = await tx.execute(
-            """
-            UPDATE invitations SET redemptions = redemptions + 1
-            WHERE id = ? AND room_id = ? AND revoked_at IS NULL
-              AND redemptions < max_redemptions
-              AND (expires_at IS NULL OR expires_at > ?)
-            """,
-            (invitation.id, room.id, utcnow_iso()),
+        live_existing = await store.find_participant_by_identity(room.id, identity.id, tx=tx)
+        is_rejoin = live_existing is not None
+        capacity_is_idempotent = (
+            live_existing is not None and live_existing.state is not MembershipState.REMOVED
         )
-        if affected == 0:
-            raise Forbidden("This invitation is no longer usable.")
+        resolved_participant_id = live_existing.id if live_existing is not None else participant_id
+        _validate_redeemable(
+            live_invitation,
+            identity,
+            owner_email,
+            allow_exhausted=capacity_is_idempotent,
+        )
+
+        if not capacity_is_idempotent:
+            # Consume a redemption with a guarded update. The CHECK on the table plus
+            # this predicate mean two concurrent first-time redemptions of a single-use
+            # invitation cannot both succeed on any engine. Reconnecting an identity
+            # already represented by this stable participant row consumes no new seat.
+            affected = await tx.execute(
+                """
+                UPDATE invitations SET redemptions = redemptions + 1
+                WHERE id = ? AND room_id = ? AND revoked_at IS NULL
+                  AND redemptions < max_redemptions
+                  AND (expires_at IS NULL OR expires_at > ?)
+                """,
+                (invitation.id, room.id, utcnow_iso()),
+            )
+            if affected == 0:
+                raise Forbidden("This invitation is no longer usable.")
 
         if command.capabilities or command.host_class != HostClass.UNKNOWN:
             await tx.execute(
@@ -946,7 +968,7 @@ async def join_room(
                 ),
             )
 
-        if existing:
+        if live_existing:
             await tx.execute(
                 """
                 UPDATE participants
@@ -961,13 +983,13 @@ async def join_room(
                     display_name,
                     hash_token(participant_token),
                     now,
-                    participant_id,
+                    resolved_participant_id,
                 ),
             )
         else:
             await _insert_participant_tx(
                 tx,
-                participant_id=participant_id,
+                participant_id=resolved_participant_id,
                 room_id=room.id,
                 identity=identity,
                 role=role,
@@ -977,31 +999,38 @@ async def join_room(
                 token_hash=hash_token(participant_token),
             )
 
-        redeemed = await eventlog.append(
-            tx,
-            room_id=room.id,
-            type_=EventType.INVITATION_REDEEMED,
-            actor=EventActor(
-                participant_id=participant_id,
-                display_name=display_name,
-                kind=identity.kind,
-                org_id=identity.org_id,
-            ),
-            payload={"invitation_id": invitation.id, "participant_id": participant_id},
-            causation_id=command.command_id,
-        )
+        events: list[EventEnvelope] = []
+        if not capacity_is_idempotent:
+            events.append(
+                await eventlog.append(
+                    tx,
+                    room_id=room.id,
+                    type_=EventType.INVITATION_REDEEMED,
+                    actor=EventActor(
+                        participant_id=resolved_participant_id,
+                        display_name=display_name,
+                        kind=identity.kind,
+                        org_id=identity.org_id,
+                    ),
+                    payload={
+                        "invitation_id": invitation.id,
+                        "participant_id": resolved_participant_id,
+                    },
+                    causation_id=command.command_id,
+                )
+            )
         joined = await eventlog.append(
             tx,
             room_id=room.id,
             type_=EventType.PARTICIPANT_JOINED,
             actor=EventActor(
-                participant_id=participant_id,
+                participant_id=resolved_participant_id,
                 display_name=display_name,
                 kind=identity.kind,
                 org_id=identity.org_id,
             ),
             payload={
-                "participant_id": participant_id,
+                "participant_id": resolved_participant_id,
                 "display_name": display_name,
                 "org_id": identity.org_id,
                 "kind": identity.kind.value,
@@ -1010,13 +1039,13 @@ async def join_room(
                 "scopes": [s.value for s in scopes],
                 "trust": trust.value,
                 "declared_capabilities": declared,
-                "rejoined": existing is not None,
+                "rejoined": is_rejoin,
             },
             causation_id=command.command_id,
         )
         return CommandOutcome(
-            result={"participant_id": participant_id, "room_id": room.id},
-            events=[redeemed, joined],
+            result={"participant_id": resolved_participant_id, "room_id": room.id},
+            events=[*events, joined],
         )
 
     outcome = await execute_command(

@@ -254,17 +254,15 @@ That script plays both roles — operator, then stranger — because the gap it 
 invisible to a thirteen-agent adversarial review that only ever looked from the operator's
 side (D-024).
 
-`execution_mode` is required and has no default — `unattended_loop` for something that works
+For `join_room`, `execution_mode` is required and has no default — `unattended_loop` for something that works
 on its own (Claude Code, Codex), `human_turn_only` for a chat assistant that acts when its
 human does, `observer` to watch. It is asked rather than guessed because an attended client
 left on autonomous defaults **over-claims**, and then everyone waits on work it will never do
 unprompted.
 
-`execution_mode` is required and has no default — `unattended_loop` for something that works
-on its own (Claude Code, Codex), `human_turn_only` for a chat assistant that acts when its
-human does, `observer` to watch. It is asked rather than guessed because an attended client
-left on autonomous defaults **over-claims**, and then everyone waits on work it will never do
-unprompted.
+`create_room` accepts the same field. It defaults to `unattended_loop` only for compatibility with
+the creator behavior shipped before the field existed; clients that act only on human turns should
+send `human_turn_only` explicitly.
 
 ## 6. The limits, stated plainly
 

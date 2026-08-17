@@ -53,6 +53,53 @@ async def _card(work_id: str) -> dict:
     return {"ended_at": row["ended_at"], "end_reason": row["end_reason"]}
 
 
+async def test_redeclaring_identical_current_work_reuses_the_open_card(make_room, join):
+    """A routine reconnect must not make one participant look like four workers."""
+    room = await make_room()
+    member = await join(room, display_name="Restarting worker")
+    command = DeclareWorkCommand(
+        headline="Hosting the room; standing by",
+        targets=["room:lobby"],
+        note="poll loop",
+    )
+
+    first = await work.declare(participant=member.participant, command=command)
+    seq_after_first = (await room.refresh()).event_seq
+    second = await work.declare(participant=member.participant, command=command)
+
+    assert second.id == first.id
+    assert (await room.refresh()).event_seq == seq_after_first
+    open_cards = await store.list_open_work(room.room.id)
+    assert [card.id for card in open_cards if card.participant_id == member.participant.id] == [
+        first.id
+    ]
+
+
+async def test_changed_current_work_supersedes_unless_parallel_is_explicit(make_room, join):
+    room = await make_room()
+    member = await join(room, display_name="Multi-stream worker")
+    first = await work.declare(
+        participant=member.participant,
+        command=DeclareWorkCommand(headline="First stream"),
+    )
+    second = await work.declare(
+        participant=member.participant,
+        command=DeclareWorkCommand(headline="Second stream"),
+    )
+    assert (await store.load_work(first.id)).end_reason is WorkEndReason.SUPERSEDED
+
+    third = await work.declare(
+        participant=member.participant,
+        command=DeclareWorkCommand(headline="Parallel stream", allow_parallel=True),
+    )
+    open_ids = {
+        card.id
+        for card in await store.list_open_work(room.room.id)
+        if card.participant_id == member.participant.id
+    }
+    assert open_ids == {second.id, third.id}
+
+
 async def test_completing_a_task_closes_its_work_card(make_room, join):
     """The exit that was missed, and the one a companion takes most often.
 

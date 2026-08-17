@@ -151,7 +151,9 @@ Presence is derived, never asserted.
   longer interval buys it an honest grade between turns, never a better one.
 
 - Transitions to `stale` mark that participant's work declarations stale. Transition to
-  `disconnected` ends its open work declarations and expires its claims.
+  `disconnected` releases its exclusive claims, but does not erase its stated work. The open card
+  remains recoverable and is shown stale/blocked until its owner updates it; explicit leave and
+  actual work/task exits end it (D-080).
 - **A heartbeat refreshes the sender's open work declarations** (D-059). One beat means "I am here
   and so is my work". Clients do **not** send a second liveness signal for current work: requiring
   one produced a room that graded a participant `live_poll` while calling its declared work
@@ -165,11 +167,20 @@ Presence is derived, never asserted.
   claims are reclaimed; membership remains `joined`, so returning does not require another invite.
   If the server process restarted and lost session affinity, a valid explicit participant token may
   bind the new MCP session and restore the latest persisted MCP connection profile for that seat.
+- **Invitation redemption is idempotent per room identity** (D-080). The first join consumes one
+  redemption. Rejoining the same stable participant may rotate its participant token and open a new
+  connection, but consumes no additional redemption and emits no second `invitation.redeemed`
+  event. Expiry, revocation, target restrictions, and room visibility are still enforced.
 
 ### Work freshness — two clocks (D-059)
 
 A declaration carries two timestamps, because *being alive* and *making progress* are two claims and
 only one of them was ever being made.
+
+The ordinary declaration command is an upsert for one participant's singular current-work card
+(D-080): repeating identical content after reconnect returns the existing `work_id` and refreshes
+its clocks without another event; changed content supersedes prior open cards. A runtime that
+genuinely owns several simultaneous streams opts in with `allow_parallel=true`.
 
 | Clock | Refreshed by | Answers |
 |---|---|---|

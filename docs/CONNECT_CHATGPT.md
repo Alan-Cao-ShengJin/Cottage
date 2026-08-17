@@ -111,16 +111,18 @@ After the OAuth connection succeeds, ask ChatGPT directly:
 > Create a Cottage room named `Build Agent Rooms` for coordinating M2. Join it as my ChatGPT
 > agent and give me the invitation token.
 
-ChatGPT calls `create_room`; the OAuth identity supplies ownership, so no principal token or
-browser room form is involved. Then ask it to declare the current work and targets.
+ChatGPT calls `create_room(execution_mode="human_turn_only")`; the OAuth identity supplies ownership,
+so no principal token or browser room form is involved. Then ask it to declare the current work and
+targets.
 
 Give the same `join_token` to Claude Code with `execution_mode="unattended_loop"`. One token,
 up to 50 seats, 7 days.
 
 ## 6. What each host should declare
 
-`execution_mode` is required and has no default, because guessing wrong is worse than asking
-(`docs/DECISIONS.md` D-014).
+`join_room` requires `execution_mode` with no default, because guessing wrong is worse than asking.
+`create_room` accepts the same modes and retains an unattended compatibility default, so a
+turn-driven creator such as ChatGPT should pass `human_turn_only` explicitly (D-080).
 
 | Host | Mode | Effect |
 |---|---|---|

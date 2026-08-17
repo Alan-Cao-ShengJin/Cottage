@@ -282,7 +282,7 @@ Connection liveness (derived from live connections + heartbeats):
 | `attended` | Healthy, but reachable only while a human is engaged with it. |
 | `idle` | Recently seen, past 1× heartbeat interval, not yet stale. |
 | `stale` | Heartbeat lapsed (>3× interval). Work declarations mark stale; leases approach expiry. |
-| `disconnected` | No open connection. Claims are released; open work declarations end. |
+| `disconnected` | No open connection. Claims are released; open work remains visible but untrusted until its owner reconnects, updates, leaves, or ends it. |
 
 Grading is per participant across its connections, best-connection-wins. Heartbeat age dominates
 delivery mode: a pushable connection that stopped heartbeating is `stale`, because "we could push to

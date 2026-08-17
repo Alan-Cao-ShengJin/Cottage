@@ -60,6 +60,43 @@ async def declare(*, participant: Participant, command: DeclareWorkCommand) -> W
     async def body(tx: db.Tx) -> CommandOutcome:
         if command.task_id is not None:
             await store.load_task_for_room(room.id, command.task_id, tx=tx)
+        existing_open = [
+            item
+            for item in await store.list_open_work(room.id, tx=tx)
+            if item.participant_id == participant.id
+        ]
+        if not command.allow_parallel:
+            identical = next(
+                (
+                    item
+                    for item in existing_open
+                    if item.headline == command.headline
+                    and item.status == command.status
+                    and item.targets == targets
+                    and item.task_id == command.task_id
+                    and item.note == command.note
+                    and item.expected_done_by == command.expected_done_by
+                    and item.privacy_class == decision.privacy_class
+                ),
+                None,
+            )
+            if identical is not None and len(existing_open) == 1:
+                # Re-running startup guidance is evidence that the same work is still
+                # alive, not a second copy of it. Refresh both clocks without adding a
+                # no-op event to the room stream.
+                await tx.execute(
+                    "UPDATE work_declarations SET updated_at = ?, heartbeat_at = ?, "
+                    "progress_at = ? WHERE id = ? AND ended_at IS NULL",
+                    (now, now, now, identical.id),
+                )
+                return CommandOutcome(result={"work_id": identical.id})
+
+            if existing_open:
+                superseded = await end_all_open_tx(tx, participant=participant, reason="superseded")
+            else:
+                superseded = []
+        else:
+            superseded = []
         await tx.execute(
             """
             INSERT INTO work_declarations (
@@ -103,7 +140,7 @@ async def declare(*, participant: Participant, command: DeclareWorkCommand) -> W
             disclosure=decision,
             causation_id=command.command_id,
         )
-        events: list[EventEnvelope] = [event]
+        events: list[EventEnvelope] = [*superseded, event]
         # Detection runs inside the same transaction so a conflict cannot exist
         # without the declaration that caused it, or vice versa.
         events += await conflicts.detect_overlapping_work_tx(
@@ -269,8 +306,8 @@ async def end_all_open_tx(
 ) -> list[EventEnvelope]:
     """End every open declaration for a participant, inside the caller's transaction.
 
-    Called on graceful leave and on losing the last connection: an unowned "current
-    work" card is worse than no card, because other participants coordinate around it.
+    Called on graceful leave. Losing a transport is not a declaration that the work
+    ceased: presence/freshness marks the card untrusted until its owner reconnects.
     """
     rows = await tx.fetch_all(
         "SELECT id FROM work_declarations WHERE participant_id = ? AND ended_at IS NULL",
@@ -279,11 +316,12 @@ async def end_all_open_tx(
     if not rows:
         return []
 
-    end_reason = (
-        WorkEndReason.PRESENCE_LOST.value
-        if reason in {"presence_lost", "participant_left"}
-        else WorkEndReason.ABANDONED.value
-    )
+    if reason in {"presence_lost", "participant_left"}:
+        end_reason = WorkEndReason.PRESENCE_LOST.value
+    elif reason == "superseded":
+        end_reason = WorkEndReason.SUPERSEDED.value
+    else:
+        end_reason = WorkEndReason.ABANDONED.value
     now = utcnow_iso()
     events: list[EventEnvelope] = []
     for row in rows:

@@ -3613,3 +3613,44 @@ grades and closes the connection, work becomes stale, and leases are released. T
 remains joined and the event log retains the transition. Rejected: a server heartbeat emitted on
 behalf of a silent client, never reaping MCP connections, treating the participant's best connection
 as every session's connection, or branching on Claude/Codex/vendor names.
+
+## D-080 — Transport loss does not erase identity, intent, or invitation capacity
+
+**Date:** 2026-08-17
+**Status:** accepted
+**Context:** the first outside Claude Code client reported one lifecycle defect through several
+surfaces. It could create and connect, but declaring before a long poll produced work that appeared
+dead; closing a transport ended that declaration within seconds despite a documented freshness
+window; retrying the same invitation as the same account consumed another redemption; and a second
+MCP transport could make the polling transport's presence appear displaced. The create tool also
+accepted a name OAuth could not honor and exposed no execution-mode choice.
+
+### The decision
+
+A connection, a participant, and a work declaration have different lifetimes. Losing the last
+connection releases exclusive task claims immediately, because fencing must not wait on a vanished
+holder. It does not end open work: that card is durable stated intent, becomes untrusted through the
+ordinary presence/freshness projection, and can be resumed or corrected after reconnect. Explicit
+leave still ends every open declaration, as do completion, cancellation, stop, and an explicit work
+end. This preserves evidence without presenting absence as healthy execution.
+
+Invitation capacity counts distinct first joins, not transport retries. If the invitation still
+matches the identity and room, an identity already represented by a non-removed stable participant row
+may rejoin without incrementing `redemptions` or emitting another `invitation.redeemed`; expiry,
+revocation, audience targeting, and visibility remain enforced. The rejoin may still rotate the
+participant credential under D-056's existing contract.
+
+`create_room` now exposes the same execution-mode vocabulary as `join_room`. Existing callers retain
+the already-shipped unattended creator behavior through a compatibility default; new callers can
+state `human_turn_only` or `observer`. The result returns the effective OAuth-bound display name and
+whether it overrode the request. Every operation heartbeats only its exact MCP session connection,
+and two-session coexistence is a regression property rather than an assumption.
+
+One participant has one current-work card by default. An identical declaration after reconnect
+refreshes and returns the existing card without a new event; a changed declaration supersedes the
+old one. Clients doing genuine parallel work opt in explicitly. Presence events likewise describe
+published state transitions, not heartbeat implementation details: before appending, Cottage
+compares the new grade with that participant's last published grade. This suppresses repeated
+`live_poll` events and suppresses a false handover event when one old connection is reaped while a
+healthy sibling remains. UTF-8 message content is preserved end to end; clients doing their own
+SSE decoding remain responsible for decoding bytes once as UTF-8.

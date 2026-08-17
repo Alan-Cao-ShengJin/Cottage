@@ -450,7 +450,7 @@ exchange is deliberately not claimed until the next Claude Code run produces `/o
 
 ### M2.0q — MCP sessions resume their own connection, not an arbitrary one
 
-**Implemented locally; live verification pending (2026-08-17).** A live Codex join exposed a lifecycle contradiction. Rejoining the
+**Implemented and live-verified (2026-08-17).** A live Codex join exposed a lifecycle contradiction. Rejoining the
 same seat as `unattended_loop` returned a new pollable connection and `may_claim=true`, but
 `await_room_events` heartbeated `SELECT ... LIMIT 1`: an arbitrary older attended connection. The
 unattended connection was then reaped while the attended one stayed live, so the board contradicted
@@ -476,6 +476,44 @@ presence, and end-to-end sets pass (88 passed and 10 skipped); the complete back
 passing and 11 skipped tests. Mypy, Ruff lint, worker lint/format, and frontend
 typecheck pass. The standing unrelated failures remain the Windows abrupt-worker descendant test
 and three pre-existing backend format findings.
+
+Delivery evidence: Fly releases `deployment-01M07GQ0XQWZZZESPMQ6EBT0HP` and
+`deployment-01M07H6KT4QNB6E2SYC41846FA` proved exact-session recovery both across a reaped
+connection and across a server process replacement. Laptop 2 then returned to `live_poll`, declared
+work, and posted follow-up findings through the restored session.
+
+### M2.0r — Rejoining preserves intent instead of consuming or erasing it
+
+**Implemented locally; live verification pending (2026-08-17).** The first outside Claude Code client proved that connection
+recovery is only one part of a coherent join lifecycle. A creator could declare work before its
+first long poll and have the declaration born stale; losing the last transport connection ended
+the declaration immediately even though the room advertises a staleness grace period; reusing the
+same invitation as the same account consumed another redemption; and the creator API hid both its
+effective OAuth-bound name and its execution mode. A second MCP session for the same participant
+also needs an explicit regression so a read-only side call cannot clobber the polling session.
+
+Make every authenticated MCP tool call evidence for that exact session before performing its
+operation, including a creator's first declaration. Add `execution_mode` to `create_room`, retaining
+the existing unattended creator behavior as the compatibility default while exposing the choice to
+new clients. Return the effective OAuth-bound display name and whether the requested name was
+overridden. Redeeming an invitation becomes idempotent for an identity already in that room: it may
+rotate that participant's credential and reconnect the seat, but does not consume another place or
+emit another redemption event. Losing a transport still releases exclusive task claims, but no
+longer destroys the participant's open work card; explicit leave and real work/task exits remain the
+authoritative ways to end it. Prove two simultaneous MCP sessions retain independent connection
+lifecycles.
+
+The outside client's next restart cycle exposed the remaining stream symptoms: startup guidance
+created duplicate current-work cards, heartbeats emitted a fresh `presence.changed=live_poll` every
+poll even though the published grade never changed, and reaping one old connection during a healthy
+two-session handover could look like a participant flap. Make declaration singular by default
+(identical content reuses; changed content supersedes; parallel is explicit), compare presence with
+the last published grade before appending, document the five-grade liveness ladder in the briefing
+and state tool, and prove typographic punctuation, accents, and non-Latin text round-trip unchanged.
+
+Local evidence: 521 backend tests pass and 11 skip; mypy, Ruff lint, worker lint/format, and
+frontend typecheck pass. The only gate failures are the standing unrelated Windows abrupt-worker
+descendant-containment test and the two pre-existing formatter findings in MCP auth and core errors.
 
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
