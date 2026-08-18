@@ -62,6 +62,46 @@ class ParticipantRole(str, Enum):
     OWNER = "owner"
 
 
+class RoomRole(str, Enum):
+    """Where a seat sits in the coordination hierarchy — a different question from
+    what it may do (D-088).
+
+    `ParticipantRole` is the authority ladder: it resolves to scopes and it is what
+    "never reduce standing" is measured on. This answers "who coordinates whom", and
+    the two are deliberately independent axes. An orchestrator is normally also the
+    room's owner because it created the room, but the hierarchy position is not what
+    grants the power — every orchestrator action is gated on `room.admin` plus this
+    role plus a stated reason, the same three-part shape a directive already uses
+    (D-045). Deriving authority from the hierarchy label instead would let a
+    coordination position mint privileges, which is the failure ADR-013 records.
+
+    There is no `worker` member on purpose. A worker is downstream of its supervisor
+    and is not a participant (D-077, `domain/worker.py`); a worker that does join a
+    room as its own seat is a supervisor or an observer like any other agent, and
+    giving it a third name would invite the room to treat one entity as two.
+    """
+
+    #: The room's single active coordinator: owns the prioritized backlog, allocates
+    #: jobs, and replaces supervisor goals. Assigned to the creator's seat.
+    ORCHESTRATOR = "orchestrator"
+    #: A human's persistent representative: converts its human's requests into board
+    #: jobs, accepts an active goal, and is accountable for its own workers.
+    SUPERVISOR = "supervisor"
+    #: Present and reading. Takes no goal and owns no workers.
+    OBSERVER = "observer"
+    #: No position stated. The pre-D-088 state of every existing seat, and the state
+    #: of any seat whose role assignment has been retired without a replacement.
+    UNASSIGNED = "unassigned"
+
+
+#: How a seat came to hold its room role. Attribution only — nothing branches on it.
+class RoomRoleSource(str, Enum):
+    ROOM_CREATOR = "room_creator"
+    JOINED = "joined"
+    ASSIGNED = "assigned"
+    MIGRATION = "migration"
+
+
 OBSERVER_SCOPES: tuple[Scope, ...] = (
     Scope.ROOM_READ,
     Scope.EVENTS_SUBSCRIBE,
@@ -366,9 +406,18 @@ class RuntimeOperationalState(str, Enum):
     from its open connections and heartbeat age.
     """
 
+    #: The resting state of a persistent runtime: connected, consuming events, and
+    #: spending no model tokens. It is emphatically not `idle` — an idle process is
+    #: one nothing is expected of, and this one is watching the room (D-088).
     MONITORING = "monitoring"
     WORKING = "working"
     WAITING = "waiting"
+    #: An orchestrator turn: prioritizing the board, allocating jobs, replacing goals.
+    #: Distinguished from `working` because a reader needs to know the difference
+    #: between the room being coordinated and one seat doing its own work.
+    COORDINATING = "coordinating"
+    #: A supervisor turn: dispatching, monitoring or reviewing its own workers.
+    SUPERVISING = "supervising"
 
 
 class RuntimeOperation(BaseModel):

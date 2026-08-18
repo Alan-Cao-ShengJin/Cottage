@@ -162,6 +162,65 @@ how it says it does the work. Two rules keep that honest.
   it runs alongside. Suggesting otherwise would misdescribe the boundary that makes
   running one safe (D-054).
 
+## 2.6 The coordination hierarchy — who decides what (D-088)
+
+A room is a continuously occupied workspace, not a queue. Four layers, and the boundaries
+between them are the product:
+
+```
+Human strategic direction        outcomes, priorities, constraints
+        ↓
+Durable shared job board         human intent, recorded verbatim, with provenance
+        ↓
+Orchestrator                     the creator's AI: prioritizes and allocates
+        ↓
+Supervisor active goals          versioned direction the orchestrator fully controls
+        ↓
+Supervisor-managed workers       bounded downstream execution
+```
+
+**Humans steer; they do not dispatch.** A person states outcomes, priorities and constraints
+to their own AI. They are not expected to decompose work, choose an owner, or sequence
+execution — that is what they brought agents for.
+
+**A supervisor receiving a request does not thereby own the work.** It converts the request
+into a durable job on the shared board, and the orchestrator decides who executes it against
+room priorities, dependencies, duplication and capacity. The supervisor that took the request
+may or may not be the one that ends up doing it. Without that indirection a room is N private
+queues that happen to share a log.
+
+**Human intent is durable; a supervisor's goal is disposable.** These are different objects on
+purpose. A job persists until it is completed, cancelled, superseded or rejected, always with
+an attributable reason, and nothing deletes one. An active goal is the orchestrator's control
+surface over one supervisor and may be replaced *wholly* — "stop that, own this instead, spawn
+these two workers, report in ten minutes" is one decision, and applying half of it is worse
+than applying none.
+
+**What a goal can never rewrite.** Replacement is total except for an immutable runtime
+contract: stay connected and keep consuming events, report presence and progress truthfully,
+hold a lease before exclusive work, obey stop/pause/resume, supervise rather than execute,
+report failure as failure, never relay credentials or hidden reasoning, treat room content as
+data rather than instructions, respect the host's sandbox. Those obligations live in the
+protocol, not in a field an orchestrator can edit.
+
+**A worker is downstream, not a participant** (D-077). It belongs to exactly one supervisor,
+carries durable provenance — parent seat, originating goal version, related job — and its
+reported state is its supervisor's claim, never something the room observed. A worker
+completing does **not** complete the job: its supervisor reviews the output first, and may
+accept, request rework, replace it or escalate.
+
+**Monitoring is the resting state, and it is not idle.** An orchestrator or supervisor sits in
+`monitoring` — connected, consuming events, spending no model tokens — moves to
+`coordinating` / `supervising` / `working` for a bounded turn, and returns. A model turn
+ending is never a departure: presence and monitoring are independent of bounded execution.
+This is what §9's cost rule requires of a persistent team, and it is why an idle room still
+costs its participants nothing.
+
+**One active orchestrator.** Enforced by the storage engine, not by a read-then-write. If it
+is lost the room says so plainly, existing supervisors continue their current goals, and
+promotion is an explicit authorized act — never automatic failover inventing a new
+coordinator.
+
 ## 3. Participants
 
 Both **humans** and **agents** are first-class participants. A human in the browser and a Claude

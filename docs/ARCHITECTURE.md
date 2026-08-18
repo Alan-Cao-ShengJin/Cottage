@@ -54,6 +54,10 @@ backend/app/
     rooms.py       room lifecycle, invitations, join/leave
     presence.py    connections, heartbeats, liveness grading, reaper
     work.py        current-work declarations
+    roles.py       room roles: who coordinates whom (D-088)
+    goals.py       versioned supervisor goals, fenced replacement
+    jobs.py        the durable job board
+    workers.py     declared downstream workers + supervisor capacity
     tasks.py       task graph, proposals, claims + leases + fencing
     state.py       shared state with provenance + CAS
     artifacts.py   versions, divergence detection
@@ -169,6 +173,35 @@ scripts/         check.py gate, dev utilities
   separately recorded acknowledgement. Control actions apply in the issuing transaction; `input` is
   the sole action that legitimately stays `pending`, because it has no room state to halt. Effect
   and observation are two fields precisely so *applied but unacknowledged* is representable.
+
+### The coordination hierarchy (D-088)
+- **RoomRole** — a seat's position in the work hierarchy: `orchestrator` | `supervisor` |
+  `observer` | `unassigned`. An axis independent of `ParticipantRole`, which remains the authority
+  ladder. Stored in `participant_roles` with its assigner, seq and reason; **derived on read** for
+  seats predating this (owner -> orchestrator, observer -> observer, else supervisor), so legacy
+  rooms need no migration write. At most one live orchestrator per room, enforced by a partial
+  unique index rather than a read-then-write. Authority is `authz.require_orchestrator`:
+  `room.admin` + the position + a stated reason, and never permission to act *as* another seat.
+- **Job** — durable human intent. Keeps the person's own words (`human_instruction`) beside the
+  normalised `desired_outcome`, plus provenance (poster, on-behalf-of, source goal version, parent
+  job) and allocation (assignee, assigner, timestamps, the goal version it was delivered through).
+  Reaches `completed` | `cancelled` | `superseded` | `rejected` only with an attributable reason;
+  nothing deletes one, and `job_events` keeps every transition. A job *points at* a task; `tasks`
+  remains the only holder of a lease, a fence and an executor.
+- **SupervisorGoal / GoalVersion** — versioned, wholly replaceable direction for one seat. The
+  `supervisor_goals` row is the version allocator, bumped by a conditional UPDATE guarded on
+  `expected_version`; a stale caller gets `revision_conflict` and there is no blind-overwrite mode.
+  Versions are append-only with supersession stamped forward, so "what was this supervisor told
+  when it spawned that worker" stays answerable. `goal.IMMUTABLE_CONTRACT` states what no
+  replacement may rewrite. Acknowledgement is separate evidence, never permission (ADR-012).
+- **Worker** — a downstream executor a supervisor is accountable for, and **not a participant**
+  (D-077). Declared, never verified: `state` is the supervisor's claim and never feeds presence.
+  Carries `created_by_goal_version`, which is what makes output from a superseded goal
+  attributable. A worker completing does not complete its job — its supervisor reviews first.
+- **CapacityReport** — a declared judgement (`available` | `partially_allocated` |
+  `fully_allocated` | `blocked`) plus counts the room derives from its own rows. `offline` is
+  derived from liveness and can never be declared. Deliberately **not** an input to
+  `derive_runtime_policy`, which stays a pure function of capabilities (ADR-010).
 
 ### Shared state & artifacts
 - **StateEntry** — `(room_id, key)` → JSON value, with `revision` (monotonic per key),

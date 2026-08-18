@@ -824,3 +824,354 @@ CREATE TABLE IF NOT EXISTS room_tombstones (
     event_count        INTEGER NOT NULL DEFAULT 0,
     reason             TEXT NOT NULL DEFAULT ''
 );
+
+-- ---------------------------------------------------------------------------
+-- The coordination hierarchy (D-088)
+-- ---------------------------------------------------------------------------
+
+-- Where a seat sits in the work hierarchy, which is NOT what it may do.
+-- `participants.role` answers "what may this seat do" and resolves to scopes;
+-- this answers "who coordinates whom". Kept independent on purpose: deriving
+-- authority from a hierarchy label would let a coordination position mint
+-- privileges, which is the failure ADR-013 records.
+--
+-- Its own table rather than a column on `participants`, for two reasons. SQLite
+-- cannot add a CHECK with ALTER TABLE, so a `room_role` column would be
+-- unconstrained on every database created before it -- the hole already annotated
+-- on `tasks` and `attachments`. And a role is assigned by somebody, at some seq,
+-- for some reason: three columns that only mean anything together.
+CREATE TABLE IF NOT EXISTS participant_roles (
+    -- `participants.id` is unique across rooms, so it is the natural key. `room_id`
+    -- is carried for tenancy-scoped reads and for the uniqueness index below.
+    participant_id             TEXT PRIMARY KEY
+                                   REFERENCES participants(id) ON DELETE CASCADE,
+    room_id                    TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    room_role                  TEXT NOT NULL,
+    -- Who put this seat here. NULL means the room itself did -- creation, or the
+    -- one-time backfill -- never "unknown".
+    assigned_by_participant_id TEXT,
+    assigned_seq               INTEGER NOT NULL DEFAULT 0,
+    reason                     TEXT NOT NULL DEFAULT '',
+    -- How the assignment arose. Attribution; nothing branches on it. It exists so
+    -- an audit can tell a migration from a human's choice.
+    source                     TEXT NOT NULL DEFAULT 'assigned',
+    -- Stood down without replacement. Kept rather than deleted so the row stays a
+    -- valid audit reference, and so the partial unique index can ignore it.
+    retired_at                 TEXT,
+    created_at                 TEXT NOT NULL,
+    updated_at                 TEXT NOT NULL,
+    CHECK (room_role IN ('orchestrator','supervisor','observer','unassigned')),
+    CHECK (source IN ('room_creator','joined','assigned','migration')),
+    CHECK (assigned_seq >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_participant_roles_room
+    ON participant_roles(room_id, room_role);
+
+-- At most one live orchestrator per room, enforced by the engine rather than by a
+-- read-then-write in the service. A partial unique index is the portable form of
+-- "at most one row matching this predicate": SQLite 3.8+ and PostgreSQL 9.5+ both
+-- honour it, and a second concurrent promotion loses the insert instead of
+-- producing two orchestrators (ADR-009).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_participant_roles_one_orchestrator
+    ON participant_roles(room_id)
+    WHERE room_role = 'orchestrator' AND retired_at IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- Supervisor goals: versioned, replaceable direction
+-- ---------------------------------------------------------------------------
+
+-- What one supervisor is currently responsible for, as a pointer to its current
+-- version. This row IS the version allocator, exactly as `rooms.event_seq` is for
+-- events:
+--   UPDATE supervisor_goals SET current_version = current_version + 1, ...
+--    WHERE id = ? AND current_version = ?
+-- inside the mutating transaction. A 0-row result means another revision landed
+-- first -- which is "you are stale", not "retry" -- and no version is reused.
+CREATE TABLE IF NOT EXISTS supervisor_goals (
+    id                        TEXT PRIMARY KEY,
+    room_id                   TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    -- The seat, never a runtime. A goal outlives the companion executing it, and
+    -- the seat is the accountable party.
+    supervisor_participant_id TEXT NOT NULL
+                                  REFERENCES participants(id) ON DELETE CASCADE,
+    current_version           INTEGER NOT NULL DEFAULT 1,
+    status                    TEXT NOT NULL DEFAULT 'active',
+    created_at                TEXT NOT NULL,
+    updated_at                TEXT NOT NULL,
+    closed_at                 TEXT,
+    CHECK (current_version >= 1),
+    CHECK (status IN ('active','achieved','abandoned')),
+    -- Closing is all-or-nothing, so "abandoned at no time" is unrepresentable.
+    CHECK ((status = 'active' AND closed_at IS NULL)
+        OR (status <> 'active' AND closed_at IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_supervisor_goals_room
+    ON supervisor_goals(room_id, status);
+
+-- One live goal per seat. A supervisor with two active goals has no active goal.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_supervisor_goals_one_active
+    ON supervisor_goals(supervisor_participant_id)
+    WHERE status = 'active';
+
+-- Every version the goal has ever had. Append-only in the strong sense
+-- `task_checkpoints` uses: the only columns ever updated are the supersession pair
+-- and the acknowledgement, both stamped once. "What was the objective when this job
+-- was posted" therefore stays answerable after ten revisions.
+CREATE TABLE IF NOT EXISTS supervisor_goal_versions (
+    goal_id                    TEXT NOT NULL
+                                   REFERENCES supervisor_goals(id) ON DELETE CASCADE,
+    version                    INTEGER NOT NULL,
+    room_id                    TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    objective                  TEXT NOT NULL,
+    instructions               TEXT NOT NULL DEFAULT '',
+    worker_plan                TEXT NOT NULL DEFAULT '',
+    related_job_ids            TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    dependencies               TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    constraints_json           TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    acceptance_criteria        TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    reporting_requirements     TEXT NOT NULL DEFAULT '',
+    worker_disposition         TEXT NOT NULL DEFAULT 'stop',
+    reason                     TEXT NOT NULL DEFAULT '',
+    priority                   INTEGER NOT NULL DEFAULT 0,
+    source                     TEXT NOT NULL DEFAULT 'orchestrator',
+    -- Free-form text, so it is disclosure-checked like any other room content and
+    -- carries a class of its own (docs/SECURITY.md §6). This DDL does not protect
+    -- the field; `privacy.check_disclosure` does.
+    privacy_class              TEXT NOT NULL DEFAULT 'room_public',
+    -- No FK: authorship must survive the issuer leaving the room, the same choice
+    -- `tasks.created_by_participant_id` makes.
+    issued_by_participant_id   TEXT NOT NULL,
+    replaces_version           INTEGER,
+    created_seq                INTEGER NOT NULL DEFAULT 0,
+    created_at                 TEXT NOT NULL,
+    superseded_at              TEXT,
+    superseded_by_version      INTEGER,
+    -- Evidence the target observed this version. Never permission for the effect.
+    acknowledged_at            TEXT,
+    acknowledged_note          TEXT NOT NULL DEFAULT '',
+    acknowledged_rejected      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (goal_id, version),
+    CHECK (version >= 1),
+    CHECK (created_seq >= 0),
+    CHECK (acknowledged_rejected IN (0,1)),
+    CHECK (worker_disposition IN ('stop','drain','continue')),
+    CHECK (source IN ('orchestrator','supervisor','migration')),
+    -- Supersession is all-or-nothing and always forward.
+    CHECK ((superseded_at IS NULL AND superseded_by_version IS NULL)
+        OR (superseded_at IS NOT NULL AND superseded_by_version IS NOT NULL
+            AND superseded_by_version > version)),
+    CHECK (replaces_version IS NULL OR replaces_version < version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_goal_versions_room
+    ON supervisor_goal_versions(room_id, created_seq);
+CREATE INDEX IF NOT EXISTS idx_goal_versions_live
+    ON supervisor_goal_versions(goal_id, superseded_at);
+
+-- ---------------------------------------------------------------------------
+-- Supervisor capacity: a declared allocation signal with derived counts
+-- ---------------------------------------------------------------------------
+
+-- What a supervisor says it can take on. Deliberately not a raw count: "two
+-- workers running" says nothing about whether a third would help, so the seat
+-- publishes a judgement and the room counts the rows itself.
+--
+-- `offline` is absent from the CHECK on purpose. It is derived from connection
+-- liveness at read time, because a runtime that has stopped beating cannot be
+-- trusted to report that it is gone (principle 5).
+CREATE TABLE IF NOT EXISTS supervisor_capacity (
+    participant_id          TEXT PRIMARY KEY
+                                REFERENCES participants(id) ON DELETE CASCADE,
+    room_id                 TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    declared                TEXT NOT NULL DEFAULT 'available',
+    max_concurrent_workers  INTEGER NOT NULL DEFAULT 1,
+    note                    TEXT NOT NULL DEFAULT '',
+    declared_at             TEXT NOT NULL,
+    updated_at              TEXT NOT NULL,
+    CHECK (declared IN ('available','partially_allocated','fully_allocated','blocked')),
+    CHECK (max_concurrent_workers >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_supervisor_capacity_room
+    ON supervisor_capacity(room_id, declared);
+
+-- ---------------------------------------------------------------------------
+-- The job board: durable human intent, and where it went
+-- ---------------------------------------------------------------------------
+
+-- A unit of work as the BOARD sees it: who wants it done, in whose words, who it
+-- was allocated to, and how it ended. Deliberately not a second task table --
+-- `tasks` remains the only thing carrying a lease, a fence and an executor, so the
+-- room never has two answers to "who holds this".
+--
+-- A job reaches a terminal state only with an attributable reason, and nothing
+-- deletes one.
+CREATE TABLE IF NOT EXISTS jobs (
+    id                          TEXT PRIMARY KEY,
+    room_id                     TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    -- The lease-bearing task, once this is execution rather than a listing. SET NULL
+    -- on delete: cancelling a task does not erase the board's memory of the job.
+    task_id                     TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    title                       TEXT NOT NULL,
+    desired_outcome             TEXT NOT NULL DEFAULT '',
+    -- The person's own words, unedited. A paraphrase cannot be un-paraphrased once
+    -- the intent is disputed, which is the whole reason the board exists.
+    human_instruction           TEXT NOT NULL DEFAULT '',
+    room_goal_relationship      TEXT NOT NULL DEFAULT '',
+    constraints_json            TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    acceptance_criteria         TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    targets                     TEXT NOT NULL DEFAULT '[]',   -- JSON array
+    -- Urgency as requested vs as decided. Both, so a supervisor can see that its
+    -- request was ranked below something else rather than silently ignored.
+    requested_urgency           INTEGER NOT NULL DEFAULT 0,
+    priority                    INTEGER NOT NULL DEFAULT 0,
+    state                       TEXT NOT NULL DEFAULT 'posted',
+    origin                      TEXT NOT NULL DEFAULT 'human_steer',
+    -- PROVENANCE. No FK on the poster, for the same reason tasks does not have one.
+    posted_by_participant_id    TEXT NOT NULL,
+    on_behalf_of_participant_id TEXT,
+    source_goal_id              TEXT,
+    source_goal_version         INTEGER,
+    parent_job_id               TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+    -- ALLOCATION.
+    assigned_to_participant_id  TEXT,
+    assigned_by_participant_id  TEXT,
+    assigned_at                 TEXT,
+    accepted_at                 TEXT,
+    assigned_goal_version       INTEGER,
+    -- TERMINATION.
+    terminal_reason             TEXT NOT NULL DEFAULT '',
+    terminated_by_participant_id TEXT,
+    superseded_by_job_id        TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+    privacy_class               TEXT NOT NULL DEFAULT 'room_public',
+    created_at                  TEXT NOT NULL,
+    updated_at                  TEXT NOT NULL,
+    closed_at                   TEXT,
+    CHECK (state IN ('posted','assigned','accepted','active','paused','blocked',
+                     'completed','cancelled','superseded','rejected')),
+    CHECK (origin IN ('human_steer','agent_proposal','decomposition','migration')),
+    CHECK (source_goal_version IS NULL OR source_goal_version >= 1),
+    CHECK (assigned_goal_version IS NULL OR assigned_goal_version >= 1),
+    -- Assignment is all-or-nothing: an assignee with no timestamp, or a timestamp
+    -- with no assignee, is a half-written allocation nobody can audit.
+    CHECK ((assigned_to_participant_id IS NULL AND assigned_at IS NULL)
+        OR (assigned_to_participant_id IS NOT NULL AND assigned_at IS NOT NULL)),
+    -- Closing is all-or-nothing, and always carries a reason.
+    CHECK ((closed_at IS NULL AND state NOT IN ('completed','cancelled','superseded','rejected'))
+        OR (closed_at IS NOT NULL AND state IN ('completed','cancelled','superseded','rejected')
+            AND terminal_reason <> '')),
+    -- A supersession that does not name its replacement is a cancellation wearing
+    -- the wrong label.
+    CHECK (state <> 'superseded' OR superseded_by_job_id IS NOT NULL),
+    CHECK (parent_job_id IS NULL OR parent_job_id <> id),
+    CHECK (superseded_by_job_id IS NULL OR superseded_by_job_id <> id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_room ON jobs(room_id, state, priority);
+CREATE INDEX IF NOT EXISTS idx_jobs_assignee
+    ON jobs(assigned_to_participant_id, state);
+CREATE INDEX IF NOT EXISTS idx_jobs_task ON jobs(task_id);
+
+-- One task belongs to at most one job. Two jobs pointing at one lease would make
+-- "which intent is this work serving" unanswerable.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_task
+    ON jobs(task_id)
+    WHERE task_id IS NOT NULL;
+
+-- Append-only transition history. The event log is the source of truth for all of
+-- it; these rows exist so the board can answer "how did this job get here" without
+-- replaying a room.
+CREATE TABLE IF NOT EXISTS job_events (
+    job_id               TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    ordinal              INTEGER NOT NULL,
+    room_id              TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    from_state           TEXT,
+    to_state             TEXT NOT NULL,
+    actor_participant_id TEXT,
+    reason               TEXT NOT NULL DEFAULT '',
+    seq                  INTEGER NOT NULL DEFAULT 0,
+    created_at           TEXT NOT NULL,
+    PRIMARY KEY (job_id, ordinal),
+    CHECK (ordinal >= 1),
+    CHECK (seq >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_events_room ON job_events(room_id, seq);
+-- ---------------------------------------------------------------------------
+-- Workers: downstream execution a supervisor answers for (D-077)
+-- ---------------------------------------------------------------------------
+
+-- A worker is not a participant. Membership has exactly one entry path, and a
+-- supervisor that could mint participants would be minting membership. So this is
+-- the supervisor's own account of an executor it owns, recorded so the room can say
+-- who created it, what it was for, which goal version caused it, and where its
+-- result went.
+--
+-- Nothing here is verified and nothing here is presence. `state` is the
+-- supervisor's last claim; a worker that dies silently stays 'working' until its
+-- supervisor notices, which is why readers show `last_activity_at` beside it. Where
+-- the worker IS a durable runtime of that seat, `attachment_id` points at it and
+-- liveness comes from core/presence.py like anything else.
+CREATE TABLE IF NOT EXISTS workers (
+    id                        TEXT PRIMARY KEY,
+    room_id                   TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    -- The accountable seat.
+    supervisor_participant_id TEXT NOT NULL
+                                  REFERENCES participants(id) ON DELETE CASCADE,
+    -- Which runtime of that seat spawned it, so a restarted supervisor can tell its
+    -- own workers from a previous run's. SET NULL: a runtime going away does not
+    -- make the worker's history untrue.
+    supervisor_attachment_id  TEXT REFERENCES attachments(id) ON DELETE SET NULL,
+    -- Set only for 'room_attachment' provenance. There is deliberately no CHECK
+    -- tying the two: a CHECK must never reference a column another table's
+    -- ON DELETE SET NULL can clear, or deleting the attachment would fail the CHECK
+    -- and abort the delete, so a room purge could not complete. core/workers.py
+    -- asserts the pairing at insert time instead.
+    attachment_id             TEXT REFERENCES attachments(id) ON DELETE SET NULL,
+    -- Stable and supervisor-chosen, so re-declaring the same worker lands on this
+    -- row instead of minting a second identity (the attachments.label rule).
+    label                     TEXT NOT NULL,
+    display_name              TEXT NOT NULL DEFAULT '',
+    provenance                TEXT NOT NULL DEFAULT 'declared',
+    assignment                TEXT NOT NULL DEFAULT '',
+    related_job_id            TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+    related_task_id           TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    related_work_id           TEXT,
+    -- The goal version that caused this worker to exist. This is what stops stale
+    -- work from completing a newer goal: output keeps the provenance of the
+    -- direction that produced it.
+    created_by_goal_version   INTEGER,
+    -- Self-reported runtime detail. Nothing branches on it (D-054).
+    declared_runtime          TEXT NOT NULL DEFAULT '',
+    declared_model            TEXT NOT NULL DEFAULT '',
+    state                     TEXT NOT NULL DEFAULT 'starting',
+    summary                   TEXT NOT NULL DEFAULT '',
+    waiting_reason            TEXT NOT NULL DEFAULT '',
+    result_reference          TEXT NOT NULL DEFAULT '',
+    attempts                  INTEGER NOT NULL DEFAULT 0,
+    created_at                TEXT NOT NULL,
+    started_at                TEXT,
+    -- The supervisor's last claim, not an observation. Never rendered as presence.
+    last_activity_at          TEXT,
+    completed_at              TEXT,
+    retired_at                TEXT,
+    UNIQUE (supervisor_participant_id, label),
+    CHECK (provenance IN ('room_attachment','declared')),
+    CHECK (state IN ('starting','working','waiting','completed','failed','stopping','stopped')),
+    CHECK (attempts >= 0),
+    CHECK (created_by_goal_version IS NULL OR created_by_goal_version >= 1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workers_room ON workers(room_id, state);
+CREATE INDEX IF NOT EXISTS idx_workers_supervisor
+    ON workers(supervisor_participant_id, retired_at);
+CREATE INDEX IF NOT EXISTS idx_workers_job ON workers(related_job_id);
+
+-- One runtime is one worker. Without this, one supervisor could describe the same
+-- attachment twice and the board would believe it had twice the capacity it has.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workers_attachment
+    ON workers(attachment_id)
+    WHERE attachment_id IS NOT NULL AND retired_at IS NULL;
+

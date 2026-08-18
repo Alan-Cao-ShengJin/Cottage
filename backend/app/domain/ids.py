@@ -39,6 +39,13 @@ CHECKPOINT: Final = "ckp"
 QUESTION: Final = "qst"
 ANSWER: Final = "ans"
 COMMAND: Final = "cmd"
+#: The coordination hierarchy (D-088). A goal is versioned direction for one seat,
+#: a job is durable human intent on the shared board, and a worker is a downstream
+#: executor a supervisor is accountable for — never a participant of its own
+#: (D-077). `wkr` is already taken by work declarations, hence `wrx`.
+GOAL: Final = "goal"
+JOB: Final = "job"
+WORKER: Final = "wrx"
 
 
 def _encode(value: int, chars: int) -> str:

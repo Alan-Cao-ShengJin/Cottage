@@ -24,9 +24,10 @@ from ..domain.room import (
     Participant,
     ParticipantRole,
     Room,
+    RoomRole,
     Scope,
 )
-from .errors import Forbidden, RoomClosed
+from .errors import Forbidden, InvalidCommand, RoomClosed
 
 
 def effective_scopes(
@@ -94,6 +95,71 @@ def require_owns(participant: Participant, owner_participant_id: str, *, what: s
 
 def require_admin(participant: Participant) -> None:
     require_scope(participant, Scope.ROOM_ADMIN)
+
+
+def require_orchestrator(
+    participant: Participant,
+    room_role: RoomRole,
+    *,
+    action: str,
+    reason: str,
+) -> None:
+    """The gate on every room-level coordination act (D-088).
+
+    Three conditions, and each is doing separate work — the same three-part shape a
+    control directive already uses (D-045), for the same reason:
+
+    * **`room.admin`.** The authority is a *grant*, never an inference from the
+      hierarchy label. If the position alone were enough, a coordination role would be
+      minting privileges, which is precisely what ADR-013 records going wrong twice in
+      one day.
+    * **The orchestrator position.** `room.admin` is held by every owner, and a room
+      with two owners must still have one coordinator. This is the part that says
+      *which* admin coordinates.
+    * **A stated reason.** Replacing a supervisor's whole goal, or moving a job away
+      from the seat that asked for it, is exactly the kind of act a room needs to be
+      able to explain afterwards. An unexplained reallocation is indistinguishable
+      from a mistake.
+
+    Note what this deliberately is *not*: permission to act **as** another
+    participant. An orchestrator directs supervisors; it never posts as one, never
+    reads their private context, and never touches their host. `require_owns` still
+    applies everywhere it applied before.
+    """
+    require_admin(participant)
+    if room_role is not RoomRole.ORCHESTRATOR:
+        raise Forbidden(
+            f"Only the room's orchestrator may {action}. "
+            "A supervisor may propose it, and post a job the orchestrator can allocate.",
+            room_role=room_role.value,
+            required_room_role=RoomRole.ORCHESTRATOR.value,
+        )
+    if not reason.strip():
+        raise InvalidCommand(
+            f"A stated reason is required to {action}.",
+            action=action,
+        )
+
+
+def require_room_role(
+    room_role: RoomRole,
+    expected: RoomRole,
+    *,
+    action: str,
+) -> None:
+    """Refuse an act that only makes sense from one position in the hierarchy.
+
+    Authority checks belong in `require_orchestrator` and `require_scope`; this one is
+    about coherence. A seat with no goal acknowledging a goal, or an observer
+    registering workers, is not a privilege violation — it is a caller that has
+    misunderstood what it is, and saying so plainly is more useful than a silent no-op.
+    """
+    if room_role is not expected:
+        raise Forbidden(
+            f"Only a {expected.value} may {action}.",
+            room_role=room_role.value,
+            required_room_role=expected.value,
+        )
 
 
 def is_org_member(participant: Participant, room: Room) -> bool:

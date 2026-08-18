@@ -19,7 +19,9 @@ from .capabilities import Capability, HostClass
 from .checkpoint import MAX_SUMMARY_CHARS, ResumeState
 from .directive import DirectiveAction
 from .disclosure import Disclosure, Provenance
+from .goal import GoalStatus, WorkerDisposition
 from .identity import PrincipalKind
+from .job import JobOrigin, JobState
 from .question import MAX_ANSWER_CHARS, MAX_QUESTION_CHARS
 from .room import (
     MAX_ROOM_EXTENSION_SECONDS,
@@ -28,6 +30,7 @@ from .room import (
     ParticipantRole,
     RetentionPolicy,
     RoomPolicy,
+    RoomRole,
     RoomVisibility,
     RuntimeOperationalState,
     RuntimeRole,
@@ -35,6 +38,7 @@ from .room import (
 )
 from .task import DependencyKind
 from .work import WorkStatus
+from .worker import SupervisorCapacity, WorkerProvenance, WorkerState
 
 
 class CommandMeta(BaseModel):
@@ -568,3 +572,208 @@ __all__ = [
     "UpdateTaskCommand",
     "UpdateWorkCommand",
 ]
+
+
+# ---------------------------------------------------------------------------
+# The coordination hierarchy (D-088)
+# ---------------------------------------------------------------------------
+
+
+class AssignRoomRoleCommand(CommandMeta):
+    """Place a seat in the coordination hierarchy, or stand it down.
+
+    Deliberately separate from `SetParticipantRoleCommand`: that one rewrites a scope
+    list, and conflating "where you sit" with "what you may do" is how a coordination
+    label starts minting privileges (ADR-013).
+    """
+
+    target_participant_id: str
+    room_role: RoomRole
+    #: Required, and recorded. Promoting or demoting a coordinator is exactly the kind
+    #: of act a room needs to be able to explain afterwards.
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class PostJobCommand(CommandMeta):
+    """Put durable human intent on the board.
+
+    A supervisor receiving a request from its human posts it here rather than starting
+    work: the orchestrator allocates against room priorities and supervisor capacity,
+    and the requesting supervisor may or may not be the one that ends up owning it.
+    """
+
+    title: str = Field(min_length=1, max_length=200)
+    desired_outcome: str = Field(default="", max_length=8000)
+    #: The human's own words, unedited. Kept because a paraphrase cannot be
+    #: un-paraphrased once the intent is disputed.
+    human_instruction: str = Field(default="", max_length=8000)
+    room_goal_relationship: str = Field(default="", max_length=2000)
+    on_behalf_of_participant_id: str | None = None
+    origin: JobOrigin = JobOrigin.HUMAN_STEER
+    #: Urgency as requested. What the orchestrator decides lands in `priority`, and
+    #: both are kept so a supervisor can see it was ranked rather than ignored.
+    requested_urgency: int = Field(default=0, ge=-100, le=100)
+    targets: list[str] = Field(default_factory=list, max_length=50)
+    constraints: list[str] = Field(default_factory=list, max_length=20)
+    acceptance_criteria: list[str] = Field(default_factory=list, max_length=20)
+    source_goal_id: str | None = None
+    source_goal_version: int | None = Field(default=None, ge=1)
+    parent_job_id: str | None = None
+    disclosure: Disclosure = Field(default_factory=Disclosure)
+
+
+class UpdateJobCommand(CommandMeta):
+    """Revise what a job asks for, or where it ranks. Omitted fields are untouched."""
+
+    job_id: str
+    priority: int | None = Field(default=None, ge=-100, le=100)
+    desired_outcome: str | None = Field(default=None, max_length=8000)
+    targets: list[str] | None = Field(default=None, max_length=50)
+    constraints: list[str] | None = Field(default=None, max_length=20)
+    acceptance_criteria: list[str] | None = Field(default=None, max_length=20)
+    disclosure: Disclosure = Field(default_factory=Disclosure)
+
+
+class AssignJobCommand(CommandMeta):
+    """Allocate or reallocate a job. Orchestrator only."""
+
+    job_id: str
+    to_participant_id: str
+    reason: str = Field(min_length=1, max_length=2000)
+    #: The assignee's goal version this allocation is delivered through, when the
+    #: orchestrator is replacing a goal in the same breath.
+    assigned_goal_version: int | None = Field(default=None, ge=1)
+
+
+class AcceptJobCommand(CommandMeta):
+    job_id: str
+    note: str = Field(default="", max_length=2000)
+
+
+class SetJobStateCommand(CommandMeta):
+    """A non-terminal move: active, paused, blocked. Terminal moves use CloseJob."""
+
+    job_id: str
+    state: JobState
+    reason: str = Field(default="", max_length=2000)
+    #: The lease-bearing task this job became, supplied when it moves to `active`.
+    #: The job records which task serves it; the task keeps the fence and the lease,
+    #: so the room never has two answers to "who holds this".
+    task_id: str | None = None
+
+
+class CloseJobCommand(CommandMeta):
+    """End a job with an attributable reason. There is no path that deletes one."""
+
+    job_id: str
+    state: JobState
+    reason: str = Field(min_length=1, max_length=2000)
+    #: Required when `state` is `superseded`: a supersession that does not name its
+    #: replacement is indistinguishable from a cancellation.
+    superseded_by_job_id: str | None = None
+
+
+class ReplaceGoalCommand(CommandMeta):
+    """Set or wholly replace a supervisor's active goal.
+
+    `expected_version` is the fence. Omitting it on an existing goal is refused rather
+    than treated as "latest": a blind overwrite is how a stale orchestrator turn undoes
+    a newer decision, and the whole point of versioning is that the caller states which
+    generation it is acting against.
+    """
+
+    target_supervisor_participant_id: str
+    objective: str = Field(min_length=1, max_length=2000)
+    instructions: str = Field(default="", max_length=8000)
+    worker_plan: str = Field(default="", max_length=4000)
+    related_job_ids: list[str] = Field(default_factory=list, max_length=50)
+    dependencies: list[str] = Field(default_factory=list, max_length=50)
+    constraints: list[str] = Field(default_factory=list, max_length=20)
+    acceptance_criteria: list[str] = Field(default_factory=list, max_length=20)
+    reporting_requirements: str = Field(default="", max_length=2000)
+    #: What happens to workers spawned under the version being replaced. The
+    #: orchestrator must say; silence is how a superseded goal keeps executing.
+    worker_disposition: WorkerDisposition = WorkerDisposition.STOP
+    priority: int = Field(default=0, ge=-100, le=100)
+    reason: str = Field(default="", max_length=2000)
+    #: None means "there is no goal yet". Any other value must match exactly.
+    expected_version: int | None = Field(default=None, ge=1)
+    disclosure: Disclosure = Field(default_factory=Disclosure)
+
+
+class AcknowledgeGoalCommand(CommandMeta):
+    """Record that the target supervisor observed a version.
+
+    Never permission for the effect: the goal took effect when it was written. A
+    supervisor may acknowledge *and* reject, which is information rather than a veto.
+    """
+
+    goal_id: str
+    version: int = Field(ge=1)
+    note: str = Field(default="", max_length=2000)
+    rejected: bool = False
+
+
+class CloseGoalCommand(CommandMeta):
+    goal_id: str
+    status: GoalStatus
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class ReportCapacityCommand(CommandMeta):
+    """Declare how much more this supervisor can take on.
+
+    `offline` is not accepted: it is derived from liveness, because a runtime that has
+    stopped beating cannot be trusted to report that it is gone.
+    """
+
+    declared: SupervisorCapacity
+    max_concurrent_workers: int = Field(default=1, ge=0, le=64)
+    note: str = Field(default="", max_length=2000)
+
+
+class RegisterWorkerCommand(CommandMeta):
+    """Declare a downstream worker this seat owns and answers for.
+
+    Recorded, never verified. Re-registering the same `label` updates that worker
+    rather than minting a second one, the same rule an attachment label follows.
+    """
+
+    label: str = Field(min_length=1, max_length=80)
+    display_name: str = Field(default="", max_length=120)
+    assignment: str = Field(default="", max_length=8000)
+    related_job_id: str | None = None
+    related_task_id: str | None = None
+    related_work_id: str | None = None
+    provenance: WorkerProvenance = WorkerProvenance.DECLARED
+    #: Required when provenance is `room_attachment`, and refused otherwise.
+    attachment_id: str | None = None
+    declared_runtime: str = Field(default="", max_length=120)
+    declared_model: str = Field(default="", max_length=120)
+    #: The goal version that caused this worker to exist. Output from a worker spawned
+    #: under an older version keeps that provenance.
+    created_by_goal_version: int | None = Field(default=None, ge=1)
+    disclosure: Disclosure = Field(default_factory=Disclosure)
+
+
+class UpdateWorkerCommand(CommandMeta):
+    """Report a worker's non-terminal state. The supervisor's claim, never presence."""
+
+    worker_id: str
+    state: WorkerState
+    summary: str = Field(default="", max_length=2000)
+    #: Required when `state` is `waiting`, for the same reason a runtime's `waiting`
+    #: posture requires it: an unexplained wait is indistinguishable from a hang.
+    waiting_reason: str = Field(default="", max_length=2000)
+    disclosure: Disclosure = Field(default_factory=Disclosure)
+
+
+class FinishWorkerCommand(CommandMeta):
+    """End a worker. Completion here is not completion of the job."""
+
+    worker_id: str
+    state: WorkerState
+    summary: str = Field(default="", max_length=4000)
+    #: Where the evidence lives: a checkpoint id, an artifact version, a task id.
+    result_reference: str = Field(default="", max_length=200)
+    disclosure: Disclosure = Field(default_factory=Disclosure)

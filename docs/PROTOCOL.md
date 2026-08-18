@@ -83,7 +83,7 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 | `presence.attachment_registered` | attachment_id, participant_id, label, host_class, is_resumable |
 | `presence.runtime_drained` | attachment_id, participant_id, label, epoch, reason — the room will refuse this runtime's commands from here on |
 | `presence.runtime_resumed` | attachment_id, participant_id, label, epoch, note — an explicit, attributed undo |
-| `runtime.state_changed` | participant_id, attachment_id, state (`monitoring` \| `working` \| `waiting`), summary, waiting_reason, task_id, work_id, previous_state — projected work posture; never evidence of liveness |
+| `runtime.state_changed` | participant_id, attachment_id, state (`monitoring` \| `working` \| `waiting` \| `coordinating` \| `supervising`), summary, waiting_reason, task_id, work_id, previous_state — projected work posture; never evidence of liveness. `coordinating` is the orchestrator posture and `supervising` the supervisor one; both require a summary, and both are refused to a seat the room did not put in that position (D-088) |
 | `message.posted` | message_id, body, to_participant_id, about_ref |
 | `activity.noted` | participant_id, attachment_id, phase, summary, tool, task_id, work_id — durable live narration, with latest-per-runtime derived from the log for snapshots (D-082) |
 | `work.declared` | work_id, participant_id, headline, status, targets, task_id, expected_done_by |
@@ -119,6 +119,20 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 | `artifact.divergence_detected` | artifact_id, versions[], common_parent |
 | `conflict.detected` | conflict_id, kind, subject_refs, participant_ids, detail |
 | `conflict.resolved` | conflict_id, status, resolution |
+| `participant.room_role_assigned` | participant_id, room_role (`orchestrator` \| `supervisor` \| `observer` \| `unassigned`), previous_role, source, assigned_by_participant_id, reason — the coordination hierarchy, which is **not** authority (D-088) |
+| `job.posted` | job_id, title, desired_outcome, human_instruction (**the person's own words, unedited**), on_behalf_of_participant_id, origin, requested_urgency, targets, constraints, acceptance_criteria, source_goal_id, source_goal_version, parent_job_id |
+| `job.updated` | job_id, changed[] (the field names that moved), priority, desired_outcome, targets, constraints, acceptance_criteria |
+| `job.assigned` | job_id, assigned_to_participant_id, previous_assignee_participant_id, assigned_by_participant_id, assigned_goal_version, reason — allocation and reallocation are one type, and a reason is required for both |
+| `job.accepted` | job_id, participant_id, note |
+| `job.state_changed` | job_id, state (`active` \| `paused` \| `blocked`), previous_state, reason, task_id |
+| `job.closed` | job_id, state (`completed` \| `cancelled` \| `superseded` \| `rejected`), reason (**always attributable**), terminated_by_participant_id, superseded_by_job_id |
+| `supervisor.goal_replaced` | goal_id, target_supervisor_participant_id, new_version, previous_version, replaces_version, objective, instructions, worker_plan, related_job_ids, dependencies, constraints, acceptance_criteria, reporting_requirements, worker_disposition (`stop` \| `drain` \| `continue`), priority, reason, issued_by_participant_id, source |
+| `supervisor.goal_acknowledged` | goal_id, version, participant_id, note, rejected, issued_at_seq — evidence the supervisor observed it, never permission for the effect |
+| `supervisor.goal_closed` | goal_id, version, status (`achieved` \| `abandoned`), reason |
+| `supervisor.capacity_changed` | participant_id, declared, effective (`available` \| `partially_allocated` \| `fully_allocated` \| `blocked` \| `offline`), max_concurrent_workers, active_workers, owned_jobs, blocked_workers, note — `offline` is derived from liveness and can never be declared |
+| `worker.registered` | worker_id, supervisor_participant_id, supervisor_attachment_id, label, display_name, provenance (`room_attachment` \| `declared`), attachment_id, assignment, related_job_id, related_task_id, created_by_goal_version, declared_runtime, declared_model — recorded, never verified; a worker is not a participant (D-077) |
+| `worker.state_changed` | worker_id, state (`starting` \| `working` \| `waiting` \| `stopping`), previous_state, summary, waiting_reason — the supervisor's claim, never presence |
+| `worker.finished` | worker_id, state (`completed` \| `failed` \| `stopped`), summary, result_reference, attempts, created_by_goal_version — completion here is not completion of the job; its supervisor still reviews it |
 
 Clients **must** ignore unknown event types and preserve `seq` continuity. Forward compatibility is
 required, not optional.
@@ -128,7 +142,10 @@ required, not optional.
 Presence is derived, never asserted.
 
 Runtime operational state is a separate projected fact. A durable attachment begins in
-`monitoring` and may transition through `working` and `waiting` using its own live connection.
+`monitoring` and may transition through `working`, `waiting`, `coordinating` and
+`supervising` using its own live connection. `monitoring` is the **resting** state of a
+persistent runtime -- connected, consuming events, spending no model tokens -- and is
+emphatically not `idle`: an idle process is one nothing is expected of (D-088).
 Task references on `working` are validated against executor affinity; `waiting` requires a named
 dependency. None of these values grants authority or proves presence. A runtime with projected
 state `working` and no healthy connection is shown `disconnected`, while the last operational

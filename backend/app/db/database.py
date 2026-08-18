@@ -46,7 +46,7 @@ from ..util import utcnow_iso
 log = logging.getLogger(__name__)
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _db_path: Path = settings.database_path
 

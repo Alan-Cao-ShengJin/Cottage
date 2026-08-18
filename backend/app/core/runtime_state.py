@@ -14,12 +14,20 @@ from ..db import database as db
 from ..domain.commands import SetRuntimeStateCommand
 from ..domain.disclosure import Disclosure
 from ..domain.events import EventType
-from ..domain.room import Participant, RuntimeOperationalState, Scope
+from ..domain.room import Participant, RoomRole, RuntimeOperationalState, Scope
 from ..util import utcnow_iso
-from . import authz, eventlog, privacy, store
+from . import authz, eventlog, privacy, roles, store
 from .actors import actor_for
 from .dispatch import CommandOutcome, execute_command
 from .errors import InvalidCommand, NotFound
+
+#: Which room positions may publish the two hierarchy postures. The orchestrator appears
+#: under `supervising` as well, because it is also a supervisor for its own human and
+#: spawns its own workers like anyone else (D-088).
+_HIERARCHY_STATES: dict[RuntimeOperationalState, tuple[RoomRole, ...]] = {
+    RuntimeOperationalState.COORDINATING: (RoomRole.ORCHESTRATOR,),
+    RuntimeOperationalState.SUPERVISING: (RoomRole.ORCHESTRATOR, RoomRole.SUPERVISOR),
+}
 
 
 async def set_state(*, participant: Participant, command: SetRuntimeStateCommand) -> dict[str, Any]:
@@ -35,6 +43,29 @@ async def set_state(*, participant: Participant, command: SetRuntimeStateCommand
         raise InvalidCommand("Working runtime state requires a truthful summary.")
     if command.state is RuntimeOperationalState.WAITING and not waiting_reason:
         raise InvalidCommand("Waiting runtime state requires the dependency it is waiting on.")
+    if command.state in _HIERARCHY_STATES:
+        # Same rule as `working`, for the same reason: a posture with no summary tells a
+        # reader that something is happening and nothing about what, which is the shape
+        # of a status that cannot be checked.
+        if not summary:
+            raise InvalidCommand(
+                f"{command.state.value.title()} runtime state requires a truthful summary.",
+                state=command.state.value,
+            )
+        # And the posture must match the position the room assigned this seat. This is
+        # not authority derived from a label — the role is assigned by the room and
+        # `authz` is what gates the acts themselves (D-088). It is honesty: a seat that
+        # is not coordinating the room may not publish that it is, because a reader
+        # would otherwise have to verify a claim the room could have checked for them.
+        room_role = await roles.role_for(participant)
+        allowed = _HIERARCHY_STATES[command.state]
+        if room_role not in allowed:
+            raise InvalidCommand(
+                f"A {room_role.value} may not report the {command.state.value} posture; "
+                f"it belongs to {' or '.join(r.value for r in allowed)}.",
+                state=command.state.value,
+                room_role=room_role.value,
+            )
     if command.state is RuntimeOperationalState.MONITORING:
         summary = summary or "Monitoring room activity"
         waiting_reason = ""

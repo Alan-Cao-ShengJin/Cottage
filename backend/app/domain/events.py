@@ -120,6 +120,58 @@ class EventType(str, Enum):
     CONFLICT_DETECTED = "conflict.detected"
     CONFLICT_RESOLVED = "conflict.resolved"
 
+    # --- the coordination hierarchy (D-088) -------------------------------
+    #: A seat took a position in the room hierarchy. One event covers orchestrator and
+    #: supervisor because the fact is the same shape either way, and a reader that
+    #: wants "who orchestrates" wants to see promotions and demotions in one stream.
+    ROOM_ROLE_ASSIGNED = "participant.room_role_assigned"
+
+    #: Durable human intent reaching the board. `human_instruction` is the person's own
+    #: words, kept unedited, because a normalised outcome cannot be un-normalised later.
+    JOB_POSTED = "job.posted"
+    #: A revision of what the job asks for, or of where it ranks. The payload names the
+    #: fields that changed so a reader need not diff two snapshots.
+    JOB_UPDATED = "job.updated"
+    #: Allocation *and* reallocation. `previous_assignee_participant_id` is what makes
+    #: the second case legible, and the orchestrator must state a reason for both.
+    JOB_ASSIGNED = "job.assigned"
+    #: The owning supervisor took accountability. Distinct from assignment because
+    #: "told to own it" and "owns it" are different facts and the gap is diagnostic.
+    JOB_ACCEPTED = "job.accepted"
+    #: A non-terminal move: active, paused, blocked. Terminal moves are `job.closed`.
+    JOB_STATE_CHANGED = "job.state_changed"
+    #: The end of a job, with the outcome in `state` and always an attributable
+    #: `reason` — completed, cancelled, superseded (naming its replacement) or
+    #: rejected. One type rather than four, the same choice `work.ended` makes.
+    JOB_CLOSED = "job.closed"
+
+    #: The orchestrator set or wholly replaced a supervisor's active goal. Carries
+    #: `previous_version` and `new_version`, so supersession is readable without a
+    #: join, and `worker_disposition`, because a replacement silent about work already
+    #: in flight is how a superseded goal keeps executing.
+    GOAL_REPLACED = "supervisor.goal_replaced"
+    #: Evidence the target supervisor observed a version. Never permission for the
+    #: effect — the goal took effect when it was written (ADR-012).
+    GOAL_ACKNOWLEDGED = "supervisor.goal_acknowledged"
+    #: The goal was met or stood down. `status` and a reason.
+    GOAL_CLOSED = "supervisor.goal_closed"
+    #: A supervisor's declared capacity changed, or the room re-derived its counts.
+    #: `effective` is what the orchestrator allocates against; `declared` is what the
+    #: supervisor said, and the two differ when presence contradicts a declaration.
+    CAPACITY_CHANGED = "supervisor.capacity_changed"
+
+    #: A supervisor declared a downstream worker it owns. Recorded, never verified: a
+    #: worker is not a participant (D-077), and this is the supervisor's account of an
+    #: executor the room has never seen.
+    WORKER_REGISTERED = "worker.registered"
+    #: A declared worker's state moved — starting, working, waiting, stopping. Never
+    #: presence: nothing here is observed by the room.
+    WORKER_STATE_CHANGED = "worker.state_changed"
+    #: A worker ended. `state` is completed, failed or stopped, and
+    #: `result_reference` points at the evidence. Completion here is *not* completion
+    #: of the job: its supervisor still has to review it.
+    WORKER_FINISHED = "worker.finished"
+
 
 #: Frames the transport may emit that are not log entries. They carry no `seq` of
 #: their own and must never be confused with events (`docs/PROTOCOL.md` §5).

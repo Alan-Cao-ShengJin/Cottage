@@ -3913,3 +3913,102 @@ Rejected: reusing `claim_denied_reason` verbatim in the sheet, which is how the 
 this read. Also rejected: computing the joiner's own liveness grade for display — the mode's
 limitation is the useful fact, and a self-reported grade invites the reader to trust a
 self-assessment the room derives independently.
+
+
+## D-088 — The coordination hierarchy: orchestrator, supervisor, worker
+
+**Date:** 2026-08-19
+**Status:** accepted (stage 1 implemented; stages 2-5 open)
+**Context:** the room could hold independently owned agents, show their work, and hand out leases,
+but it had no answer to "who decides what happens next". D-071 named the hierarchy in the public
+animation and D-077 put workers downstream, yet neither reached the domain: every seat was
+equally able to create work for itself, human intent lived in whatever message happened to
+carry it, and direction had no durable representation at all. A room with N supervisors was N
+private queues that happened to share a log.
+
+### The decision
+
+Four layers, and the boundaries between them are the product: human strategic direction ->
+durable shared job board -> orchestrator -> supervisor active goals -> supervisor-managed
+workers.
+
+**Room role is an axis of its own, not a `ParticipantRole` member.** `ParticipantRole` is the
+authority ladder: it resolves to scopes and it is what "never reduce standing" is measured on.
+Adding `orchestrator` to it would have made a coordination position mint privileges, which is
+the failure ADR-013 records happening twice in one day. So `RoomRole` lives beside it in its own
+table, and orchestrator authority is `authz.require_orchestrator` — `room.admin`, **plus** the
+position, **plus** a stated reason. That is the same three-part shape a control directive already
+uses (D-045), and it is deliberately not permission to act *as* another participant:
+`require_owns` still governs everything it governed before, which is why not even the
+orchestrator may finish another seat's worker.
+
+**A job is durable human intent; a goal is disposable direction.** Two objects, because they
+answer different questions and have opposite lifetimes. A job keeps the person's own words
+verbatim beside the normalised outcome — a paraphrase cannot be un-paraphrased once intent is
+disputed — and persists until it is completed, cancelled, superseded or rejected *with an
+attributable reason*. Nothing deletes one, and the schema refuses a terminal state with no
+reason so an implementation that forgot would fail loudly. A goal, by contrast, may be replaced
+wholly: "stop that, own this instead, spawn these two workers, report in ten minutes" is one
+decision and applying half of it is worse than applying none.
+
+**Posting is not assigning.** A supervisor receiving a request from its human posts a job; the
+orchestrator allocates. Enforced, not documented: `post` needs `task.propose`, `assign` needs the
+orchestrator gate, and `priority` is orchestrator-only while `requested_urgency` is the poster's
+to state. Both are kept so a supervisor can see its request was *ranked* rather than ignored.
+
+**Goal replacement is fenced by its own version, not by the task fence.** The `supervisor_goals`
+row is the version allocator, bumped by a conditional UPDATE whose affected-row count arbitrates,
+exactly as `rooms.event_seq` allocates a `seq`. `expected_version` is required; there is
+deliberately no blind-overwrite mode, because a stale orchestrator turn silently undoing a newer
+decision is the precise failure versioning exists to prevent. Two fences on one row was rejected:
+overloading `stale_fence` would break what clients already read it to mean.
+
+**A worker is a declared record, never a participant.** D-077 held: membership has exactly one
+entry path, one provisioned companion must not show the room N seats, and a worker's authority is
+its supervisor's. So the honesty rule (principle 5) applies one level down — `state` is the
+supervisor's claim, never presence, and a worker that dies silently reads `working` until its
+supervisor notices. Every worker carries the goal version that spawned it, which is what makes
+output from a superseded goal attributable rather than merely wrong.
+
+**A completing worker does not complete the job.** Different events, different acts, different
+callers. Collapsing them would let an executor mark the room's work done on its own say-so, which
+is the authorization defect D-026 recorded.
+
+**Capacity is a judgement plus a count.** The seat declares what it can take; the room counts the
+rows. `offline` may never be declared — it is derived from liveness, because a runtime that has
+stopped beating cannot be trusted to report that it is gone. Capacity is deliberately not an
+input to `derive_runtime_policy`, which must stay a pure function of capabilities (ADR-010); the
+lease remains the only enforcement.
+
+**No migration writes.** Legacy rooms have no role rows, and a backfill emitting events into
+finished rooms would be inventing history. Roles are stored going forward and derived on read for
+seats that have none — owner as orchestrator, observer as observer, everything else as supervisor
+— the same read-side widening `store._widen_split_scopes` uses (D-053). A legacy room with two
+owners resolves by seniority, which is stated rather than hidden.
+
+### Rejected
+
+A `RoomFunction` label that nothing branches on, on the `RuntimeRole` precedent: it cannot carry
+the authority the model requires, and a purely descriptive orchestrator is not an orchestrator.
+Building the job board as columns on `tasks`: a task's status is normalised on read and has
+nowhere to hold provenance, allocation history or supersession. A server-side reaction queue: it
+would be a mutable projection whose lifecycle is not derived from the log, and it would make the
+room decide when an agent must think, which is intelligence orchestration. Making Cottage's goal
+protocol depend on Claude Code's `/goal`: verified as a turn-continuation mechanism that nothing
+external can update mid-session, so it is one host adapter and never the durable record — see
+`docs/COTTAGE_RUNTIME_ALIGNMENT.md` §2 for the evidence.
+
+### Evidence
+
+52 new tests across `test_supervisor_goals.py`, `test_job_board.py` and
+`test_worker_lifecycle.py`; 617 backend tests passing with 12 skips; mypy and Ruff clean. Every
+new storage invariant was proven to bite against a real SQLite file before any service existed: a
+second live orchestrator, a close with no reason, a supersession naming no replacement, an
+assignee with no timestamp, a second active goal per seat, and a backward supersession are all
+refused by the engine. Two concurrency tests hold the fences — concurrent goal replacements
+produce exactly one winner with no version reused, and concurrent allocations can never both
+believe the job was unowned.
+
+Stages 2-5 (persistent monitoring hardening, the worker pool and review loop in the companion,
+the orchestrator allocation loop, and the realtime UI) are open; `docs/ROADMAP.md` M3.0 records
+what remains.

@@ -54,6 +54,8 @@ from ..domain.room import (
     RetentionPolicy,
     Room,
     RoomPolicy,
+    RoomRole,
+    RoomRoleSource,
     RoomStatus,
     RoomVisibility,
     RuntimeCredential,
@@ -61,6 +63,7 @@ from ..domain.room import (
 )
 from ..util import from_iso, hash_token, is_past, iso_in, new_token, to_iso, utcnow, utcnow_iso
 from . import authz, billing, eventlog, privacy, store
+from . import roles as room_roles
 from .actors import SYSTEM_ACTOR, actor_for
 from .dispatch import CommandOutcome, execute_command, publish_committed
 from .errors import Forbidden, InvalidCommand, NotFound, RoomClosed, Unauthenticated
@@ -420,6 +423,16 @@ async def create_room(
             display_name=display_name,
             token_hash=hash_token(participant_token),
         )
+        # The creator's AI is the room's orchestrator (D-088). Written in the same
+        # transaction as the membership row, because a seat without a position in the
+        # hierarchy is a seat the room cannot allocate work through.
+        await room_roles.assign_tx(
+            tx,
+            room_id=room_id,
+            participant_id=participant_id,
+            room_role=RoomRole.ORCHESTRATOR,
+            source=RoomRoleSource.ROOM_CREATOR,
+        )
         joined = await eventlog.append(
             tx,
             room_id=room_id,
@@ -431,6 +444,10 @@ async def create_room(
                 "org_id": identity.org_id,
                 "kind": identity.kind.value,
                 "role": ParticipantRole.OWNER.value,
+                # Carried on the join rather than as a fourth creation event: the
+                # position is a property of arriving, and a separate event would move
+                # every existing cursor for no new information.
+                "room_role": RoomRole.ORCHESTRATOR.value,
                 "scopes": [s.value for s in owner_scopes],
                 "trust": TrustTier.MEMBER.value,
                 "declared_capabilities": [],
@@ -1099,6 +1116,34 @@ async def join_room(
                     causation_id=command.command_id,
                 )
             )
+        # Every human who arrives with an AI representative gets a supervisor seat
+        # (D-088); an observer stays an observer, because it has already said it is not
+        # here to work. A rejoin keeps whatever position it already held — the same
+        # "never reduce standing" rule the authority ladder follows, and the reason a
+        # promoted orchestrator can redeem its own room's link without demoting itself.
+        arriving_role = (
+            RoomRole.OBSERVER if role is ParticipantRole.OBSERVER else RoomRole.SUPERVISOR
+        )
+        existing_room_role = None
+        if is_rejoin:
+            held = await tx.fetch_one(
+                "SELECT room_role FROM participant_roles "
+                "WHERE participant_id = ? AND retired_at IS NULL",
+                (resolved_participant_id,),
+            )
+            existing_room_role = held["room_role"] if held is not None else None
+        if existing_room_role is None:
+            await room_roles.assign_tx(
+                tx,
+                room_id=room.id,
+                participant_id=resolved_participant_id,
+                room_role=arriving_role,
+                source=RoomRoleSource.JOINED,
+            )
+            effective_room_role = arriving_role.value
+        else:
+            effective_room_role = existing_room_role
+
         joined = await eventlog.append(
             tx,
             room_id=room.id,
@@ -1116,6 +1161,7 @@ async def join_room(
                 "kind": identity.kind.value,
                 "host_class": command.host_class.value,
                 "role": role.value,
+                "room_role": effective_room_role,
                 "scopes": [s.value for s in scopes],
                 "trust": trust.value,
                 "declared_capabilities": declared,

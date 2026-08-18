@@ -630,6 +630,49 @@ joining a live room, not only in the gate. `docs/INTEROP.md` §2 is back to **ve
 on the strength of a live connector run, with the regression and what it says about the record
 written up as §2.2.
 
+### M3.0 — The coordination hierarchy: orchestrator, supervisor, worker
+
+**Stage 1 done (2026-08-19); stages 2-5 open.** Decision recorded in **D-088**. The alignment
+record — including the verified `/goal` findings and the reasoning behind what was reused — is
+`docs/COTTAGE_RUNTIME_ALIGNMENT.md`.
+
+A room becomes a continuously occupied workspace: humans steer strategically, the creator's AI
+orchestrates, every other human's AI supervises, and supervisors own downstream workers. The
+authority chain is charter -> durable job board -> orchestrator -> supervisor active goal ->
+workers.
+
+**Stage 1 — domain, protocol and storage.** `RoomRole` as an axis independent of
+`ParticipantRole`, because merging them would let a coordination position mint scopes. A durable
+job board (`jobs`, `job_events`) holding human intent verbatim with provenance, and terminal
+states that always carry an attributable reason. Versioned supervisor goals
+(`supervisor_goals`, `supervisor_goal_versions`) where the goal row is its own version
+allocator, fenced by a conditional UPDATE exactly as `rooms.event_seq` allocates a `seq`.
+Worker records (`workers`) that are declared, never verified, and never participants (D-077).
+Supervisor capacity as a declared judgement plus room-derived counts, deliberately not an input
+to `derive_runtime_policy`. Fourteen new event types with their `docs/PROTOCOL.md` §2 rows, and
+two new validated runtime postures (`coordinating`, `supervising`).
+
+**No migration writes.** A room created before this has no role rows, and a backfill that wrote
+events into finished rooms would be inventing history. So roles are stored going forward and
+*derived* on read for seats that have none — owner reads as orchestrator, observer as observer,
+everything else as supervisor — the same read-side widening `store._widen_split_scopes` uses for
+the scope split (D-053). A legacy room with two owners resolves by seniority, stated rather than
+hidden.
+
+Evidence for stage 1: every new schema invariant proven to bite against a real SQLite file (a
+second live orchestrator refused, a close without a reason refused, a supersession that names no
+replacement refused, an assignee without a timestamp refused, a second active goal per seat
+refused, a backward supersession refused); 565 pre-existing backend tests still passing with the
+role assignment wired into create and join; `test_layering` docs-parity green for all fourteen
+new event types.
+
+**Open:** stage 2 (persistent monitoring hardening, reaction-queue states, the `/goal` Stop-hook
+adapter), stage 3 (worker pool and review gate in the companion), stage 4 (orchestrator
+allocation loop), stage 5 (realtime UI for roles, goals, board and capacity). The companion
+runtime already owns an independent monitor thread, three-tier event relevance, a durable
+reaction queue and bounded context continuity from D-083, so stage 2 extends that rather than
+building it.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six
