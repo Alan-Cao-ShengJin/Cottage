@@ -16,7 +16,7 @@ import html
 import logging
 import secrets
 from typing import Annotated, Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -35,26 +35,60 @@ SESSION_COOKIE = "cottage_session"
 OAUTH_FLOW_COOKIE = "cottage_oauth_flow"
 
 
-def _browser_headers(*, script_nonce: str | None = None) -> dict[str, str]:
+def _form_action_origin(redirect_uri: str) -> str:
+    """The scheme+host a consent form is allowed to end up at.
+
+    `form-action` governs the form's *redirect chain*, not just its immediate target
+    (CSP3; Chrome and Safari enforce it, Firefox historically did not). So a consent form
+    that posts to `/oauth/authorize` and gets a 302 to the client's callback needs that
+    callback's origin listed, or the browser abandons the navigation **silently** — no
+    error, no console message the person will see, the page simply does not move.
+
+    That is exactly how this broke: `form-action 'self'` alone shipped with the hosted
+    consent page (D-086), and every non-loopback client — ChatGPT, claude.ai — hit a
+    button that appeared to do nothing while the server logged a successful 302 and burned
+    the flow. Pressing it again produced `invalid_request`, because the second press met a
+    consumed flow.
+
+    Only the origin, never the path: the client already registered this exact URI and it
+    was revalidated on load, so this widens the policy by one host the human just
+    consented to and nothing else.
+    """
+    parsed = urlparse(redirect_uri)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _browser_headers(
+    *, script_nonce: str | None = None, form_action_origin: str = ""
+) -> dict[str, str]:
     script_policy = f"; script-src 'nonce-{script_nonce}'" if script_nonce else ""
+    form_action = "form-action 'self'"
+    if form_action_origin:
+        form_action += f" {form_action_origin}"
     return {
         "Cache-Control": "no-store",
         "Pragma": "no-cache",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": (
-            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'" + script_policy
+            f"default-src 'none'; style-src 'unsafe-inline'; {form_action}" + script_policy
         ),
     }
 
 
 def _html_page(
-    content: str, *, status_code: int = 200, script_nonce: str | None = None
+    content: str,
+    *,
+    status_code: int = 200,
+    script_nonce: str | None = None,
+    form_action_origin: str = "",
 ) -> HTMLResponse:
     return HTMLResponse(
         content=content,
         status_code=status_code,
-        headers=_browser_headers(script_nonce=script_nonce),
+        headers=_browser_headers(script_nonce=script_nonce, form_action_origin=form_action_origin),
     )
 
 
@@ -228,7 +262,10 @@ async def authorize(
         response: Response = _html_page(_login_page(flow))
     else:
         identities = await oauth.identities_for_consent(session.user.id)
-        response = _html_page(_consent_page(flow.request, session, identities))
+        response = _html_page(
+            _consent_page(flow.request, session, identities),
+            form_action_origin=_form_action_origin(flow.request.redirect_uri),
+        )
     _set_cookie(
         response,
         OAUTH_FLOW_COOKIE,
@@ -298,7 +335,10 @@ async def consent(request: Request) -> Response:
     if session is None:
         return _html_page(_login_page(flow))
     identities = await oauth.identities_for_consent(session.user.id)
-    return _html_page(_consent_page(flow.request, session, identities))
+    return _html_page(
+        _consent_page(flow.request, session, identities),
+        form_action_origin=_form_action_origin(flow.request.redirect_uri),
+    )
 
 
 @router.post("/oauth/authorize")
@@ -357,8 +397,14 @@ async def authorize_submit(
             status_code=303,
         )
     else:
+        # The flow cookie is deliberately **not** cleared here. Clearing it made a second
+        # press of the consent button indistinguishable from never having started: the
+        # browser had already dropped the cookie, so the consumed-flow branch could not
+        # be reached and the person was told to restart something that had in fact
+        # succeeded (D-086). The flow row is marked consumed and revalidated on every
+        # load, so a retained cookie authorizes nothing — it only lets the next page say
+        # something true.
         response = _redirect(callback_url, status_code=302)
-        _clear_cookie(response, OAUTH_FLOW_COOKIE)
     return response
 
 

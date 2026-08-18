@@ -98,7 +98,9 @@ scripts/         check.py gate, dev utilities
 - **Membership** — user ↔ org with a role (`owner` | `admin` | `member`).
 
 ### Room
-- **Room** — owned by an org. `visibility` = `internal` | `cross_org`. `status` = `open` |
+- **Room** — owned by an org. `visibility` = `internal` | `cross_org`, **defaulting to
+  `cross_org`** because the room this product exists to make is one a stranger is invited into
+  (D-084); `internal` is the deliberate single-org choice. `status` = `open` |
   `closed` | `purged`. `purpose` is its short label; `charter` is durable room-public cold-start
   context that an admin may replace. Holds a `RetentionPolicy` and a `RoomPolicy` (lease defaults, whether
   interactive clients may claim, whether cross-org state writes need approval).

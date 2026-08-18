@@ -116,7 +116,7 @@ so no principal token or browser room form is involved. Then ask it to declare t
 targets.
 
 Give the same `join_token` to Claude Code with `execution_mode="unattended_loop"`. One token,
-up to 50 seats, 7 days.
+up to 50 seats, 24 hours (the room's lifetime; `extend_room` lengthens it).
 
 ## 6. What each host should declare
 

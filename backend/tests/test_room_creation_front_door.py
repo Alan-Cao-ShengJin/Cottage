@@ -23,7 +23,7 @@ from app.db import database as db
 from app.domain.capabilities import HostClass
 from app.domain.commands import CreateRoomCommand
 from app.domain.identity import IdentityProvenance, PrincipalKind, TrustTier
-from app.domain.room import Scope
+from app.domain.room import RoomVisibility, Scope
 
 pytestmark = pytest.mark.asyncio
 
@@ -337,6 +337,10 @@ async def test_the_mcp_tool_itself_creates_a_room_for_an_oauth_agent(fresh_db, o
         principal_token="",
         display_name="Caller-controlled spoof",
         execution_mode="unattended_loop",
+        # `full`, because what this test is about — the identity the adapter used and the
+        # name it refused to take from the caller — is exactly the plumbing the compact
+        # response now hides from a human (D-085).
+        detail="full",
         ctx=ctx,
     )
     assert result["ok"] is True, result
@@ -360,3 +364,329 @@ async def test_the_mcp_tool_itself_creates_a_room_for_an_oauth_agent(fresh_db, o
     assert declared["ok"] is True
     assert declared["work"]["status"] == "active"
     assert declared["work"]["ended_at"] is None
+
+
+async def test_a_new_room_is_cross_org_by_default(fresh_db, org):
+    """The default has to match the sentence the product is judged against.
+
+    `internal` was the default, and an internal room refuses a foreign-org identity
+    outright at join — so "invite someone over the internet" failed on the one path
+    where nobody passes an argument, which is every path an assistant takes when a
+    human just says "make me a room". A single-org room is still available; it is now
+    the deliberate choice rather than the silent one.
+    """
+    org_id, user_id = org
+    identity = await _identity(org_id, user_id)
+
+    created = await rooms.create_room(
+        principal=await _principal_for(identity),
+        command=CreateRoomCommand(name="Whoever you invite"),
+    )
+
+    assert created.room.visibility is RoomVisibility.CROSS_ORG
+
+
+async def test_the_default_room_admits_someone_from_another_organization(fresh_db, org):
+    """What the default is *for*, asserted through the join path that enforces it.
+
+    Asserting the enum alone would pass while `join_room` still turned the stranger
+    away, and that rejection is the failure this default exists to remove.
+    """
+    org_id, user_id = org
+    host = await _identity(org_id, user_id, display_name="Claude Code (Alan)")
+    created = await rooms.create_room(
+        principal=await _principal_for(host),
+        command=CreateRoomCommand(name="Two companies, one room"),
+    )
+
+    other_org_id, other_user_id = await rooms.ensure_org_and_user(
+        org_name="Beta Co", org_slug="beta-co", email="owner@beta.test", display_name="Beta Owner"
+    )
+    assert other_org_id != org_id
+    guest = await _identity(other_org_id, other_user_id, display_name="ChatGPT (a stranger)")
+
+    from app.domain.commands import JoinRoomCommand
+
+    joined = await rooms.join_room(
+        identity=guest,
+        command=JoinRoomCommand(
+            invitation_token=created.join_token, display_name="ChatGPT (a stranger)"
+        ),
+    )
+
+    assert joined.participant.room_id == created.room.id
+    # Admitted, not trusted: a foreign-org identity arriving on a link invitation is
+    # untrusted until vouched for, so it may contribute `room_public` content only.
+    assert joined.participant.trust is TrustTier.UNTRUSTED
+
+
+async def test_an_internal_room_is_still_available_and_still_closed(fresh_db, org):
+    """The old behavior remains reachable, which is what makes the new default safe."""
+    org_id, user_id = org
+    host = await _identity(org_id, user_id)
+    created = await rooms.create_room(
+        principal=await _principal_for(host),
+        command=CreateRoomCommand(name="Us only", visibility=RoomVisibility.INTERNAL),
+    )
+    assert created.room.visibility is RoomVisibility.INTERNAL
+
+    other_org_id, other_user_id = await rooms.ensure_org_and_user(
+        org_name="Beta Co", org_slug="beta-co", email="owner@beta.test", display_name="Beta Owner"
+    )
+    outsider = await _identity(other_org_id, other_user_id, display_name="Not invited in")
+
+    from app.domain.commands import JoinRoomCommand
+
+    with pytest.raises(Forbidden):
+        await rooms.join_room(
+            identity=outsider,
+            command=JoinRoomCommand(
+                invitation_token=created.join_token, display_name="Not invited in"
+            ),
+        )
+
+
+async def _mcp_create(org, monkeypatch, session_suffix="1", **kwargs):
+    """Call the MCP tool as an OAuth-authenticated agent identity."""
+    from app.adapters.mcp import server as mcp_server
+    from app.core.oauth import TokenPrincipal
+
+    org_id, user_id = org
+    identity = await _identity(org_id, user_id, display_name="Claude Code (Alan)")
+
+    async def fake_caller(ctx, audience):
+        return TokenPrincipal(
+            subject_kind="agent_identity",
+            org_id=org_id,
+            identity=identity,
+            user_id=None,
+            scope="agent",
+            client_id="cli_test",
+        )
+
+    monkeypatch.setattr(mcp_server, "principal_for_tool", fake_caller)
+    request = SimpleNamespace(headers={"mcp-session-id": session_suffix.rjust(32, "9")})
+    ctx = SimpleNamespace(request_context=SimpleNamespace(request=request), session=object())
+    return await mcp_server.create_room(ctx=ctx, **kwargs)
+
+
+async def test_create_room_returns_a_welcome_sheet_the_client_prints_verbatim(
+    fresh_db, org, monkeypatch
+):
+    """What a person sees when they make a room is product behavior, not a rendering
+    accident (D-085).
+
+    Written because the sheet existed only in one assistant's prose: the tool returned
+    eighteen flat fields, so a second client dumped the plumbing and a third invented a
+    join snippet of its own. Asserting the *text* is the point — a structured field that
+    each client re-renders is the bug, not the fix.
+    """
+    result = await _mcp_create(org, monkeypatch, name="Lantern Hour")
+    assert result["ok"] is True, result
+
+    sheet = result["welcome"]
+    assert sheet.startswith("Welcome to Cottage")
+    assert "Room:          Lantern Hour" in sheet
+    assert "Owner:         You" in sheet
+    assert "Orchestrator:  Your AI" in sheet
+    assert "anyone you invite, including people outside your organization" in sheet
+    assert "Status:        open" in sheet
+    assert "24 hours" in sheet, "the room's real window, not a hardcoded one"
+    assert "up to 50 seats" in sheet
+    # Last line, after a blank one: it is the only line anyone acts on.
+    lines = sheet.splitlines()
+    assert lines[-1] == "Invitation:    " + result["join_token"]
+    assert lines[-2] == "", "a blank line above it, so it reads as the thing to copy"
+
+
+async def test_the_welcome_sheet_says_internal_when_the_room_is_internal(
+    fresh_db, org, monkeypatch
+):
+    """The sheet describes the room it was given, not the default."""
+    result = await _mcp_create(org, monkeypatch, name="Us only", cross_org=False)
+    assert "people inside your organization only" in result["welcome"]
+    assert "outside your organization" not in result["welcome"]
+
+
+async def test_create_room_reports_both_expiries_and_the_seat_count(fresh_db, org, monkeypatch):
+    """The gap a creator used to discover by the room lapsing."""
+    result = await _mcp_create(org, monkeypatch, name="Windows stated")
+
+    assert result["expires_at"], "the room's window"
+    assert result["join_expires_at"], "the link's window"
+    assert result["join_seats"] == 50
+    # A link that outlives its room is useless, so it is capped by the room.
+    assert result["join_expires_at"] <= result["expires_at"]
+
+
+async def test_the_compact_response_hides_connection_plumbing(fresh_db, org, monkeypatch):
+    """A response is spent context — the same rule every other tool here follows."""
+    result = await _mcp_create(org, monkeypatch, name="Quiet by default")
+
+    for field in (
+        "negotiated_capabilities",
+        "delivery_mode",
+        "may_claim",
+        "connection_id",
+        "display_name_was_overridden",
+        "share_this",
+        "charter",
+    ):
+        assert field not in result, f"{field} is plumbing; it belongs behind detail=full"
+
+    # Still everything a client needs to keep working. `participant_id` stays: it is how
+    # a client finds its own card in a room read, and it costs one short string.
+    assert result["participant_token"]
+    assert result["participant_id"]
+    assert result["join_token"]
+    assert isinstance(result["cursor"], int)
+
+
+async def test_detail_full_restores_every_field(fresh_db, org, monkeypatch):
+    result = await _mcp_create(org, monkeypatch, name="Everything", detail="full")
+
+    assert result["welcome"], "the sheet is not withheld by asking for more"
+    assert result["negotiated_capabilities"]
+    assert result["delivery_mode"] == "long_poll"
+    assert result["may_claim"] is True
+    assert result["connection_id"]
+    assert result["participant_id"]
+    assert result["execution_mode"] == "unattended_loop"
+    assert result["display_name"] == "Claude Code (Alan)"
+
+
+# ---------------------------------------------------------------------------
+# The arrival sheet
+# ---------------------------------------------------------------------------
+
+
+async def _mcp_join(org, monkeypatch, invitation_token, *, display_name, execution_mode):
+    """Join as a *different* identity from the creator.
+
+    Worth the extra fixture: leaving the creator's patched principal in place makes the
+    join a rejoin of the same seat, so the room reports "nobody else yet" and a test about
+    seeing other participants quietly stops testing that.
+    """
+    from app.adapters.mcp import server as mcp_server
+    from app.core.oauth import TokenPrincipal
+
+    org_id, user_id = org
+    joiner = await _identity(org_id, user_id, display_name=display_name)
+
+    async def fake_caller(ctx, audience):
+        return TokenPrincipal(
+            subject_kind="agent_identity",
+            org_id=org_id,
+            identity=joiner,
+            user_id=None,
+            scope="agent",
+            client_id="cli_joiner",
+        )
+
+    monkeypatch.setattr(mcp_server, "principal_for_tool", fake_caller)
+    return await mcp_server.join_room(
+        invitation_token=invitation_token,
+        execution_mode=execution_mode,
+        display_name=display_name,
+    )
+
+
+async def test_a_browser_assistant_is_told_what_it_cannot_do_on_arrival(fresh_db, org, monkeypatch):
+    """The honesty rule, applied to the first thing a person reads (D-085).
+
+    A chat assistant is genuinely unreachable between its human's messages. Principle 5
+    is usually read as a constraint on server behavior, but an arrival sheet that lets
+    someone believe their chat window is a live participant breaks it just as effectively:
+    the room will be expected to wake something that cannot be woken.
+    """
+    created = await _mcp_create(org, monkeypatch, name="Tester", session_suffix="7")
+    joined = await _mcp_join(
+        org,
+        monkeypatch,
+        created["join_token"],
+        display_name="ChatGPT",
+        execution_mode="human_turn_only",
+    )
+    assert joined["ok"] is True, joined
+
+    sheet = joined["welcome"]
+    assert sheet.startswith("Welcome to Cottage")
+    assert "Room:                      Tester" in sheet
+    assert "Your Display Name:         ChatGPT" in sheet
+    assert "You are in a web browser session" in sheet
+    assert "live room updates cannot reach" in sheet
+    # The counterweight, and the reason this line is not simply a warning: "limited"
+    # invites the reading that little of what you say arrives, when the truth is the
+    # opposite — only inbound liveness is limited.
+    assert "fully visible to everyone in the room" in sheet
+    assert "connect Cottage from an IDE" in sheet
+    # Lease policy is not what a person needs in their first four lines; it ships in the
+    # structured fields for the agent instead.
+    assert "Claiming tasks" not in sheet
+    assert "allow_attended_claims" not in sheet, "the technical reason belongs in the fields"
+    assert joined["may_claim"] is False, "still told to the agent"
+    assert "allow_attended_claims" in joined["claim_denied_reason"]
+
+
+async def test_a_looping_agent_gets_no_invented_caveat(fresh_db, org, monkeypatch):
+    """No warning where there is nothing to warn about.
+
+    Filling the line for every host would teach people to skim past the one host where it
+    matters.
+    """
+    created = await _mcp_create(org, monkeypatch, name="Tester", session_suffix="8")
+    joined = await _mcp_join(
+        org,
+        monkeypatch,
+        created["join_token"],
+        display_name="Codex",
+        execution_mode="unattended_loop",
+    )
+
+    sheet = joined["welcome"]
+    assert "Heads up:" not in sheet
+    assert "web browser session" not in sheet
+    assert joined["may_claim"] is True
+
+
+async def test_the_arrival_sheet_names_who_is_already_here(fresh_db, org, monkeypatch):
+    """Seeing the room is the point of arriving in it, so it is on the sheet by name."""
+    created = await _mcp_create(org, monkeypatch, name="Tester", session_suffix="9")
+    joined = await _mcp_join(
+        org,
+        monkeypatch,
+        created["join_token"],
+        display_name="ChatGPT",
+        execution_mode="human_turn_only",
+    )
+
+    # By name, and the joiner does not list itself among the others.
+    assert "Also here:                 Claude Code (Alan)" in joined["welcome"]
+    assert "ChatGPT" not in joined["welcome"].split("Also here:")[1].splitlines()[0]
+    assert "Current work in the room:  nothing yet" in joined["welcome"]
+
+
+async def test_a_crowded_room_counts_the_rest_instead_of_listing_everyone(
+    fresh_db, org, monkeypatch
+):
+    """Three names read as people; past that the count is the more useful fact."""
+    created = await _mcp_create(org, monkeypatch, name="Busy", session_suffix="6")
+    for who in ("Alan", "Codex", "Gemini", "Grok"):
+        await _mcp_join(
+            org,
+            monkeypatch,
+            created["join_token"],
+            display_name=who,
+            execution_mode="unattended_loop",
+        )
+    joined = await _mcp_join(
+        org,
+        monkeypatch,
+        created["join_token"],
+        display_name="ChatGPT",
+        execution_mode="human_turn_only",
+    )
+
+    others = joined["welcome"].split("Also here:")[1].splitlines()[0]
+    assert others.count(",") == 2, f"three names, then a count: {others}"
+    assert "& 2 others" in others

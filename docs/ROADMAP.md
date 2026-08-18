@@ -539,6 +539,97 @@ skips, mypy and Ruff green, and frontend typecheck green. The standing unrelated
 worker descendant test remains the only worker-suite failure; the two pre-existing whole-tree Ruff
 format findings are unchanged.
 
+### M2.0t — A new room is cross-organization by default
+
+**Done (2026-08-18).** `CreateRoomCommand.visibility` defaulted to `internal`, and an `internal`
+room refuses a foreign-org identity outright at join. Nothing on the creation path supplied the
+field — the MCP tool defaulted `cross_org=False`, and an assistant told "make me a room" passes no
+argument — so the default room was one no stranger could enter, and the failure surfaced only later
+at someone else's join as `forbidden`. Decision recorded in **D-084**.
+
+Flip the default in the command model rather than per adapter, so HTTP and MCP cannot disagree, and
+return `visibility` from `create_room` so a default that admits other organizations is stated back
+to the creator. `internal` stays available as the deliberate single-org choice. The privacy boundary
+is untouched: content still defaults to `room_public`, `org_internal` in a cross-org room is still
+rejected rather than downgraded, and a link-invited foreign identity is still `untrusted`.
+
+Evidence: three new front-door tests (the default is `cross_org`; a second org's identity actually
+joins the default room; an explicit `internal` room still refuses one), 548 backend tests passing
+with 12 skips, mypy and Ruff green. One existing test — the `org_internal` leak projection — now
+creates its room as explicitly `internal`, because that class of content can only exist in such a
+room. The three pre-existing whole-tree Ruff format findings are unchanged and unrelated.
+
+### M2.0u — One room-creation sheet, rendered by the server
+
+**Done (2026-08-18).** Two changes a creator meets in the first ten seconds. Decisions recorded in
+**D-084** (cross-org default) and **D-085** (the welcome sheet).
+
+Rooms now default to `cross_org`, because an `internal` room refuses a foreign-org identity at
+join and nothing on the creation path supplied the field — the default room was one no stranger
+could enter. The default room lifetime drops from 7 days to **24 hours**: a room is a working
+session, extending is one call, and shortening an existing room is impossible, so the short
+default is the safe one. The join link inherits it, so no invitation outlives the room it opens.
+
+`create_room` returns `welcome`, a server-rendered sheet the client is told to print verbatim, so
+the same product moment reads the same in every host instead of being re-invented per client. It
+states both expiries and the seat count, none of which were reported before. Connection internals
+move behind `detail="full"`, matching the convention `compact.py` already set for every other
+tool in this adapter.
+
+Evidence: 556 backend tests passing with 12 skips, mypy and Ruff green; five new tests covering
+the sheet's text, the `internal` wording, both expiries, what the compact view hides, and what
+`detail="full"` restores. Verified on the live instance, not just in the gate: a room created with
+no arguments returned `visibility: cross_org`, and `expires_at` was exactly 24 hours after
+`created_at`. Two existing tests changed rather than being worked around — the adapter-identity
+test now asks for `detail="full"` since the plumbing is what it asserts, and the charter test
+reads the room instead of the response echo, which was never evidence of storage. The three
+pre-existing whole-tree Ruff format findings are unchanged.
+
+### M2.0v — The hosted consent page could not hand off to a web client
+
+**Done (2026-08-18).** Found by a real ChatGPT connector attempt, not by the gate. Decision
+recorded in **D-086**.
+
+"Authorize and return to ChatGPT" did nothing on the first press and returned `invalid_request` on
+the second, while the server logged a validated flow, an issued code, and a 302 to the registered
+callback — and then no token exchange ever arrived. Cause: `form-action 'self'` on the consent
+page. CSP3 applies `form-action` to a submission's whole redirect chain, which Chrome and Safari
+enforce, so the cross-origin 302 was silently abandoned. Every non-loopback client was affected —
+ChatGPT and claude.ai web, the entire hosted cross-vendor path — and it shipped 2026-08-17 with the
+hosted consent page, two days after the ChatGPT interop row was honestly marked verified.
+
+`form-action` now lists the origin of the flow's registered `redirect_uri` alongside `'self'`. The
+flow cookie is kept on the success path so a repeat press can be told apart from a flow that never
+existed, and a consumed flow now says the authorization already completed instead of advising a
+restart the person did not need.
+
+Evidence: five new tests, and they assert the **CSP header** rather than the redirect —
+`test_successful_consent_redirects_with_a_code_and_state` passed throughout the outage because
+httpx does not enforce CSP, which is precisely why this reached a user. 561 backend tests passing
+with 12 skips, mypy and Ruff green. `docs/INTEROP.md` §2 downgraded from *verified*: the repaired
+path may not claim it again until a live connector run confirms it.
+
+### M2.0w — An arrival sheet, and honesty about a browser session
+
+**Done (2026-08-18).** Decision recorded in **D-087**; the creation half is D-085.
+
+`join_room` now returns a server-rendered `welcome` the client is told to print verbatim: room, the
+joiner's display name, who else is here by name, what is being worked on by headline, and a
+`Heads up:` line naming what this kind of session cannot do. A browser assistant is told that live
+updates cannot reach it between messages, that everything it posts is fully visible to the room,
+and that the same room from an IDE is a live participant. An unattended agent gets no such line,
+because nothing there is true.
+
+Prompted by what a real ChatGPT connector printed on joining — a status dump in the room's
+vocabulary that said nothing about the one thing most affecting what its human should expect.
+
+Evidence: 565 backend tests passing with 12 skips, mypy and Ruff green; four new tests covering the
+browser limitation and its counterweight, the absence of a caveat for a looping agent, naming who
+is already present, and counting the rest past three. Verified against the deployed instance by
+joining a live room, not only in the gate. `docs/INTEROP.md` §2 is back to **verified** for ChatGPT
+on the strength of a live connector run, with the regression and what it says about the record
+written up as §2.2.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six

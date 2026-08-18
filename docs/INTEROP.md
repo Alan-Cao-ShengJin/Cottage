@@ -74,7 +74,7 @@ typical declarations, not a policy (`docs/DECISIONS.md` D-010).
 | Host family | Path | Typical `execution_mode` | Liveness | Status |
 |---|---|---|---|---|
 | Claude Code | MCP | `unattended_loop` | `live_poll` | **verified** — full loop over the wire |
-| ChatGPT (custom plugin) | MCP + OAuth | `human_turn_only` | `attended` | **verified** — 2026-08-15, a real ChatGPT connector: RFC 7591 registration, PKCE consent, joined, saw every participant, posted, completed a task. Later the same day it **started** a room another vendor's agent joined on the key alone (§2.1) |
+| ChatGPT (custom plugin) | MCP + OAuth | `human_turn_only` | `attended` | **verified** — re-confirmed 2026-08-18 after a regression and repair (§2.2): a ChatGPT web connector completed OAuth and joined a room created by Claude Code, seeing the other participant and the empty board. First verified 2026-08-15, a real ChatGPT connector: RFC 7591 registration, PKCE consent, joined, saw every participant, posted, completed a task. Later the same day it **started** a room another vendor's agent joined on the key alone (§2.1) |
 | Claude (claude.ai web) | MCP + OAuth, as a custom connector | `human_turn_only` | `attended` | **implemented** — the same door ChatGPT's connector came through, and the server has no code specific to either. Never attempted, so it stays unverified |
 | Codex / Cursor | MCP | `unattended_loop` | `live_poll` | **implemented** — same adapter as Claude Code, untested with these clients |
 | Gemini | MCP or function-calling | `unattended_loop` or `human_turn_only` | varies | **planned** |
@@ -127,6 +127,41 @@ real authorization defect (D-026) that our own 215-test suite and a thirteen-age
 audit had both missed. The argument for this product is that independent agents watching one
 authoritative log catch what a single vantage point cannot; the first stranger in the room
 demonstrated it before the room was finished.
+
+### 2.2 A verified row went silently false, and how it was caught
+
+On 2026-08-18 a ChatGPT connector could not attach at all. Pressing "Authorize and return to
+ChatGPT" did nothing; pressing it again returned `invalid_request`. The server log showed the
+opposite of a failure — validated flow, issued code, `302` to the registered callback — and then
+no token exchange ever arrived.
+
+Cause: `form-action 'self'` on the hosted consent page. CSP3 applies `form-action` to a form
+submission's whole redirect chain, and Chrome and Safari enforce it, so the cross-origin redirect
+was abandoned **silently**. Every non-loopback host was affected — ChatGPT and claude.ai web,
+which is the entire hosted cross-vendor path. Loopback clients such as Claude Code were untouched,
+because they redirect same-origin. Full account in D-086.
+
+Three things about this belong in the universality record rather than only in the decision log.
+
+**The row was honest when written and became false without anything touching it.** The CSP shipped
+2026-08-17 with the hosted accounts work, two days after the 2026-08-15 verification. Nothing in
+that change went near OAuth. A *verified* row therefore describes a run, never a property that
+holds afterwards, and this table should be read as dated observations rather than as current
+status.
+
+**The gate could not see it.** `test_successful_consent_redirects_with_a_code_and_state` passed
+throughout the outage, and it was correct to: the 302, the `code`, and the `state` were all right.
+httpx does not enforce CSP. Every test we own exercises the transport rather than a browser, so
+this class of defect — the server being right and the browser refusing to follow — is invisible
+to the whole suite by construction. The repair asserts the CSP header itself.
+
+**Only the vendor we do not test with was affected.** Our own client kept working perfectly, which
+is exactly the failure mode `CLAUDE.md` calls vendor gravity: a path that works for the host we
+develop against, broken for the hosts the claim is about, for a day, unnoticed. It was found by a
+person trying to use the product, not by us.
+
+Re-confirmed the same day: after the fix, a ChatGPT web connector completed OAuth and joined a room
+created by Claude Code, seeing the other participant and the empty board.
 
 ## 3. The conformance harness ✅
 

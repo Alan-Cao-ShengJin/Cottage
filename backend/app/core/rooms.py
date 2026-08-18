@@ -200,6 +200,13 @@ async def ensure_human_identity(user: User, *, display_name: str | None = None) 
     )
 
 
+#: How many people may redeem the room's default join link, and for how long. A room
+#: is a working space, not a public broadcast, so this is bounded — an admin can mint
+#: further invitations with different limits.
+DEFAULT_JOIN_MAX_REDEMPTIONS = 50
+DEFAULT_JOIN_TTL_SECONDS = 7 * 24 * 3600
+
+
 @dataclass
 class CreatedRoom:
     """Everything the creator needs, from one call.
@@ -213,13 +220,12 @@ class CreatedRoom:
     participant_token: str
     join_token: str
     invitation_id: str
-
-
-#: How many people may redeem the room's default join link, and for how long. A room
-#: is a working space, not a public broadcast, so this is bounded — an admin can mint
-#: further invitations with different limits.
-DEFAULT_JOIN_MAX_REDEMPTIONS = 50
-DEFAULT_JOIN_TTL_SECONDS = 7 * 24 * 3600
+    #: The default join link's real terms, read back from the stored invitation rather
+    #: than recomputed by the caller. A replay rotates the token but keeps the original
+    #: invitation row, so its expiry is not derivable from "now" — and a creator who is
+    #: told the wrong window is worse served than one told nothing.
+    join_expires_at: str | None = None
+    join_max_redemptions: int = DEFAULT_JOIN_MAX_REDEMPTIONS
 
 
 async def create_room(
@@ -504,12 +510,23 @@ async def create_room(
             (hash_token(join_token), resolved_invitation),
         )
 
+    invitation_row = await db.fetch_one(
+        "SELECT expires_at, max_redemptions FROM invitations WHERE id = ?",
+        (resolved_invitation,),
+    )
+
     return CreatedRoom(
         room=await store.load_room(resolved_room),
         participant=await store.load_participant_for_room(resolved_room, resolved_participant),
         participant_token=participant_token,
         join_token=join_token,
         invitation_id=resolved_invitation,
+        join_expires_at=(invitation_row["expires_at"] if invitation_row else None),
+        join_max_redemptions=(
+            int(invitation_row["max_redemptions"])
+            if invitation_row
+            else DEFAULT_JOIN_MAX_REDEMPTIONS
+        ),
     )
 
 

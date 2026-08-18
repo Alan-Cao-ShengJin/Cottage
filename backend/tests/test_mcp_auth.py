@@ -494,8 +494,16 @@ async def test_authenticated_agent_creates_without_a_principal_token(fresh_db, o
 
     assert created["ok"] is True, created
     assert created["room_name"] == "Created by request"
-    assert created["charter"] == "Coordinate in small claims; ready means the shared gate is green."
     assert created["join_token"]
+
+    # Read the charter back from the room rather than from the response. The compact
+    # response no longer echoes it (D-085), and an echo was never evidence anyway: the
+    # caller supplied that string, and a charter that failed content inspection would
+    # have raised instead of being quietly altered. Storage is the claim, so load it.
+    from app.core import store
+
+    room = await store.load_room(created["room_id"])
+    assert room.charter == "Coordinate in small claims; ready means the shared gate is green."
 
 
 async def test_without_a_token_the_client_names_itself(fresh_db, org, make_room):

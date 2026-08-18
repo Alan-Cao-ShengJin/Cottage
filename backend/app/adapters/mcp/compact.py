@@ -335,3 +335,191 @@ def events(
         return [event(e) for e in relevant], 0
     kept = relevant[-max_events:]
     return [event(e) for e in kept], len(relevant) - len(kept)
+
+
+# ---------------------------------------------------------------------------
+# The welcome sheet
+# ---------------------------------------------------------------------------
+
+#: Rendered server-side, on purpose. `create_room` returns eighteen flat fields, and
+#: what a person saw was therefore whatever their assistant chose to make of them: one
+#: client printed a tidy summary, another dumped the plumbing, a third invented a join
+#: snippet of its own. The information a room creator receives is product behavior, not
+#: a rendering accident, so the server ships the exact text and the tool asks the client
+#: to print it verbatim.
+#:
+#: The structured fields stay in the response for code to read; this is the human half.
+#: Both are built from the same values, so they cannot disagree.
+WELCOME_TEMPLATE = """Welcome to Cottage
+
+Room:          {room_name}
+Owner:         You
+Orchestrator:  Your AI
+Open to:       {open_to}
+Status:        {status} · {lifetime} · up to {seats} seats
+
+Invitation:    {join_token}"""
+
+#: Who may come in, in the terms a person cares about rather than the enum name.
+#: `cross_org` is the fact; "including people outside your organization" is what that
+#: fact means to whoever is deciding who to send the token to.
+_OPEN_TO = {
+    "cross_org": "anyone you invite, including people outside your organization",
+    "internal": "people inside your organization only",
+}
+
+
+def _duration(seconds: int | None) -> str:
+    """A window a person can hold in their head: "24 hours", "7 days"."""
+    if not seconds or seconds <= 0:
+        return "no expiry"
+    if seconds < 3600:
+        minutes = max(1, round(seconds / 60))
+        return f"{minutes} minute" + ("" if minutes == 1 else "s")
+    # `<=`, so a one-day room reads "24 hours" rather than "1 day": the number a
+    # person was told when they created it is the number they should see back.
+    if seconds <= 86400:
+        hours = round(seconds / 3600)
+        return f"{hours} hour" + ("" if hours == 1 else "s")
+    days = round(seconds / 86400)
+    return f"{days} day" + ("" if days == 1 else "s")
+
+
+def welcome(
+    *,
+    room_name: str,
+    visibility: str,
+    status: str,
+    ttl_seconds: int | None,
+    seats: int,
+    join_token: str,
+) -> str:
+    """The sheet a room creator reads. Print it verbatim; do not restate it.
+
+    The join token is last, after a blank line, because it is the only line anyone
+    acts on. Everything above it is context for a decision already made.
+    """
+    return WELCOME_TEMPLATE.format(
+        room_name=room_name,
+        open_to=_OPEN_TO.get(visibility, visibility),
+        status=status,
+        lifetime=_duration(ttl_seconds),
+        seats=seats,
+        join_token=join_token,
+    )
+
+
+#: Continuation indent for a wrapped value, aligned to the template's value column below.
+#: Named rather than inlined so widening a label cannot leave a wrapped line hanging.
+VALUE_COLUMN = 27
+LINE_BREAK = "\n" + " " * VALUE_COLUMN
+
+JOIN_TEMPLATE = """Welcome to Cottage
+
+Room:                      {room_name}
+Your Display Name:         {you_name}
+Also here:                 {others}
+Current work in the room:  {work}
+{limits}
+Next:                      tell the room what you are working on"""
+
+#: How many names to print before counting the rest. Three fits a line and still reads as
+#: people rather than as a list; past that the count is the more useful fact.
+_NAMES_SHOWN = 3
+
+#: What this kind of session cannot do, said on arrival rather than discovered later.
+#:
+#: A browser assistant is the case that needs it. It is genuinely unreachable between its
+#: human's messages, and principle 5 — never simulate liveness a host has not declared —
+#: is usually read as a constraint on the server's *behavior*; but a sheet that lets a
+#: person believe their chat window is a live participant breaks it just as effectively.
+#: So the limitation is named, and so is the remedy: the same room from an IDE is a live
+#: participant, and that is worth knowing on the way in rather than after missing something.
+#:
+#: The second sentence is the counterweight. "Limited" invites the reading that little of
+#: what you say arrives, when the truth is the opposite — everything posted is fully
+#: visible to the room, and only *inbound* liveness is limited.
+#:
+#: No entry for `unattended_loop`: there is nothing to warn about, and inventing a caveat
+#: to fill the line would teach people to skim past the one host where it matters.
+_LIMITS = {
+    "human_turn_only": (
+        "You are in a web browser session, so live room updates cannot reach"
+        + LINE_BREAK
+        + "you between your messages — you see the room when you ask. Anything"
+        + LINE_BREAK
+        + "you post here is fully visible to everyone in the room. For live"
+        + LINE_BREAK
+        + "updates alongside your coworkers, connect Cottage from an IDE."
+    ),
+    "observer": (
+        "You receive everything as it happens, but you take no work and hold"
+        + LINE_BREAK
+        + "no leases. Anything you post here is visible to everyone in the room."
+    ),
+}
+
+
+def _who(participants: list[dict[str, Any]], *, excluding: str) -> str:
+    """Who else is in the room, by name.
+
+    Names only. The liveness grade each of them carries stays in the structured fields and
+    in a room read, where an agent deciding whether to hand over work needs it; on the
+    arrival sheet it answered a question nobody had yet asked.
+    """
+    names = [
+        (row.get("identity") or {}).get("display_name") or "someone"
+        for row in participants
+        if row["id"] != excluding and row.get("state") == "joined"
+    ]
+    if not names:
+        return "nobody else yet"
+    if len(names) <= _NAMES_SHOWN:
+        return ", ".join(names[:-1]) + " & " + names[-1] if len(names) > 1 else names[0]
+    rest = len(names) - _NAMES_SHOWN
+    return ", ".join(names[:_NAMES_SHOWN]) + f" & {rest} other" + ("" if rest == 1 else "s")
+
+
+def _what(work_rows: list[dict[str, Any]]) -> str:
+    """What is being worked on, by headline rather than by count.
+
+    A count answers "is anything happening"; a joiner needs "is anyone already on the
+    thing I was about to start". Two headlines answer that, and the rest is a room read
+    away.
+    """
+    headlines = [row["headline"] for row in work_rows if row.get("headline")]
+    if not headlines:
+        return "nothing yet"
+    if len(headlines) <= 2:
+        return "; ".join(headlines)
+    return "; ".join(headlines[:2]) + f"; and {len(headlines) - 2} more"
+
+
+def joined(
+    *,
+    room_name: str,
+    you_name: str,
+    participants: list[dict[str, Any]],
+    your_participant_id: str,
+    work_rows: list[dict[str, Any]],
+    execution_mode: str,
+) -> str:
+    """The sheet an arriving participant reads. Print it verbatim; do not restate it.
+
+    The counterpart to `welcome` (D-085). Arriving somewhere and being handed a status dump
+    is not the same as being told who is here and what they are doing, which is all the
+    core loop asks of a joiner before it asks anything else.
+
+    Task-claim eligibility is deliberately absent: `may_claim`, `claim_denied_reason`, and
+    `what_this_means` all ship in the response for the agent, and the room's lease policy
+    is not what a person needs in their first four lines.
+    """
+    limits = _LIMITS.get(execution_mode, "")
+    return JOIN_TEMPLATE.format(
+        room_name=room_name,
+        you_name=you_name,
+        others=_who(participants, excluding=your_participant_id),
+        work=_what(work_rows),
+        # Its own blank line above and below when present, and nothing at all when not.
+        limits=("\nHeads up:                  " + limits + "\n" if limits else ""),
+    )

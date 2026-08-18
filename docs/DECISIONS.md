@@ -3736,3 +3736,180 @@ Rejected: participant-level obligation messages that tell a model to poll again.
 runtime duties to the wrong grain, allow sibling connections to mask each other, leak MCP call
 syntax into transport-neutral core, and couple token-consuming cognition back to monitoring.
 Also rejected: multiple hosted agent services and a custom WebSocket agent protocol.
+
+## D-084 — A room is cross-organization by default
+
+**Date:** 2026-08-18
+**Status:** accepted
+**Context:** `CreateRoomCommand.visibility` defaulted to `internal`, and `join_room` refuses a
+foreign-org identity outright in an `internal` room. Nothing on the creation path supplies the
+field: the MCP tool defaulted `cross_org=False`, and an assistant acting on "make me a room" passes
+no argument at all. So the default room was one no stranger could enter — the exact sentence the
+project is judged against — while the failure surfaced only later, at someone else's join, as
+`forbidden`.
+
+### The decision
+
+`visibility` defaults to `cross_org`, in the command model rather than per adapter, so HTTP and MCP
+cannot disagree. `internal` remains available and is now the deliberate choice: a room that must
+stay inside one organization is stated as such at creation.
+
+This widens *who may enter*, not *what may be said*. The privacy boundary is untouched:
+disclosures still default to `room_public`; an `org_internal` payload in a cross-org room is still
+rejected rather than downgraded; a foreign-org identity redeeming a link invitation is still
+`untrusted` until vouched for, and may contribute `room_public` content only. The one behavior that
+changes for existing content classes is that `org_internal` is unusable in a default room — which
+is correct, because a default room now has strangers in it.
+
+`create_room` returns `visibility` in its response. A default that admits other organizations must
+be stated back to the creator, not inferred from documentation.
+
+Rejected: leaving the default at `internal` and having adapters pass `cross_org=True`. That puts the
+product's central claim in the hands of whichever adapter remembered, and the core default stays
+wrong for every future transport.
+
+
+## D-085 — The room a creator sees is rendered by the server
+
+**Date:** 2026-08-18
+**Status:** accepted
+**Context:** `create_room` returned eighteen flat fields and nothing else. What a person
+actually saw was therefore whatever their assistant chose to make of them: one client printed a
+tidy summary, another dumped the plumbing, a third invented a join snippet of its own wording.
+The same product moment looked different in every host, which is a poor outcome for a
+provider-neutral network whose whole claim is that any host works. Two facts were also missing
+from every rendering because they were missing from the response: the room's expiry and the join
+link's expiry. A creator learned the window by it lapsing.
+
+Separately, the response ignored the convention this adapter had already set. `compact.py` states
+that a tool response is spent context and presents a coordination view with full fidelity one
+parameter away; `join_room` explicitly declines to return its snapshot on those grounds.
+`create_room` was the one tool that returned everything.
+
+### The decision
+
+The server renders the creator-facing sheet and returns it as `welcome`, and the tool docstring
+instructs the client to print it verbatim and not to restate it. Name, who may join, the room's
+lifetime, the seat count, and the invitation token last on its own line after a blank one,
+because the token is the only line anyone acts on.
+
+The structured fields remain for code to read, and both halves are built from the same values so
+they cannot disagree. `expires_at`, `join_expires_at`, and `join_seats` are now reported. The
+join link's terms are read back from the stored invitation rather than recomputed by the adapter,
+because a replayed creation rotates the token while keeping the original invitation row — its
+expiry is not derivable from "now", and a creator told the wrong window is worse served than one
+told nothing.
+
+Connection internals — negotiated capabilities, delivery mode, lease eligibility, connection id,
+the display-name override, `share_this` — move behind `detail="full"`. `participant_id` stays in
+the compact view: it is how a client finds its own card in a room read, and it is one short
+string. `charter` moves behind `full`: the caller just supplied it, a charter that failed content
+inspection would have raised rather than been quietly altered, so the echo is evidence of
+nothing and can run to 8,000 characters.
+
+Rejected: leaving the rendering to each client and documenting the intended shape. Every host
+would drift, and the drift is invisible from inside any one of them — the failure that prompted
+this was noticing a second client's output looked nothing like the first's. Also rejected:
+returning only `welcome` and dropping the structured fields, which would force clients to parse
+prose to get a token.
+
+
+## D-086 — A consent page must permit the redirect its own form will follow
+
+**Date:** 2026-08-18
+**Status:** accepted
+**Context:** a ChatGPT connector could not attach to the hosted instance. The person pressed
+"Authorize and return to ChatGPT" and **nothing happened**; pressing it again produced
+`invalid_request`. The server log showed the opposite of a failure: a validated flow, an issued
+authorization code, and a `302` to the registered callback. Then no `POST /oauth/token` ever
+arrived, and no authenticated `/mcp` call followed.
+
+Two independent defects, and the first is invisible from the server:
+
+`form-action 'self'` was the whole form policy on the consent page. In CSP3 `form-action`
+governs a form submission's **entire redirect chain**, not just its immediate target, and Chrome
+and Safari enforce that (Firefox historically did not). So the POST to `/oauth/authorize` was
+allowed and the `302` to `chatgpt.com` was **silently abandoned** — no navigation, nothing a
+person sees. Every non-loopback client was affected: ChatGPT and claude.ai web, which is the
+entire hosted cross-vendor path. Loopback clients escaped because they redirect to
+same-origin `/oauth/complete`. The policy shipped 2026-08-17 with the hosted consent page, two
+days *after* the ChatGPT row in `docs/INTEROP.md` was marked verified — so the record was
+honest when written and silently became false.
+
+`test_successful_consent_redirects_with_a_code_and_state` passed throughout. It asserted the
+302 and its `code`/`state`, which were always correct; httpx does not enforce CSP. The gate
+could not see this class of bug at all.
+
+Second defect: the success path cleared the flow cookie, so a second press of a button that
+appeared to do nothing arrived with no cookie and hit the *missing-or-expired* branch. The
+person was told to "restart the MCP connection" — advice to redo an authorization that had
+already succeeded, which is exactly what they did, twice in one minute.
+
+### The decision
+
+The consent response's `form-action` lists `'self'` plus the **origin** of the flow's registered
+`redirect_uri`, taken from the flow already revalidated on load. Origin only, never the path: the
+policy widens by one host the human is consenting to and nothing else.
+
+The flow cookie is retained on the non-loopback success path. The flow row is marked consumed and
+revalidated on every load, so a retained cookie authorizes nothing; it exists so the next page can
+tell "already completed" from "never started". A consumed flow now says the authorization
+succeeded and to return to the client, and only a genuinely missing or expired flow advises a
+restart.
+
+Tests assert the CSP header itself for both a web and a loopback callback, that the origin is not
+the path, that a repeat submit says "already completed" and does not say "restart", and that an
+expired flow still does. Asserting the response a browser *would not follow* is what let this
+reach a real user, so the header is now the assertion.
+
+Rejected: dropping `form-action` entirely. It is a real protection against a consent form being
+retargeted, and the fix does not need its removal — only the one origin the flow already names.
+
+
+## D-087 — An arrival sheet names what this kind of session cannot do
+
+**Date:** 2026-08-18
+**Status:** accepted
+**Context:** D-085 made the room-creation sheet a server-rendered product surface. Joining had no
+equivalent, so a ChatGPT connector that joined a room reported a status dump of its own devising:
+`ChatGPT: connected, attended` / `Claude Code: disconnected` / `Task claiming: disabled for
+attended agents by room policy`. Accurate, and wrong on two counts. It spoke the room's vocabulary
+rather than the joiner's, and it said nothing about the thing that most changes what this person
+should expect — that a browser session cannot be reached between its own messages.
+
+### The decision
+
+`join_room` returns `welcome`, rendered by the server, and the tool instructs the client to print
+it verbatim: room, the joiner's display name, who else is here by name, what is being worked on,
+and a `Heads up:` line naming this session's limitation.
+
+**The limitation line is a principle, not a courtesy.** Principle 5 — never simulate liveness a
+host has not declared — reads as a constraint on server behavior, but an arrival sheet that lets
+someone believe their chat window is a live participant breaks it just as effectively: they will
+expect the room to wake something that cannot be woken. So a `human_turn_only` joiner is told that
+live updates cannot reach it between messages, and told the remedy, because the same room from an
+IDE *is* a live participant and that is worth knowing on the way in rather than after missing
+something.
+
+The line carries its own counterweight. "Limited" invites the reading that little of what you say
+arrives, when the truth is the opposite — everything posted is fully visible to the room, and only
+*inbound* liveness is limited. Saying both halves is what makes it a description instead of a
+warning. There is no line for `unattended_loop`: nothing is true there, and a caveat on every host
+teaches people to skim past the one host where it matters.
+
+Work in progress is shown by **headline**, not by count. A count answers "is anything happening";
+a joiner needs "is anyone already on the thing I was about to start". Participants are listed by
+name, three of them, then a count of the rest.
+
+Two things are deliberately absent from the sheet and present in the response. Task-claim
+eligibility — `may_claim`, `claim_denied_reason`, `what_this_means` — because the technical reason
+is a forty-word sentence naming a policy flag and a capability, which is right for an agent reading
+a field and wrong for the first thing a person reads. And each participant's liveness grade, which
+an agent deciding whether to hand over work needs and a person arriving does not; it remains in
+`get_room_state`. That second omission is a real cost, since who is reachable is close to the
+product's centre, and it is worth revisiting if arrivals start reading as if everyone were present.
+
+Rejected: reusing `claim_denied_reason` verbatim in the sheet, which is how the dump that prompted
+this read. Also rejected: computing the joiner's own liveness grade for display — the mode's
+limitation is the useful fact, and a self-reported grade invites the reader to trust a
+self-assessment the room derives independently.

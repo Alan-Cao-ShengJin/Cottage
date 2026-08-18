@@ -656,3 +656,113 @@ async def test_loopback_completion_requires_a_consumed_browser_flow(fresh_db):
 async def test_loopback_handoff_is_selected_by_redirect_shape(redirect_uri):
     assert oauth.is_loopback_redirect_uri(redirect_uri)
     assert not oauth.is_loopback_redirect_uri("https://localhost.example/callback")
+
+
+async def _consent_response(client, registered, owner, *, redirect_uri=REDIRECT):
+    """Walk to the consent screen and return the *response*, headers included."""
+    await accounts.set_password_hash(owner["user_id"], accounts.hash_password(TEST_PASSWORD))
+    _verifier, challenge = _pkce()
+    started = await client.get(
+        "/oauth/authorize",
+        params={
+            "client_id": registered.client_id,
+            "response_type": "code",
+            "redirect_uri": redirect_uri,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "scope": "agent",
+            "state": "xyz",
+        },
+    )
+    assert started.status_code == 200
+    logged_in = await client.post(
+        "/oauth/login",
+        data={
+            "email": "owner@acme.test",
+            "password": TEST_PASSWORD,
+            "csrf_token": _hidden_csrf(started.text),
+        },
+        follow_redirects=False,
+    )
+    assert logged_in.status_code == 303
+    consent = await client.get(logged_in.headers["location"])
+    assert consent.status_code == 200
+    return consent
+
+
+async def test_consent_page_permits_the_redirect_its_own_form_will_follow(registered, owner):
+    """The bug a passing 302 assertion cannot see (D-086).
+
+    `form-action` governs a form's whole redirect chain in Chrome and Safari, so
+    `form-action 'self'` let the POST through and then silently dropped the 302 to the
+    client's callback. The button did nothing, the server logged success, and the flow was
+    spent — pressing it again produced `invalid_request`.
+
+    `test_successful_consent_redirects_with_a_code_and_state` passed throughout, because
+    httpx does not enforce CSP. So this asserts the *header that permits the follow*, which
+    is the only part a real browser was disagreeing with us about.
+    """
+    async with await _client() as client:
+        consent = await _consent_response(client, registered, owner)
+
+    policy = consent.headers["content-security-policy"]
+    assert "form-action 'self' https://chatgpt.com" in policy
+    # The origin only. The registered callback's path is not a form-action target.
+    assert "https://chatgpt.com/aip/callback" not in policy
+
+
+async def test_consent_page_permits_a_loopback_callback_too(fresh_db, owner):
+    """Desktop clients go through `/oauth/complete`, but the policy is built the same way."""
+    registered = await oauth.register_client(
+        client_name="Claude Code", redirect_uris=[LOOPBACK_REDIRECT]
+    )
+    async with await _client() as client:
+        consent = await _consent_response(client, registered, owner, redirect_uri=LOOPBACK_REDIRECT)
+
+    assert "form-action 'self' http://localhost:3118" in consent.headers["content-security-policy"]
+
+
+def test_form_action_origin_keeps_only_the_origin():
+    from app.api.oauth import _form_action_origin
+
+    assert _form_action_origin("https://chatgpt.com/connector/oauth/9_yG") == "https://chatgpt.com"
+    assert _form_action_origin("http://127.0.0.1:5000/cb") == "http://127.0.0.1:5000"
+    assert _form_action_origin("not-a-url") == ""
+
+
+async def test_an_already_completed_authorization_does_not_say_restart(registered, owner):
+    """The second press of a button that appeared to do nothing.
+
+    A consumed flow means the authorization *succeeded*. Advising a restart there sends
+    someone to redo work already done, which is what happened to a real person before the
+    CSP fix above — twice in one minute.
+    """
+    async with await _client() as client:
+        page = await _login_browser(client, registered, owner, state="opaque-state")
+        first = await client.post(
+            "/oauth/authorize",
+            data={"csrf_token": _hidden_csrf(page), "new_agent_name": "ChatGPT (Alan)"},
+            follow_redirects=False,
+        )
+        assert first.status_code == 302, "the authorization itself succeeded"
+
+        again = await client.post(
+            "/oauth/authorize",
+            data={"csrf_token": _hidden_csrf(page), "new_agent_name": "ChatGPT (Alan)"},
+            follow_redirects=False,
+        )
+
+    assert again.status_code == 400
+    assert "already completed" in again.text
+    assert "Restart the MCP connection" not in again.text
+
+
+async def test_a_genuinely_expired_flow_still_says_restart(registered, owner):
+    """The other branch keeps its own advice, which for an expired flow is correct."""
+    async with await _client() as client:
+        await _consent_response(client, registered, owner)
+        await db.execute("UPDATE oauth_browser_flows SET expires_at = ?", (iso_in(-60),))
+        expired = await client.get("/oauth/consent")
+
+    assert expired.status_code == 400
+    assert "Restart the MCP connection" in expired.text

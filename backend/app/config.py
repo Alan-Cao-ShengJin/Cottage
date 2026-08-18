@@ -134,8 +134,12 @@ class Settings:
     )
 
     # --- rooms ---------------------------------------------------------
+    #: 24 hours. A room is a working session, not a workspace: the coordination it holds
+    #: is about what is being worked on right now, and a week-long default leaves rooms
+    #: nobody is in sitting open with live join links. Extending is one call; shortening
+    #: an existing room is not possible, so the short default is the safe one.
     default_room_ttl_seconds: int = field(
-        default_factory=lambda: _int("DEFAULT_ROOM_TTL_SECONDS", 7 * 24 * 3600)
+        default_factory=lambda: _int("DEFAULT_ROOM_TTL_SECONDS", 24 * 3600)
     )
     default_lease_seconds: int = field(default_factory=lambda: _int("DEFAULT_LEASE_SECONDS", 900))
     max_lease_seconds: int = field(default_factory=lambda: _int("MAX_LEASE_SECONDS", 3600))

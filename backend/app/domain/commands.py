@@ -72,7 +72,13 @@ class CreateRoomCommand(CommandMeta):
     purpose: str = Field(default="", max_length=4000)
     #: Durable cold-start context for a participant arriving without room history.
     charter: str = Field(default="", max_length=8000)
-    visibility: RoomVisibility = RoomVisibility.INTERNAL
+    #: `cross_org` by default. An `internal` room refuses a foreign-org identity
+    #: outright at join (`core/rooms.py`), so an internal default made the product's
+    #: own sentence — "invite someone over the internet" — fail on the path nobody
+    #: passes an argument on. The privacy boundary is unaffected: content defaults to
+    #: `room_public`, and an `org_internal` payload is still rejected here rather than
+    #: downgraded. Pass `internal` deliberately for a single-org room.
+    visibility: RoomVisibility = RoomVisibility.CROSS_ORG
     policy: RoomPolicy | None = None
     retention: RetentionPolicy | None = None
 

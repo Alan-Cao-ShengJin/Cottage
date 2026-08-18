@@ -24,17 +24,20 @@ from app.core import authz, rooms, store
 from app.core.errors import Forbidden, Unauthenticated
 from app.domain.commands import CreateRoomCommand, JoinRoomCommand
 from app.domain.identity import IdentityProvenance, TrustTier
-from app.domain.room import PrivacyClass, Scope
+from app.domain.room import PrivacyClass, RoomVisibility, Scope
 
 
-async def _room_with_join_token(org):
+async def _room_with_join_token(org, visibility: RoomVisibility | None = None):
     from app.db import database as db
 
     _, user_id = org
     user_row = await db.fetch_one("SELECT * FROM users WHERE id = ?", (user_id,))
-    return await rooms.create_room(
-        user=store.to_user(user_row), command=CreateRoomCommand(name="Cross-company room")
+    command = (
+        CreateRoomCommand(name="Cross-company room")
+        if visibility is None
+        else CreateRoomCommand(name="Cross-company room", visibility=visibility)
     )
+    return await rooms.create_room(user=store.to_user(user_row), command=command)
 
 
 @pytest.mark.asyncio
@@ -120,7 +123,10 @@ async def test_org_internal_events_are_not_disclosed_to_a_guest(fresh_db, org) -
     """
     from app.core import messages, projections
 
-    created = await _room_with_join_token(org)
+    # Explicitly `internal`, because `org_internal` content can only exist in such a
+    # room: a cross-org room rejects the class outright, so the leak this test guards
+    # against is only reachable inside one organization. Rooms default to `cross_org`.
+    created = await _room_with_join_token(org, visibility=RoomVisibility.INTERNAL)
     credential = await rooms.authenticate_invitation(created.join_token)
     identity = await rooms.provision_guest_identity(credential, display_name="Guest")
     joined = await rooms.join_room(

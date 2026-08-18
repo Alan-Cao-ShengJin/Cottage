@@ -118,6 +118,9 @@ Rules:
   membership verification. There is no cross-room or cross-org content read path.
 - An `internal` room refuses a foreign-org identity outright at join. A `cross_org` room admits one,
   but as `untrusted` unless the invitation targeted its org specifically (then `vouched`).
+- **Rooms default to `cross_org`** (D-084). The default therefore widens who may *enter*, never what
+  may be *said*: the two rules below still hold in full, and content still defaults to
+  `room_public`. A room that must stay inside one organization is created as `internal` explicitly.
 - Identity minimization in `cross_org` rooms: foreign participants see display name, org name, host
   class, and capabilities. Not emails, not user ids, not the org's other identities.
 - `org_internal` payloads are **rejected** in `cross_org` rooms (`privacy_violation`), never

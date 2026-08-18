@@ -312,7 +312,17 @@ async def load_browser_authorization_flow(flow_token: str | None) -> BrowserAuth
         )
     token_hash = hash_token(flow_token)
     row = await db.fetch_one("SELECT * FROM oauth_browser_flows WHERE flow_hash = ?", (token_hash,))
-    if row is None or row["consumed_at"] or is_past(row["expires_at"]):
+    if row is not None and row["consumed_at"]:
+        # Told apart from missing-or-expired on purpose. A consumed flow means the
+        # authorization **already succeeded** — a second consent submit, a refresh, a back
+        # button — and "restart the MCP connection" is then advice to redo work that is
+        # already done. It sent a real person round the loop twice (D-086).
+        raise OAuthError(
+            "invalid_request",
+            "This authorization was already completed. Close this window and return to "
+            "your client; if it still is not connected, start the connection again there.",
+        )
+    if row is None or is_past(row["expires_at"]):
         raise OAuthError(
             "invalid_request",
             "The authorization session is missing or expired. Restart the MCP connection.",

@@ -560,7 +560,8 @@ async def create_room(
     charter: str = "",
     display_name: str = "Room creator",
     execution_mode: str = "unattended_loop",
-    cross_org: bool = False,
+    cross_org: bool = True,
+    detail: str = "compact",
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Create a room, join it as owner, and get a token to share with everyone else.
@@ -578,14 +579,33 @@ async def create_room(
     In hosted OAuth mode the account-bound name overrides `display_name`; the response
     says which name was used instead of silently ignoring the requested one.
 
+    `cross_org` defaults to **true**, because the room this tool exists to make is one
+    you invite a stranger into: an `internal` room refuses a foreign-org identity at
+    join, so anyone outside the creator's organization would be turned away. Pass
+    `cross_org=False` only for a room that must stay inside one organization. A
+    foreign-org guest arriving on a link invitation is `untrusted` until vouched for,
+    and `org_internal` content is rejected rather than downgraded in either case.
+
     You get back:
 
+      * `welcome` — **show this to the person exactly as it is.** It is the room's
+        information sheet: name, who may join, how long the room lasts, how many seats,
+        and the invitation token on its own line at the end. Do not reformat it, do not
+        summarise it, and do not repeat its contents in your own words afterwards —
+        every client showing the same sheet is the point (D-085).
       * `join_token` — the one thing you share. Anyone you give it to calls
-        `join_room(invitation_token=<join_token>, execution_mode="...")`.
+        `join_room(invitation_token=<join_token>, execution_mode="...")`. It is already
+        in `welcome`, so you do not need to print it twice.
       * `participant_token` — yours. You are already in the room; this session is bound
         to it, so subsequent tools work without passing anything.
+      * `expires_at`, `join_expires_at`, `join_seats` — the room's window, the link's
+        window, and how many people may redeem it.
 
     Both tokens are shown once and stored only as hashes.
+
+    `detail="full"` adds the connection internals — negotiated capabilities, delivery
+    mode, lease eligibility, ids. Nothing a person reads, so ask for it only if your
+    client needs those fields.
     """
     try:
         if execution_mode not in EXECUTION_MODES:
@@ -641,35 +661,71 @@ async def create_room(
             attachment_label=MCP_ATTACHMENT_LABEL,
             attachment_resumable=False,
         )
-        return {
+        ttl_seconds = created.room.retention.ttl_seconds
+        response = {
             "ok": True,
+            # Print this verbatim. It is the creator-facing half of this response, and
+            # the reason it is built here rather than left to each client is that "what
+            # a person sees when they make a room" is product behavior (D-085).
+            "welcome": compact.welcome(
+                room_name=created.room.name,
+                visibility=created.room.visibility.value,
+                status=created.room.status.value,
+                ttl_seconds=ttl_seconds,
+                seats=created.join_max_redemptions,
+                join_token=created.join_token,
+            ),
             "room_id": created.room.id,
             "room_name": created.room.name,
-            "charter": created.room.charter,
+            # Stated, not assumed: the default admits participants from other
+            # organizations, so the creator is told which kind of room they got.
+            "visibility": created.room.visibility.value,
+            # Both expiries, because neither was reported before and a creator who is
+            # not told the window finds out by it lapsing.
+            "expires_at": created.room.expires_at,
             "join_token": created.join_token,
+            "join_expires_at": created.join_expires_at,
+            "join_seats": created.join_max_redemptions,
             "participant_token": created.participant_token,
+            # Kept in the compact view despite being an id: it is how a client finds its
+            # own card in `get_room_state`, and it is one short string.
             "participant_id": created.participant.id,
-            "connection_id": negotiated.connection.id,
-            "execution_mode": execution_mode,
-            "display_name": created.participant.identity.display_name,
-            "display_name_was_overridden": (
-                created.participant.identity.display_name != display_name
-            ),
-            "negotiated_capabilities": [
-                capability.value for capability in negotiated.connection.negotiated_capabilities
-            ],
-            "delivery_mode": negotiated.runtime.delivery_mode.value,
-            "may_claim": negotiated.runtime.may_claim,
             "cursor": await eventlog.current_seq(created.room.id),
-            "share_this": (
-                f"Give join_token to each participant. They call "
-                f'join_room(invitation_token="{created.join_token}", execution_mode="...").'
-            ),
             "next_step": (
-                "You are connected. Call declare_current_work, then keep "
+                "Show `welcome` to the person as-is; do not restate its contents. "
+                "Then call declare_current_work and keep "
                 "await_room_events(since_seq=cursor) running in a loop."
             ),
         }
+        if detail != "full":
+            return response
+        # Everything a client might need but no human reads. Behind a parameter for the
+        # same reason as every other tool in this adapter: a response is spent context.
+        response.update(
+            {
+                # Redundant in the compact view: the caller just supplied it, and a
+                # charter that failed content inspection would have raised rather than
+                # been quietly altered — so the echo proves nothing and can run to 8k
+                # chars. `get_room_state` is where it is read.
+                "charter": created.room.charter,
+                "connection_id": negotiated.connection.id,
+                "execution_mode": execution_mode,
+                "display_name": created.participant.identity.display_name,
+                "display_name_was_overridden": (
+                    created.participant.identity.display_name != display_name
+                ),
+                "negotiated_capabilities": [
+                    capability.value for capability in negotiated.connection.negotiated_capabilities
+                ],
+                "delivery_mode": negotiated.runtime.delivery_mode.value,
+                "may_claim": negotiated.runtime.may_claim,
+                "share_this": (
+                    f"Give join_token to each participant. They call "
+                    f'join_room(invitation_token="{created.join_token}", execution_mode="...").'
+                ),
+            }
+        )
+        return response
     except RoomError as exc:
         return _err(exc)
 
@@ -777,7 +833,14 @@ async def join_room(
     `human_turn_only` because someone is watching you, you give up lease eligibility the
     room needed you to have.
 
-    Returns your `participant_token` (later calls in this session need nothing), the
+    Returns `welcome` — **show it to the person exactly as it is, and do not restate it.**
+    It is the arrival sheet: who else is in the room and how present each of them is, what
+    is being worked on, whether task claiming is open to you, and what this kind of session
+    cannot do. A browser or chat assistant is told plainly that nothing can reach it
+    between its human's messages, because a person who believes otherwise will expect the
+    room to wake a window that cannot be woken (D-085).
+
+    Also returns your `participant_token` (later calls in this session need nothing), the
     negotiated capabilities, and a snapshot of the room.
     """
     try:
@@ -839,6 +902,17 @@ async def join_room(
         # headline to know whether anything needs attention at all.
         return {
             "ok": True,
+            # Print this verbatim, like `create_room`'s (D-085). Arriving somewhere and
+            # being handed a status dump is not the same as being told who is here and
+            # what they are doing.
+            "welcome": compact.joined(
+                room_name=result.room.name,
+                you_name=effective_name,
+                participants=snapshot.get("participants") or [],
+                your_participant_id=result.participant.id,
+                work_rows=snapshot.get("work") or [],
+                execution_mode=execution_mode,
+            ),
             "participant_token": result.participant_token,
             "participant_id": result.participant.id,
             "room_id": result.room.id,
@@ -863,8 +937,9 @@ async def join_room(
             # other participants' view of it matches its own.
             "what_this_means": _explain(execution_mode, negotiated.runtime),
             "next_step": (
-                "Call get_room_state to see the board, declare_current_work with your "
-                "headline and targets, then await_room_events(since_seq=cursor) in a loop."
+                "Show `welcome` to the person as-is; do not restate its contents. Then "
+                "declare_current_work with your headline and targets, and keep "
+                "await_room_events(since_seq=cursor) running in a loop."
             ),
         }
     except RoomError as exc:
