@@ -533,6 +533,8 @@ async def list_open_connections(room_id: str, *, tx: db.Tx | None = None) -> lis
 
 
 def to_attachment(row: Any) -> Attachment:
+    from ..domain.room import RuntimeOperation, RuntimeOperationalState
+
     return Attachment(
         id=row["id"],
         room_id=row["room_id"],
@@ -543,6 +545,14 @@ def to_attachment(row: Any) -> Attachment:
         runtime_role=RuntimeRole(row["runtime_role"]),
         executor_kind=row["executor_kind"],
         executor_model=row["executor_model"],
+        operation=RuntimeOperation(
+            state=RuntimeOperationalState(row["operational_state"]),
+            summary=row["operational_summary"],
+            waiting_reason=row["waiting_reason"],
+            task_id=row["operational_task_id"],
+            work_id=row["operational_work_id"],
+            updated_at=row["operational_updated_at"],
+        ),
         created_at=row["created_at"],
         last_seen_at=row["last_seen_at"],
     )

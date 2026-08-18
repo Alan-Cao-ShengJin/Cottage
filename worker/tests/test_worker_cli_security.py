@@ -46,7 +46,7 @@ def launched(monkeypatch):
 def test_the_runtime_credential_is_read_from_the_environment(launched, monkeypatch):
     monkeypatch.setenv("COTTAGE_PARTICIPANT_TOKEN", "runtime-secret-from-env")
 
-    assert cottage_worker.main(["--room", "room_test", "--max-cycles", "0"]) == 0
+    assert cottage_worker.main(["--room", "room_test"]) == 0
     assert launched.captured["token"] == "runtime-secret-from-env"
     assert launched.captured["ran"] is True
 
@@ -103,7 +103,7 @@ def test_a_bare_flag_with_no_value_is_refused_as_well(launched, monkeypatch):
 def test_the_credential_never_appears_in_the_worker_s_own_argv(launched, monkeypatch):
     """The property the operator actually cares about, stated end to end."""
     monkeypatch.setenv("COTTAGE_PARTICIPANT_TOKEN", "runtime-secret-from-env")
-    argv = ["--room", "room_test", "--label", "companion", "--max-cycles", "0"]
+    argv = ["--room", "room_test", "--label", "companion"]
 
     assert cottage_worker.main(argv) == 0
     assert "runtime-secret-from-env" not in " ".join(argv)

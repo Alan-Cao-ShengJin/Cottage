@@ -36,12 +36,18 @@ SEMANTIC_ROWS = (
     SemanticRow("identity_and_capabilities", "connect", "join_room", "identity_and_capabilities"),
     SemanticRow("visible_room_state", "get_snapshot", "get_room_state", "visible_room_state"),
     SemanticRow("current_work", "declare_work", "declare_current_work", "current_work"),
+    SemanticRow(
+        "runtime_operational_state",
+        "set_runtime_state",
+        "set_runtime_operational_state",
+        "runtime_operational_state",
+    ),
     SemanticRow("tasks_leases_and_fences", "claim_task", "claim_task", "tasks_leases_and_fences"),
     SemanticRow("checkpoints", "append_checkpoint", "record_checkpoint", "checkpoints"),
     SemanticRow("directives", "issue_directive", "steer_participant", "directives"),
     SemanticRow("questions", "ask_question", "ask_question", "questions"),
     SemanticRow("conflicts", "get_snapshot", "get_room_state", "conflicts"),
-    SemanticRow("cursor_and_resume", "stream", "await_room_events", "cursor_and_resume"),
+    SemanticRow("cursor_and_resume", "websocket_stream", "await_room_events", "cursor_and_resume"),
     SemanticRow("leave_and_peer_loss", "leave_room", "leave_room", "leave_and_peer_loss"),
 )
 

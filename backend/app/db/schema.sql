@@ -424,6 +424,14 @@ CREATE TABLE IF NOT EXISTS attachments (
     runtime_role   TEXT NOT NULL DEFAULT 'unspecified',
     executor_kind  TEXT NOT NULL DEFAULT '',
     executor_model TEXT NOT NULL DEFAULT '',
+    -- Projected work posture. Unlike connection liveness this is durable state,
+    -- but it never grants authority or claims that the runtime is connected.
+    operational_state TEXT NOT NULL DEFAULT 'monitoring',
+    operational_summary TEXT NOT NULL DEFAULT '',
+    waiting_reason TEXT NOT NULL DEFAULT '',
+    operational_task_id TEXT,
+    operational_work_id TEXT,
+    operational_updated_at TEXT,
     created_at     TEXT NOT NULL,
     last_seen_at   TEXT NOT NULL,
     -- Which run of this runtime is current. Bumped by a drain, never reused. A fence
@@ -442,7 +450,8 @@ CREATE TABLE IF NOT EXISTS attachments (
     -- Stable identity is the whole point: the same runtime reattaching must land on
     -- the same row, so affinity survives a transport reconnect.
     UNIQUE (participant_id, label),
-    CHECK (epoch >= 1)
+    CHECK (epoch >= 1),
+    CHECK (operational_state IN ('monitoring', 'working', 'waiting'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_attachments_participant ON attachments(participant_id);
@@ -465,6 +474,19 @@ CREATE TABLE IF NOT EXISTS connections (
 CREATE INDEX IF NOT EXISTS idx_connections_participant
     ON connections(participant_id, closed_at);
 CREATE INDEX IF NOT EXISTS idx_connections_open ON connections(room_id, closed_at);
+
+-- One-use browser realtime credentials. The durable participant token is exchanged
+-- over authenticated HTTP and never appears in a WebSocket URL or proxy log.
+CREATE TABLE IF NOT EXISTS stream_tickets (
+    token_hash     TEXT PRIMARY KEY,
+    room_id        TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    participant_id TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    created_at     TEXT NOT NULL,
+    expires_at     TEXT NOT NULL,
+    consumed_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_stream_tickets_expiry ON stream_tickets(expires_at);
 
 -- ---------------------------------------------------------------------------
 -- The event log: system of record (ADR-002 / D-003)

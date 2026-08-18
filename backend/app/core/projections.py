@@ -39,6 +39,31 @@ MAX_HYDRATION_MESSAGES = 25
 
 #: Enough for a worker to choose from; not the board.
 MAX_CLAIMABLE = 25
+MAX_CONTEXT_EVENTS = 40
+
+# Useful durable context for a future model turn. Transport churn, activity
+# narration and lease keepalives are intentionally absent: they explain the wire,
+# not the work, and would spend context without improving continuity.
+_CONTEXT_EVENT_TYPES = {
+    "message.posted",
+    "task.created",
+    "task.updated",
+    "task.proposed",
+    "task.completed",
+    "task.cancelled",
+    "task.checkpointed",
+    "task.awaiting_input",
+    "task.blocked",
+    "task.unblocked",
+    "question.asked",
+    "question.answered",
+    "directive.issued",
+    "conflict.detected",
+    "conflict.resolved",
+    "work.declared",
+    "work.updated",
+    "work.ended",
+}
 
 
 def _visible_record(
@@ -130,6 +155,13 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
             "ORDER BY created_seq ASC LIMIT ?",
             (room_id, questions_svc.MAX_OPEN_QUESTIONS),
         )
+        recent_activity_raw = await eventlog.read_recent(
+            room_id,
+            through_seq=snapshot_seq,
+            limit=500,
+            types={"activity.noted"},
+            tx=tx,
+        )
 
     presences = await presence.presence_for_room(room)
     now = utcnow()
@@ -205,6 +237,17 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
         )
     ]
 
+    # Activity has no mutable projection table. A fresh human surface derives the
+    # latest visible note per runtime directly from the durable log at the same
+    # snapshot boundary, so browser refresh does not erase what an active companion
+    # most recently reported. Legacy unscoped notes fall back to participant grain.
+    latest_activity_by_ref: dict[str, dict[str, Any]] = {}
+    for event in privacy.filter_events(recent_activity_raw, recipient=recipient, room=room):
+        payload = event.payload
+        ref = str(payload.get("attachment_id") or payload.get("participant_id") or "")
+        if ref:
+            latest_activity_by_ref[ref] = event.model_dump(mode="json")
+
     return {
         # FIRST, and literally first rather than merely early: a directive is an
         # instruction to this participant, and everything else here is context. A
@@ -237,6 +280,7 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
         "work": work,
         "tasks": visible_tasks,
         "messages": messages,
+        "latest_activity": list(latest_activity_by_ref.values()),
         "open_questions": [
             store.to_question(r).model_dump(mode="json") for r in open_question_rows
         ],
@@ -293,6 +337,13 @@ async def hydrate(
         ]
         room = await store.load_room(room_id, tx=tx)
         cursor = int(await tx.fetch_value("SELECT event_seq FROM rooms WHERE id = ?", (room_id,)))
+        recent_raw = await eventlog.read_recent(
+            room_id,
+            through_seq=cursor,
+            limit=160,
+            types=_CONTEXT_EVENT_TYPES,
+            tx=tx,
+        )
         # Counted by the database, never by len() of the returned page. The payload is
         # capped at MAX_HYDRATION_MESSAGES; the count is not, and deriving one from the
         # other would report "50 waiting" when 200 were waiting — an exact-looking
@@ -343,6 +394,12 @@ async def hydrate(
             ]
             for task_id in held_ids
         }
+
+    recent_context = [
+        event.model_dump(mode="json")
+        for event in privacy.filter_events(recent_raw, recipient=recipient, room=room)
+        if event.type.value in _CONTEXT_EVENT_TYPES
+    ][-MAX_CONTEXT_EVENTS:]
 
     now = utcnow()
     by_id = {t.id: t for t in tasks}
@@ -486,6 +543,10 @@ async def hydrate(
         "history_truncated": truncated,
         "retained_from_seq": room.retained_from_seq if truncated else None,
         "blocking_you": involving_me,
+        # Bounded durable continuity for successive model turns. This is not replay
+        # and never advances the caller's cursor; it is the recent work-shaped path
+        # to the projection above, privacy-filtered for this participant.
+        "recent_relevant_events": recent_context,
         # Said explicitly rather than left to be inferred from empty lists, because a
         # cold surface has no way to tell "nothing is waiting" from "nothing loaded".
         # Counts only objectively unresolved state, plus messages newer than a cursor

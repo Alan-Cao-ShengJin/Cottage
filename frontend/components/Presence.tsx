@@ -1,7 +1,7 @@
 "use client";
 
 import type { Participant } from "../lib/types";
-import { formatAge } from "../lib/useRoom";
+import { formatAge, type LiveActivity } from "../lib/useRoom";
 
 /**
  * The presence rail.
@@ -12,6 +12,25 @@ import { formatAge } from "../lib/useRoom";
  * Showing "ChatGPT" would tell you nothing you can act on; showing `long_poll` +
  * `attended` + "may not claim: requires human presence" tells you everything.
  */
+
+/**
+ * How a live activity note reads in the rail (D-082).
+ *
+ * Kept separate from `LIVENESS_LABEL` because the two answer different questions and
+ * conflating them is the bug this feature exists to prevent: liveness is *transport*
+ * ("can this be reached"), phase is *work* ("is it doing anything"). A participant can
+ * honestly be `live_poll` and `monitoring`-phased at the same time: connected,
+ * healthy, listening, and spending no model tokens.
+ */
+const PHASE_LABEL: Record<string, string> = {
+  working: "Working",
+  tool_started: "Running",
+  tool_finished: "Ran",
+  blocked: "Blocked",
+  monitoring: "Monitoring",
+  completed: "Completed",
+  failed: "Failed",
+};
 
 const LIVENESS_LABEL: Record<string, string> = {
   live_push: "live · pushable",
@@ -35,9 +54,11 @@ const SHOWN_CAPABILITIES = [
 export function PresenceRail({
   participants,
   youId,
+  liveActivity = {},
 }: {
   participants: Participant[];
   youId: string;
+  liveActivity?: Record<string, LiveActivity>;
 }) {
   const active = participants.filter((p) => p.state === "joined");
 
@@ -51,6 +72,7 @@ export function PresenceRail({
           const liveness = presence?.liveness ?? "disconnected";
           const caps = new Set(presence?.negotiated_capabilities ?? []);
           const runtime = presence?.runtime ?? null;
+          const doing = liveActivity[p.id];
 
           return (
             <div className="card tight participant" key={p.id}>
@@ -77,6 +99,53 @@ export function PresenceRail({
                   <> · seen {formatAge(presence.last_seen_at, Date.now())} ago</>
                 )}
               </div>
+
+              {/* What it is doing, under how reachable it is. Two lines because they
+                  are two facts: a participant can be reachable and doing nothing, or
+                  narrating busily and about to go stale. */}
+              {doing && (
+                <div className={`doing phase-${doing.phase}`}>
+                  <strong>{PHASE_LABEL[doing.phase] ?? doing.phase}</strong>
+                  {" — "}
+                  {doing.summary}
+                  {doing.tool && <span className="doing-tool"> · {doing.tool}</span>}
+                </div>
+              )}
+
+              {(presence?.runtimes ?? [])
+                .filter((item) => item.is_attachment && item.declared.role === "companion")
+                .map((item) => {
+                  const disconnected = item.liveness === "disconnected";
+                  const operation = item.operation;
+                  const runtimeActivity = liveActivity[item.ref];
+                  const label = disconnected
+                    ? "Disconnected"
+                    : operation?.state === "working"
+                      ? "Working"
+                      : operation?.state === "waiting"
+                        ? "Waiting"
+                        : "Monitoring";
+                  const detail = disconnected
+                    ? "runtime heartbeat lost"
+                    : runtimeActivity?.summary
+                      ? runtimeActivity.summary
+                    : operation?.state === "waiting"
+                      ? operation.waiting_reason
+                      : operation?.summary;
+                  return (
+                    <div
+                      className={`doing phase-${disconnected ? "disconnected" : operation?.state ?? "monitoring"}`}
+                      key={item.ref}
+                    >
+                      <strong>{label}</strong>
+                      {item.label && <> · {item.label}</>}
+                      {detail && <> — {detail}</>}
+                      {runtimeActivity?.tool && (
+                        <span className="doing-tool"> · {runtimeActivity.tool}</span>
+                      )}
+                    </div>
+                  );
+                })}
 
               {p.trust !== "member" && (
                 <div className="chips">

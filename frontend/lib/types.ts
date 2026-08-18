@@ -68,6 +68,35 @@ export interface RuntimePolicy {
   claim_denied_reason: string | null;
 }
 
+export type RuntimeOperationalState = "monitoring" | "working" | "waiting";
+
+export interface RuntimeOperation {
+  state: RuntimeOperationalState;
+  summary: string;
+  waiting_reason: string;
+  task_id: string | null;
+  work_id: string | null;
+  updated_at: string | null;
+}
+
+export interface RuntimeView {
+  ref: string;
+  is_attachment: boolean;
+  label: string;
+  liveness: Liveness;
+  connection_count: number;
+  delivery_modes: DeliveryMode[];
+  last_seen_at: string | null;
+  operation: RuntimeOperation | null;
+  declared: {
+    role: "control_surface" | "companion" | "unspecified";
+    executor_kind: string;
+    model: string;
+    host_class: HostClass;
+    is_resumable: boolean;
+  };
+}
+
 export interface Presence {
   participant_id: string;
   liveness: Liveness;
@@ -76,6 +105,7 @@ export interface Presence {
   negotiated_capabilities: Capability[];
   runtime: RuntimePolicy | null;
   last_seen_at: string | null;
+  runtimes: RuntimeView[];
 }
 
 export interface IdentityView {
@@ -200,6 +230,8 @@ export interface RoomSnapshot {
   work: WorkDeclaration[];
   tasks: Task[];
   messages: Message[];
+  /** Latest visible durable narration per runtime (legacy notes may be participant-scoped). */
+  latest_activity: EventEnvelope[];
   conflicts: Conflict[];
 }
 

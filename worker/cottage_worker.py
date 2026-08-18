@@ -49,9 +49,15 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from executors import EchoExecutor, Executor, StepContext, StepResult
+from executors import (
+    EchoExecutor,
+    Executor,
+    ReactionContext,
+    StepContext,
+    StepResult,
+)
 from executors import build as build_executor
 
 log = logging.getLogger("cottage-worker")
@@ -74,6 +80,35 @@ CAPABILITIES = [
 #: Renew when less than this fraction of the lease remains. Chosen so a renewal is
 #: attempted with time left to retry it, rather than at the moment it becomes urgent.
 RENEW_AT_FRACTION = 0.4
+
+# Relevance tiers are deliberately protocol-shaped rather than executor-shaped.
+# Routine events update local continuity without waking cognition; ambient room talk
+# is coalesced; direct work and control wake immediately.
+IMMEDIATE_EVENT_TYPES = frozenset(
+    {
+        "directive.issued",
+        "task.proposed",
+        "question.answered",
+        "task.steered",
+        "task.executor_changed",
+    }
+)
+AMBIENT_EVENT_TYPES = frozenset(
+    {
+        "message.posted",
+        "task.checkpointed",
+        "task.completed",
+        "task.blocked",
+        "task.unblocked",
+        "conflict.detected",
+        "conflict.resolved",
+        "work.declared",
+        "work.updated",
+        "work.ended",
+    }
+)
+MAX_LOCAL_EVENTS = 120
+MAX_CONTEXT_EVENTS = 40
 
 
 class ContainmentError(RuntimeError):
@@ -226,6 +261,11 @@ class RuntimeContainment:
             "process_start_marker": self._process_start_marker(os.getpid()),
             "containment": self.strength,
             "started_at": time.time(),
+            # Highest room event safely accepted by the monitor. Kept across a
+            # clean or unclean process restart; cognition results have their own
+            # idempotency keys and do not control replay.
+            "cursor": int(prior.get("cursor") or 0),
+            "pending_events": list(prior.get("pending_events") or [])[-MAX_CONTEXT_EVENTS:],
         }
         self._write_state()
         if self.strength == CONTAINMENT_STRONG:
@@ -277,6 +317,24 @@ class RuntimeContainment:
         self.room_id = room_id
         self._state["room_id"] = room_id
         self._write_state()
+
+    @property
+    def cursor(self) -> int:
+        return int(self._state.get("cursor") or 0)
+
+    @property
+    def pending_events(self) -> list[dict[str, Any]]:
+        raw = self._state.get("pending_events") or []
+        return list(raw) if isinstance(raw, list) else []
+
+    def record_monitor_state(self, cursor: int, pending_events: list[dict[str, Any]]) -> None:
+        """Atomically persist intake progress and the reactions it made pending."""
+        self._state["cursor"] = max(self.cursor, cursor)
+        self._state["pending_events"] = pending_events[-MAX_CONTEXT_EVENTS:]
+        try:
+            self._write_state()
+        except OSError as exc:
+            log.warning("could not persist monitor state at %s: %s", cursor, exc)
 
     def _secure_runtime_directory(self) -> None:
         try:
@@ -847,6 +905,8 @@ class Worker:
     token: str
     label: str
     poll_seconds: int = 20
+    # Test harness boundary only. Production construction never sets this; runtime
+    # shutdown is an explicit signal, not completion of a batch of turns.
     max_cycles: int | None = None
     #: What "doing the work" means. The loop never inspects it beyond the protocol
     #: in `worker/executors.py`, which is what lets a model-backed one be swapped in
@@ -858,7 +918,7 @@ class Worker:
     #: there was only ever one step, and a human could not have preempted it if they
     #: had been watching for it. Real work takes time, and a worker that cannot be
     #: interrupted mid-task is not demonstrating anything about interruption.
-    steps_per_task: int = 12
+    steps_per_task: int = 1
     #: Lease seconds to request. Deliberately short relative to `steps_per_task` so a
     #: task outlives its lease several times over and renewal is actually exercised
     #: rather than merely implemented.
@@ -917,6 +977,23 @@ class Worker:
     #: Task ids this worker was told to stop. Remembered so it does not immediately
     #: try to reclaim them on the next cycle and spend the room's time being refused.
     forbidden: set[str] = field(default_factory=set)
+    #: One-process concurrency boundary: this thread owns transport liveness and
+    #: event intake while the main worker thread may be inside model/tool execution.
+    monitor_thread: threading.Thread | None = field(default=None, init=False)
+    wake_event: threading.Event = field(default_factory=threading.Event)
+    connection_lock: threading.RLock = field(default_factory=threading.RLock)
+    inbox_lock: threading.Lock = field(default_factory=threading.Lock)
+    event_inbox: list[dict[str, Any]] = field(default_factory=list)
+    reaction_queue: list[dict[str, Any]] = field(default_factory=list)
+    reacted_seqs: set[int] = field(default_factory=set)
+    halted_tasks: set[str] = field(default_factory=set)
+    latest_state: dict[str, Any] = field(default_factory=dict)
+    ambient_debounce_seconds: float = 2.0
+    ambient_due_at: float | None = None
+    monitor_state_sink: Callable[[int, list[dict[str, Any]]], None] | None = None
+    operational_state: str = "monitoring"
+    state_revision: int = 0
+    connect_command_id: str = ""
 
     # -- transport ---------------------------------------------------------
 
@@ -953,6 +1030,8 @@ class Worker:
         `attachment_resumable` is true because this process really does reuse the
         same label across restarts — the room is entitled to treat that as a promise.
         """
+        if not self.connect_command_id:
+            self.connect_command_id = f"connect-{self.runtime_id or self.label}-{uuid.uuid4().hex}"
         result = self.call(
             "POST",
             "/connect",
@@ -974,11 +1053,13 @@ class Worker:
                 "executor_kind": getattr(self.executor, "name", "unknown"),
                 "executor_model": self.declared_model,
                 "since_seq": self.cursor,
+                "command_id": self.connect_command_id,
             },
         )
-        self.connection_id = result["connection_id"]
-        self.attachment_id = result.get("attachment_id")
-        self.cursor = max(self.cursor, int(result.get("current_seq") or 0))
+        with self.connection_lock:
+            self.connection_id = result["connection_id"]
+            self.attachment_id = result.get("attachment_id")
+            self.connect_command_id = ""
         log.info(
             "connected: runtime=%s connection=%s attachment=%s may_claim=%s max_lease=%ss",
             self.runtime_id or "uncontained-test-runtime",
@@ -995,6 +1076,13 @@ class Worker:
                 f"{result.get('claim_denied_reason')}"
             )
 
+    def reconnect(self) -> None:
+        """Restore a reaped or transiently lost transport on the same attachment."""
+        with self.connection_lock:
+            previous = self.connection_id
+            self.connect()
+            log.info("reconnected transport: previous=%s current=%s", previous, self.connection_id)
+
     def hydrate(self) -> dict[str, Any]:
         return self.call("GET", f"/hydrate?since_seq={self.cursor}" if self.cursor else "/hydrate")
 
@@ -1005,9 +1093,16 @@ class Worker:
             self.connect()
             state = self.hydrate()
             self.participant_id = state.get("you", {}).get("participant_id", "")
+            self.latest_state = state
+            if self.cursor == 0:
+                # Initial hydration is an atomic projection boundary. A resumed
+                # runtime keeps its persisted cursor so unseen events are enqueued.
+                self._advance_cursor(int(state.get("cursor") or 0))
             self.adopt_existing_leases(state)
             self.adopt_recorded_progress(state)
             self.absorb_answers(state)
+            self.start_monitor()
+            self.set_operational_state("monitoring", summary="Monitoring room activity")
 
             cycles = 0
             while not self.stopping and (self.max_cycles is None or cycles < self.max_cycles):
@@ -1033,7 +1128,7 @@ class Worker:
 
     def cycle(self) -> None:
         state = self.hydrate()
-        self.cursor = max(self.cursor, int(state.get("cursor") or 0))
+        self.latest_state = state
         self.absorb_answers(state)
         # Every cycle, not only at startup. Hydration carries checkpoints for the
         # tasks this seat *currently holds*, so a worker that restarted and had to
@@ -1049,15 +1144,14 @@ class Worker:
         if self.stopping:
             return
 
-        # 2. Then keep what we hold alive, before spending time on anything else.
-        if self.lease is not None:
-            self.renew_if_needed()
-
-        # 3. Then work: finish what we hold, or pick something up.
+        # 2. Then work: the monitor independently keeps any held lease alive.
         if self.lease is not None:
             self.advance()
         else:
             self.take_work(state)
+
+        if self.lease is None:
+            self.react_to_room_if_needed(state)
 
         # Every cycle ends here, holding a lease or not. When a task took one cycle
         # this only ran while idle; multi-step work would have spun without it,
@@ -1082,13 +1176,16 @@ class Worker:
 
         if action in {"stop", "pause"} and task_id:
             self.forbidden.add(task_id)
-            self.progress.pop(task_id, None)
-            if self.lease is not None and self.lease.task_id == task_id:
+            self.halted_tasks.add(task_id)
+            if action == "stop":
+                self.progress.pop(task_id, None)
+            if action == "stop" and self.lease is not None and self.lease.task_id == task_id:
                 # The room has already halted it; dropping the local lease keeps this
                 # worker's belief and the room's state from diverging.
                 self.lease = None
         elif action == "resume" and task_id:
             self.forbidden.discard(task_id)
+            self.halted_tasks.discard(task_id)
         elif action == "input" and task_id:
             # The one directive that carries content rather than control. It is kept
             # per task and handed to the executor as an instruction — data the work
@@ -1276,31 +1373,44 @@ class Worker:
                 "connection_id": self.connection_id,
             },
         )
+        self.set_operational_state(
+            "working",
+            summary=f"Working: {self.lease.title}"[:280],
+            task_id=self.lease.task_id,
+        )
+        self.note_activity(
+            "working", f"Starting {self.lease.title}"[:280], task_id=self.lease.task_id
+        )
 
     def renew_if_needed(self) -> None:
-        assert self.lease is not None
+        lease = self.lease
+        if lease is None:
+            return
         now = time.time()
-        if not self.lease.needs_renewal(now=now, lease_seconds=self.lease_seconds):
+        if not lease.needs_renewal(now=now, lease_seconds=self.lease_seconds):
             return
         try:
             result = self.call(
                 "POST",
                 "/tasks/renew",
                 {
-                    "task_id": self.lease.task_id,
-                    "fence": self.lease.fence,
+                    "task_id": lease.task_id,
+                    "fence": lease.fence,
                     "extend_seconds": self.lease_seconds,
                     "connection_id": self.connection_id,
                 },
             )
         except CottageError as exc:
             # Losing a lease is normal and recoverable; pretending otherwise is not.
-            log.warning("lost the lease on %s: %s", self.lease.task_id, exc)
-            self.lease = None
+            log.warning("lost the lease on %s: %s", lease.task_id, exc)
+            if self.lease is lease:
+                self.lease = None
+                self.set_operational_state("monitoring", summary="Monitoring room activity")
             return
         claim = result["task"]["claim"]
-        self.lease.expires_at = now + self.seconds_until(claim["expires_at"])
-        log.info("renewed %s (expires in %ss)", self.lease.task_id, self.lease_seconds)
+        if self.lease is lease:
+            lease.expires_at = now + self.seconds_until(claim["expires_at"])
+            log.info("renewed %s (expires in %ss)", lease.task_id, self.lease_seconds)
 
     def advance(self) -> None:
         """Do one step of work, record it, and finish only when there is none left.
@@ -1319,6 +1429,8 @@ class Worker:
         """
         assert self.lease is not None
         task_id = self.lease.task_id
+        if task_id in self.halted_tasks:
+            return
         step = self.progress.get(task_id, 0) + 1
 
         if step == 1:
@@ -1337,18 +1449,48 @@ class Worker:
             except CottageError as exc:
                 log.warning("could not mark in_progress: %s", exc)
 
-        result = self.run_step_watched(
-            StepContext(
-                task_id=task_id,
-                title=self.lease.title,
-                description=self.lease.description,
-                targets=tuple(self.lease.targets),
-                step=step,
-                total_steps=self.steps_per_task,
-                instructions=tuple(self.instructions.get(task_id, ())),
-                checkpoints=tuple(self.checkpoints.get(task_id, ())),
-            )
+        continuity = self._continuity(self.latest_state)
+        tool_name = getattr(self.executor, "name", "executor")
+        self.note_activity(
+            "tool_started",
+            f"Running {tool_name} for {self.lease.title}",
+            task_id=task_id,
+            tool=tool_name,
         )
+        try:
+            result = self.run_step_watched(
+                StepContext(
+                    task_id=task_id,
+                    title=self.lease.title,
+                    description=self.lease.description,
+                    targets=tuple(self.lease.targets),
+                    step=step,
+                    total_steps=self.steps_per_task,
+                    instructions=tuple(self.instructions.get(task_id, ())),
+                    checkpoints=tuple(self.checkpoints.get(task_id, ())),
+                    room_charter=continuity["room_charter"],
+                    current_work=continuity["current_work"],
+                    recent_events=continuity["recent_events"],
+                    blockers=continuity["blockers"],
+                    collaborator_outputs=continuity["collaborator_outputs"],
+                )
+            )
+        except Exception:  # the participant outlives a failed model/tool turn
+            log.exception("executor turn failed on %s; companion remains present", task_id)
+            self.note_activity(
+                "failed",
+                f"Executor turn failed for {self.lease.title}; retrying while still connected"[
+                    :280
+                ],
+                task_id=task_id,
+                tool=tool_name,
+            )
+            self.set_operational_state(
+                "working",
+                summary=f"Retrying {self.lease.title} after an executor failure"[:280],
+                task_id=task_id,
+            )
+            return
         if result is None:
             # Stopped mid-step. The room already halted the task and the executor's
             # child is dead; there is nothing to record and nothing to complete.
@@ -1360,8 +1502,27 @@ class Worker:
             self.executor.cancel()
             log.info("discarding step %s on %s after stop", step, task_id)
             return
+        self.note_activity(
+            "tool_finished",
+            f"Finished {tool_name} for {self.lease.title}",
+            task_id=task_id,
+            tool=tool_name,
+        )
         if result.concern:
             log.warning("step %s on %s: %s", step, task_id, result.concern)
+            if not result.done:
+                self.note_activity(
+                    "failed",
+                    f"Executor turn did not complete for {self.lease.title}; retrying"[:280],
+                    task_id=task_id,
+                    tool=tool_name,
+                )
+                self.set_operational_state(
+                    "working",
+                    summary=f"Retrying {self.lease.title} after an executor failure"[:280],
+                    task_id=task_id,
+                )
+                return
 
         if result.question:
             # Asked *before* the checkpoint is written separately, because a blocking
@@ -1394,6 +1555,7 @@ class Worker:
                 },
             )
             log.info("completed %s", task_id)
+            self.note_activity("completed", f"Completed {self.lease.title}"[:280], task_id=task_id)
         except CottageError as exc:
             if exc.code == "steering_halted":
                 log.info("told to stop %s before finishing it", task_id)
@@ -1406,6 +1568,8 @@ class Worker:
             self.progress.pop(task_id, None)
             self.checkpoints.pop(task_id, None)
             self.lease = None
+            self.set_operational_state("monitoring", summary="Monitoring room activity")
+            self.note_activity("monitoring", "Monitoring room activity")
 
     def run_step_watched(self, context: StepContext) -> StepResult | None:
         """Run one step, watching for a stop while it runs.
@@ -1418,10 +1582,9 @@ class Worker:
         room; when a halt arrives, `cancel()` takes the child's whole process tree
         down and the step is abandoned.
 
-        The lease is renewed here too. Without that, a long step would let a lease
-        lapse *while the work was still running* — the room would reap it, someone
-        else could take the task, and two runtimes would be doing it at once, which is
-        the failure leases exist to prevent (`docs/PROTOCOL.md` §4).
+        Heartbeat, event replay and lease renewal are intentionally absent here. The
+        independent monitor owns them, so this watcher can block or fail without
+        making the participant disappear.
 
         Returns `None` when the step was abandoned.
         """
@@ -1455,8 +1618,7 @@ class Worker:
             # stale and its own claim reaped out from under it — after which `halted`
             # correctly saw no claim and abandoned the step. A worker that is plainly
             # working must not read as absent.
-            self.beat()
-            self.renew_if_needed()
+            # The independent monitor owns liveness, replay and lease renewal.
 
         if "error" in failure:
             raise failure["error"]
@@ -1473,6 +1635,8 @@ class Worker:
         hydration. A failed read is treated as "not halted" — the loop must not stop
         working because a poll timed out, and the next boundary check will catch it.
         """
+        if task_id in self.halted_tasks:
+            return True
         try:
             state = self.call("GET", f"/tasks/{task_id}")
         except (CottageError, urllib.error.URLError):
@@ -1548,56 +1712,363 @@ class Worker:
             # applied when a directive stops us.
             self.progress.pop(task_id, None)
             self.lease = None
+            self.set_operational_state(
+                "waiting",
+                summary="Waiting for external input",
+                waiting_reason=result.question or "Waiting for required input",
+                task_id=task_id,
+            )
+            self.note_activity(
+                "blocked",
+                result.question or "Waiting for required input",
+                task_id=task_id,
+            )
 
-    def beat(self) -> None:
-        """Say we are still here — which now also says our work is still here.
-
-        Separate from `wait` because the two callers have opposite shapes: the idle
-        loop beats between polls, and a *working* loop has to beat from inside a step
-        that may run for many minutes. Only the first existed, so a companion doing
-        long work went stale precisely because it was busy.
-
-        Since D-059 the server refreshes this seat's open work declarations on the same
-        beat, so there is deliberately **no** second timer here re-declaring current
-        work every ~110s. That workaround is what the Codex participant had to write,
-        and it lost the race anyway; carrying a copy of it would be exactly the
-        per-client patch the server change exists to delete. What still has to be
-        earned is `progress_at`, and this loop earns it the honest way — by
-        checkpointing each completed step (`record_checkpoint`).
-
-        Never fatal. A missed beat costs presence grading, which recovers on the next
-        one; raising here would cost the step.
-        """
+    def set_operational_state(
+        self,
+        state: str,
+        *,
+        summary: str = "",
+        waiting_reason: str = "",
+        task_id: str | None = None,
+    ) -> None:
+        """Publish validated runtime posture without asserting presence."""
+        self.state_revision += 1
         try:
-            self.call("POST", "/heartbeat", {"connection_id": self.connection_id})
+            self.call(
+                "PUT",
+                "/runtime-state",
+                {
+                    "connection_id": self.connection_id,
+                    "state": state,
+                    "summary": summary,
+                    "waiting_reason": waiting_reason,
+                    "task_id": task_id,
+                    "command_id": (
+                        f"runtime-state-{self.runtime_id or self.label}-"
+                        f"{self.state_revision}-{state}"
+                    ),
+                },
+            )
+            self.operational_state = state
         except (CottageError, urllib.error.URLError) as exc:
-            log.debug("heartbeat failed, continuing: %s", exc)
+            log.warning("could not publish runtime state %s: %s", state, exc)
+
+    def note_activity(
+        self,
+        phase: str,
+        summary: str,
+        *,
+        task_id: str | None = None,
+        tool: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "phase": phase,
+            "summary": summary[:280],
+            "task_id": task_id,
+            "connection_id": self.connection_id,
+        }
+        if tool:
+            payload["tool"] = tool[:80]
+        try:
+            self.call("POST", "/activity", payload)
+        except (CottageError, urllib.error.URLError) as exc:
+            log.debug("activity note failed: %s", exc)
+
+    @staticmethod
+    def _context_line(event: dict[str, Any]) -> str:
+        actor = (event.get("actor") or {}).get("display_name") or "room"
+        payload = event.get("payload") or {}
+        material = {
+            key: value
+            for key, value in payload.items()
+            if key
+            in {
+                "body",
+                "summary",
+                "title",
+                "result",
+                "reason",
+                "action",
+                "task_id",
+                "work_id",
+                "status",
+            }
+        }
+        return (
+            f"seq {event.get('seq')} {event.get('type')} by {actor}: "
+            + json.dumps(material, ensure_ascii=False, sort_keys=True)[:800]
+        )
+
+    def _continuity(
+        self, state: dict[str, Any], extra: list[dict[str, Any]] = ()
+    ) -> dict[str, Any]:
+        durable = list(state.get("recent_relevant_events") or [])
+        combined: dict[int, dict[str, Any]] = {}
+        for event in [*durable, *self.event_inbox, *extra]:
+            seq = int(event.get("seq") or 0)
+            if seq:
+                combined[seq] = event
+        recent = [combined[key] for key in sorted(combined)][-MAX_CONTEXT_EVENTS:]
+        checkpoint_lines = [
+            record.get("summary", "")
+            for records in (state.get("checkpoints") or {}).values()
+            for record in records
+            if record.get("summary")
+        ][-8:]
+        blockers = [
+            f"{item.get('type', 'blocker')}: {item.get('summary') or item.get('reason') or item}"
+            for item in (state.get("blocking_you") or [])
+        ][-8:]
+        collaborators = [
+            self._context_line(event)
+            for event in recent
+            if event.get("type") in {"task.checkpointed", "task.completed", "work.updated"}
+            and (event.get("actor") or {}).get("participant_id") != self.participant_id
+        ][-8:]
+        return {
+            "room_charter": str((state.get("room") or {}).get("charter") or "")[:2000],
+            "current_work": tuple(
+                str(work.get("headline") or "")
+                for work in (state.get("your_work") or [])[-8:]
+                if work.get("headline")
+            ),
+            "recent_events": tuple(self._context_line(event) for event in recent[-20:]),
+            "checkpoints": tuple(checkpoint_lines),
+            "blockers": tuple(blockers),
+            "collaborator_outputs": tuple(collaborators),
+        }
+
+    def react_to_room_if_needed(self, state: dict[str, Any]) -> None:
+        with self.inbox_lock:
+            ambient_ready = self.ambient_due_at is None
+            ready = [
+                event
+                for event in self.reaction_queue
+                if event.get("_tier") == "immediate" or ambient_ready
+            ]
+            if not ready:
+                return
+            ready_seqs = {int(event.get("seq") or 0) for event in ready}
+        unseen = [event for event in ready if int(event.get("seq") or 0) not in self.reacted_seqs]
+        if not unseen:
+            with self.inbox_lock:
+                self.reaction_queue = [
+                    event
+                    for event in self.reaction_queue
+                    if int(event.get("seq") or 0) not in ready_seqs
+                ]
+            self._persist_monitor_state()
+            return
+        continuity = self._continuity(state, unseen)
+        self.set_operational_state("working", summary="Reviewing relevant room activity")
+        self.note_activity("working", "Reviewing relevant room activity")
+        try:
+            runner = getattr(self.executor, "run_reaction", None)
+            if runner is None:
+                result = None
+            else:
+                result = runner(
+                    ReactionContext(
+                        room_charter=continuity["room_charter"],
+                        current_work=continuity["current_work"],
+                        recent_events=continuity["recent_events"],
+                        checkpoints=continuity["checkpoints"],
+                        blockers=continuity["blockers"],
+                        collaborator_outputs=continuity["collaborator_outputs"],
+                    )
+                )
+            if result is not None and result.concern:
+                self.note_activity("failed", result.concern)
+                return
+            if result is not None and result.message:
+                last_seq = max(int(event.get("seq") or 0) for event in unseen)
+                self.call(
+                    "POST",
+                    "/messages",
+                    {
+                        "body": result.message,
+                        "command_id": f"room-reaction-{self.attachment_id}-{last_seq}",
+                        "connection_id": self.connection_id,
+                    },
+                )
+            self.reacted_seqs.update(int(event.get("seq") or 0) for event in unseen)
+            with self.inbox_lock:
+                self.reaction_queue = [
+                    event
+                    for event in self.reaction_queue
+                    if int(event.get("seq") or 0) not in ready_seqs
+                ]
+            self._persist_monitor_state()
+        except Exception:  # one failed cognition burst must not end room presence
+            log.exception("room reaction turn failed; keeping the reaction pending")
+            self.note_activity("failed", "Room reaction turn failed; will retry")
+        finally:
+            self.set_operational_state("monitoring", summary="Monitoring room activity")
+            self.note_activity("monitoring", "Monitoring room activity")
+
+    def start_monitor(self) -> None:
+        """Start the one in-process thread that owns liveness and event intake."""
+        if self.monitor_thread is not None and self.monitor_thread.is_alive():
+            return
+        self.monitor_thread = threading.Thread(
+            target=self._monitor_loop,
+            name=f"cottage-monitor-{self.label}",
+            daemon=True,
+        )
+        self.monitor_thread.start()
+
+    def _monitor_loop(self) -> None:
+        failures = 0
+        while not self.stopping:
+            try:
+                connection_id = self.connection_id
+                self.call("POST", "/heartbeat", {"connection_id": connection_id})
+                self.renew_if_needed()
+                wait_for = max(1.0, min(float(self.poll_seconds), 15.0))
+                if self.ambient_due_at is not None:
+                    wait_for = max(0.1, min(wait_for, self.ambient_due_at - time.monotonic()))
+                result = self.call(
+                    "GET",
+                    f"/events?since_seq={self.cursor}&limit=200&wait_seconds={wait_for}",
+                )
+                self._accept_event_page(result)
+                failures = 0
+                if self.ambient_due_at is not None and time.monotonic() >= self.ambient_due_at:
+                    self.ambient_due_at = None
+                    self.wake_event.set()
+            except CottageError as exc:
+                if exc.code in {"unauthenticated", "forbidden", "stale_runtime"}:
+                    log.error("monitor stopped by unrecoverable authorization: %s", exc)
+                    self.request_stop()
+                    return
+                if exc.code == "resume_gap":
+                    log.warning("event history was truncated; rebasing from a durable snapshot")
+                    self._recover_event_gap()
+                    failures = 0
+                    continue
+                failures += 1
+                log.warning("monitor transport refused (%s), reconnecting: %s", failures, exc)
+                self._recover_monitor_connection(failures)
+            except urllib.error.URLError as exc:
+                failures += 1
+                log.warning("monitor network trouble (%s): %s", failures, exc)
+                self._recover_monitor_connection(failures)
+            except BaseException:  # noqa: BLE001 - liveness supervisor must stay alive
+                failures += 1
+                log.exception("monitor iteration failed")
+                self.stop_event.wait(min(10.0, float(2 ** min(failures, 3))))
+
+    def _recover_monitor_connection(self, failures: int) -> None:
+        if self.stopping:
+            return
+        self.stop_event.wait(min(10.0, float(2 ** min(failures, 3))))
+        if self.stopping:
+            return
+        try:
+            self.reconnect()
+        except (CottageError, urllib.error.URLError) as exc:
+            log.warning("reconnect attempt failed: %s", exc)
+
+    def _recover_event_gap(self) -> None:
+        """Safely rebase when retained history no longer contains our cursor.
+
+        Hydration is the durable projection recovery surface. It cannot recreate
+        expired events, but it restores current work, directives, checkpoints,
+        blockers and bounded recent context before the accepted cursor advances.
+        Existing pending reactions remain separate and idempotent.
+        """
+        state = self.call("GET", "/hydrate")
+        self.latest_state = state
+        self.cursor = int(state.get("cursor") or 0)
+        self._persist_monitor_state()
+        self.wake_event.set()
+
+    def _accept_event_page(self, result: dict[str, Any]) -> None:
+        """Project/enqueue a raw page before advancing its cursor."""
+        events = list(result.get("events") or [])
+        with self.inbox_lock:
+            for event in events:
+                seq = int(event.get("seq") or 0)
+                if seq and any(int(old.get("seq") or 0) == seq for old in self.event_inbox):
+                    continue
+                enriched = {**event, "_tier": self._event_tier(event)}
+                self.event_inbox.append(enriched)
+                if enriched["_tier"] == "ambient" or (
+                    enriched["_tier"] == "immediate" and enriched.get("type") == "message.posted"
+                ):
+                    self.reaction_queue.append(enriched)
+                self._control_fast_path(enriched)
+            self.event_inbox = self.event_inbox[-MAX_LOCAL_EVENTS:]
+            self.reaction_queue = self.reaction_queue[-MAX_CONTEXT_EVENTS:]
+
+        # The server cursor includes privacy-filtered events. At this point every
+        # visible event has been projected/enqueued, so crossing those invisible
+        # sequence numbers is safe and prevents rereading them forever.
+        self._advance_cursor(int(result.get("cursor") or self.cursor))
+        tiers = (
+            {event.get("_tier") for event in self.event_inbox[-len(events) :]} if events else set()
+        )
+        if "immediate" in tiers:
+            self.wake_event.set()
+        elif "ambient" in tiers and self.ambient_due_at is None:
+            self.ambient_due_at = time.monotonic() + self.ambient_debounce_seconds
+
+    def _advance_cursor(self, cursor: int) -> None:
+        if cursor <= self.cursor:
+            return
+        self.cursor = cursor
+        self._persist_monitor_state()
+
+    def _persist_monitor_state(self) -> None:
+        if self.monitor_state_sink is None:
+            return
+        with self.inbox_lock:
+            pending = list(self.reaction_queue)
+        self.monitor_state_sink(self.cursor, pending)
+
+    def _event_tier(self, event: dict[str, Any]) -> str:
+        type_ = str(event.get("type") or "")
+        payload = event.get("payload") or {}
+        actor = event.get("actor") or {}
+        if actor.get("participant_id") == self.participant_id:
+            return "routine"
+        if type_ == "message.posted":
+            body = str(payload.get("body") or "").casefold()
+            display_name = str(
+                (self.latest_state.get("you") or {}).get("display_name") or ""
+            ).strip()
+            mentioned = bool(display_name) and f"@{display_name.casefold()}" in body
+            return (
+                "immediate"
+                if payload.get("to_participant_id") == self.participant_id or mentioned
+                else "ambient"
+            )
+        if type_ in IMMEDIATE_EVENT_TYPES:
+            return "immediate"
+        if type_ in AMBIENT_EVENT_TYPES:
+            return "ambient"
+        return "routine"
+
+    def _control_fast_path(self, event: dict[str, Any]) -> None:
+        if event.get("type") != "directive.issued":
+            return
+        payload = event.get("payload") or {}
+        if payload.get("target_participant_id") != self.participant_id:
+            return
+        task_id = payload.get("task_id")
+        if payload.get("action") in {"stop", "pause"} and task_id:
+            self.halted_tasks.add(str(task_id))
+            if self.lease is not None and self.lease.task_id == task_id:
+                log.info(
+                    "monitor observed %s for %s; cancelling executor", payload["action"], task_id
+                )
+                self.executor.cancel()
 
     def wait(self) -> None:
-        """Stay reachable, then wait an interval.
-
-        The heartbeat is not optional and not decorative: presence is derived from
-        heartbeat age, so a worker that skipped it would be graded stale within three
-        intervals and have its leases reaped while it was still working — the room
-        would be correct and the worker would be gone.
-
-        The HTTP surface has a pull endpoint and an SSE stream but no long poll; the
-        MCP adapter has one (`await_room_events`). That asymmetry is a real parity
-        gap and it is recorded rather than papered over: this loop polls on an
-        interval, which is what `supports_poll` claims and all it claims.
-        """
-        self.beat()
-        try:
-            result = self.call("GET", f"/events?since_seq={self.cursor}&limit=50")
-            self.cursor = max(self.cursor, int(result.get("cursor") or self.cursor))
-        except CottageError as exc:
-            if exc.code == "invalid_cursor":
-                # Ahead of the room: only reachable if the room was rebuilt under us.
-                log.warning("cursor %s is ahead of the room; resetting", self.cursor)
-                self.cursor = 0
-            else:
-                raise
-        self.stop_event.wait(self.poll_seconds)
+        """Yield until the monitor wakes work; this method owns no liveness clock."""
+        self.wake_event.wait(0.1 if self.lease is not None else self.poll_seconds)
+        self.wake_event.clear()
 
     def request_stop(self) -> None:
         """Start a bounded, idempotent drain and reach inside an active step now."""
@@ -1623,6 +2094,9 @@ class Worker:
         if self.shutdown_started:
             return
         self.request_stop()
+        monitor = self.monitor_thread
+        if monitor is not None and monitor is not threading.current_thread():
+            monitor.join(timeout=min(float(self.poll_seconds) + 5.0, 20.0))
         if self.lease is not None:
             try:
                 self.call(
@@ -1711,7 +2185,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--label", default=os.environ.get("COTTAGE_LABEL", "worker-main"))
     parser.add_argument("--poll-seconds", type=int, default=20)
-    parser.add_argument("--max-cycles", type=int, default=None)
     parser.add_argument(
         "--executor",
         default=os.environ.get("COTTAGE_EXECUTOR", "echo"),
@@ -1774,8 +2247,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--steps",
         type=int,
-        default=12,
-        help="Cycles of work a claimed task takes before it is completed.",
+        default=1,
+        help=(
+            "Echo-test steps per task. External executors complete a bounded turn "
+            "from their own result rather than a numeric cycle count."
+        ),
     )
     parser.add_argument(
         "--lease-seconds",
@@ -1854,7 +2330,7 @@ def main(argv: list[str] | None = None) -> int:
                 display_name=args.display_name,
                 description=(
                     "Unattended executor. Polls, renews its own leases, and takes only "
-                    "work proposed to it. It runs a fixed handler and does not reason."
+                    "work proposed to it. Model/tool execution remains external to Cottage."
                 ),
             )
             log.info("joined %s as %s", room_id, args.display_name)
@@ -1866,7 +2342,6 @@ def main(argv: list[str] | None = None) -> int:
             token=token,
             label=args.label,
             poll_seconds=args.poll_seconds,
-            max_cycles=args.max_cycles,
             executor=build_executor(
                 args.executor,
                 command=args.executor_command,
@@ -1885,6 +2360,10 @@ def main(argv: list[str] | None = None) -> int:
             lease_seconds=args.lease_seconds,
             runtime_id=containment.runtime_id,
             containment=containment.strength,
+            cursor=containment.cursor,
+            event_inbox=containment.pending_events,
+            reaction_queue=containment.pending_events,
+            monitor_state_sink=containment.record_monitor_state,
         )
 
         def stop(*_: Any) -> None:

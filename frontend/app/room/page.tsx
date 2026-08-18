@@ -38,7 +38,8 @@ function RoomView() {
     setSession(existing);
   }, [roomId, router]);
 
-  const { snapshot, state, error: streamError, activity, refresh } = useRoom(session);
+  const { snapshot, state, error: streamError, activity, liveActivity, refresh } =
+    useRoom(session);
 
   const act = useCallback(
     async (fn: () => Promise<unknown>) => {
@@ -168,6 +169,7 @@ function RoomView() {
         <PresenceRail
           participants={snapshot.participants}
           youId={snapshot.you.participant_id}
+          liveActivity={liveActivity}
         />
 
         <div className="region" style={{ display: "grid", gap: 20 }}>

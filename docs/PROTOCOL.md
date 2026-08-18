@@ -83,7 +83,9 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 | `presence.attachment_registered` | attachment_id, participant_id, label, host_class, is_resumable |
 | `presence.runtime_drained` | attachment_id, participant_id, label, epoch, reason — the room will refuse this runtime's commands from here on |
 | `presence.runtime_resumed` | attachment_id, participant_id, label, epoch, note — an explicit, attributed undo |
+| `runtime.state_changed` | participant_id, attachment_id, state (`monitoring` \| `working` \| `waiting`), summary, waiting_reason, task_id, work_id, previous_state — projected work posture; never evidence of liveness |
 | `message.posted` | message_id, body, to_participant_id, about_ref |
+| `activity.noted` | participant_id, attachment_id, phase, summary, tool, task_id, work_id — durable live narration, with latest-per-runtime derived from the log for snapshots (D-082) |
 | `work.declared` | work_id, participant_id, headline, status, targets, task_id, expected_done_by |
 | `work.updated` | work_id, headline, status, targets, note |
 | `work.ended` | work_id, reason (`completed` \| `abandoned` \| `superseded` \| `presence_lost`) |
@@ -124,6 +126,13 @@ required, not optional.
 ## 3. Presence
 
 Presence is derived, never asserted.
+
+Runtime operational state is a separate projected fact. A durable attachment begins in
+`monitoring` and may transition through `working` and `waiting` using its own live connection.
+Task references on `working` are validated against executor affinity; `waiting` requires a named
+dependency. None of these values grants authority or proves presence. A runtime with projected
+state `working` and no healthy connection is shown `disconnected`, while the last operational
+state remains durable evidence for recovery.
 
 - A connection is created by `POST /rooms/{id}/connect` (or an adapter equivalent) and carries the
   negotiated capabilities and delivery mode.
@@ -481,6 +490,14 @@ and re-reading fixes nothing.
   handle `resume_gap` even though truncation is not yet implemented.
 - `since_seq` greater than the room's current `seq` is a client bug → `invalid_cursor`.
 - Duplicate delivery is possible on reconnect races; clients must be idempotent on `seq`.
+- **Browser WebSocket:** first exchange the participant bearer over authenticated HTTP at
+  `POST /rooms/{id}/stream-ticket`, then connect with the one-use ticket and `since_seq`. Frames are
+  `snapshot`, `event`, `resume_gap`, or `keepalive`; every event frame is a durable log envelope.
+  WebSocket loss changes latency only. Reconnect from the last accepted cursor and replay the log.
+- **ARP HTTP long-poll:** `GET /events?since_seq=N&wait_seconds=T` advances its cursor only through
+  the raw page actually read, including privacy-filtered entries. It never jumps to the room's
+  current high-water mark. A companion durably enqueues/projects that page before persisting the
+  returned cursor; cognition and resulting reactions are tracked separately and idempotently.
 - **MCP long-poll:** `await_events(since_seq, timeout_s ≤ 25)` blocks until `seq > since_seq` exists
   or the timeout elapses, then returns `{ events, cursor, timed_out }`. Semantically identical to
   SSE resume; only the delivery differs.

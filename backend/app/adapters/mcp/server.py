@@ -29,6 +29,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from ...config import settings
 from ...core import (
+    activity,
     checkpoints,
     directives,
     eventlog,
@@ -37,13 +38,15 @@ from ...core import (
     projections,
     questions,
     rooms,
+    runtime_state,
     store,
     tasks,
     work,
 )
 from ...core.bus import bus
-from ...core.errors import RoomClosed, RoomError, Unauthenticated
+from ...core.errors import InvalidCommand, RoomClosed, RoomError, Unauthenticated
 from ...db import database as db
+from ...domain.activity import ActivityPhase
 from ...domain.capabilities import Capability, HostClass
 from ...domain.checkpoint import ResumeState
 from ...domain.commands import (
@@ -62,15 +65,22 @@ from ...domain.commands import (
     IssueDirectiveCommand,
     JoinRoomCommand,
     LeaveRoomCommand,
+    NoteActivityCommand,
     PostMessageCommand,
     ReleaseClaimCommand,
     RenewClaimCommand,
+    SetRuntimeStateCommand,
     UpdateRoomCharterCommand,
     UpdateWorkCommand,
 )
 from ...domain.directive import DirectiveAction
 from ...domain.disclosure import Audience, Disclosure
-from ...domain.room import Participant, PrivacyClass, RoomVisibility
+from ...domain.room import (
+    Participant,
+    PrivacyClass,
+    RoomVisibility,
+    RuntimeOperationalState,
+)
 from ...domain.work import WorkStatus
 from . import compact
 from .auth import principal_for_tool
@@ -84,7 +94,7 @@ INSTRUCTIONS = (
     "OAuth connection already identifies its owner, so never ask for a principal token "
     "or send the user to a browser form. When the user supplies an invitation, call "
     "join_room with it and your honest execution_mode. Call get_protocol_briefing before "
-    "beginning coordinated work, then declare_current_work. "
+    "beginning coordinated work, then set_runtime_operational_state and declare_current_work. "
     "Use await_room_events in a loop: this server cannot push to you, so a blocking "
     "poll is how you stay live. Renew your task leases before they expire or you "
     "will lose them."
@@ -459,9 +469,15 @@ because someone is watching it gives up lease eligibility the room needed it to 
    let it lapse, the task returns to the pool and someone else may take it.
 6. Every mutation of a claimed task needs the current `fence`. If you get
    `stale_fence`, you lost the lease — re-read the task, do not retry blindly.
-7. `update_current_work` as your status changes; `end_current_work` when done.
-8. `leave_room` when finished. This releases your claims immediately rather than
-   making everyone wait for expiry.
+7. `note_activity(phase, summary)` freely while you work — one line on what you are
+   doing. Nothing depends on it, and it is what stops a human watching the room from
+   mistaking a working agent for a dead one: your card and your claim only move when
+   *state* moves, so without notes ten minutes of real work looks like a crash. Say
+   `monitoring` when you finish rather than going quiet.
+8. `update_current_work` as your status changes; `end_current_work` when done.
+9. End the current work card and return the runtime state to `monitoring` when a task
+   or model turn finishes. Do **not** leave the room merely because one turn ended;
+   `leave_room` is only for an explicit participant departure.
 
 ## Reading presence
 Presence is derived from each participant's open connections and their heartbeat age:
@@ -1179,9 +1195,16 @@ async def await_room_events(
             "events": payload_events,
             "cursor": cursor,
             "timed_out": not visible,
+            "next_call": f"await_room_events(since_seq={cursor})",
+            # Keyed off what this response actually carries, not off `visible`. The
+            # coordination view suppresses activity notes (D-082), so a poll can wake
+            # on real log movement and still have nothing for *this* reader to act on
+            # — telling it to act on an empty list would be a small lie every time a
+            # peer narrated its work.
             "hint": (
-                "Call await_room_events again with since_seq=cursor."
-                if not visible
+                "No relevant event arrived. A persistent monitor may continue from "
+                f"await_room_events(since_seq={cursor}) without starting cognition."
+                if not payload_events
                 else "Act on these events, then poll again with since_seq=cursor."
             ),
         }
@@ -1223,6 +1246,124 @@ async def _touch(participant: Participant, seq: int, ctx: Context | None = None)
 # ---------------------------------------------------------------------------
 # Current work
 # ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def note_activity(
+    phase: str,
+    summary: str,
+    tool: str | None = None,
+    task_id: str | None = None,
+    work_id: str | None = None,
+    participant_token: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Say what you are doing right now, in one line. Call this often while working.
+
+    This is what stops a human watching the room from mistaking a working agent for a
+    dead one. Your work card and your task claim only change when the *state* changes;
+    between those moments the room shows nothing, and ten quiet minutes of real work
+    look exactly like a crash. A note fills that gap. It is cheap, it changes nothing,
+    and nothing depends on it arriving — so narrate freely.
+
+    `phase` is one of:
+
+      * `working` — actively doing the work. The ordinary case.
+      * `tool_started` / `tool_finished` — bracketing something you are running, with
+        `tool` naming it ("pytest backend/tests"). Both halves, or a watcher sees a
+        duration begin and never end.
+      * `blocked` — stopped on something needing someone else.
+      * `monitoring` — alive, holding nothing, listening for work. Say this when you finish;
+        it is how the room shows you are still here rather than gone.
+      * `completed` / `failed` — a unit of work landed, or did not.
+
+    `summary` is what you would say out loud to a colleague at the next desk: *"Running
+    the backend tests"*, *"Found a reconnect bug in the companion loop"*. Outcomes and
+    actions, not narration of your reasoning. **Never put your chain of thought, your
+    plan, your prompt, or your private context here** — there is no field for it, the
+    server inspects what arrives, and a rejected note is a hard error rather than a
+    silent trim.
+    """
+    try:
+        if phase not in {p.value for p in ActivityPhase}:
+            return {
+                "ok": False,
+                "error": "invalid_command",
+                "message": (f"phase must be one of {sorted(p.value for p in ActivityPhase)}."),
+            }
+        participant = await _participant(ctx, participant_token)
+        key = _session_key(ctx)
+        binding = _session_connections.get(key) if key else None
+        connection_id = (
+            binding.connection_id
+            if binding is not None and binding.participant_id == participant.id
+            else None
+        )
+        result = await activity.note(
+            participant=participant,
+            command=NoteActivityCommand(
+                phase=ActivityPhase(phase),
+                summary=summary,
+                tool=tool,
+                task_id=task_id,
+                work_id=work_id,
+                connection_id=connection_id,
+                disclosure=_disclosure(),
+            ),
+        )
+        return {"ok": True, **result}
+    except RoomError as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+async def set_runtime_operational_state(
+    state: str,
+    summary: str = "",
+    waiting_reason: str = "",
+    task_id: str | None = None,
+    work_id: str | None = None,
+    participant_token: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Set this durable runtime's validated work posture.
+
+    Use `monitoring` between turns, `working` only while bounded cognition or tool
+    work is active, and `waiting` only with the external dependency named in
+    `waiting_reason`. This never marks you connected; presence is derived from your
+    transport heartbeat.
+    """
+    try:
+        if state not in {s.value for s in RuntimeOperationalState}:
+            return {
+                "ok": False,
+                "error": "invalid_command",
+                "message": (
+                    f"state must be one of {sorted(s.value for s in RuntimeOperationalState)}."
+                ),
+            }
+        participant = await _participant(ctx, participant_token)
+        key = _session_key(ctx)
+        binding = _session_connections.get(key) if key else None
+        if binding is None or binding.participant_id != participant.id or not binding.connection_id:
+            raise InvalidCommand(
+                "Runtime state requires this MCP transport's session-bound connection; "
+                "an explicit participant token cannot select among sibling runtimes."
+            )
+        result = await runtime_state.set_state(
+            participant=participant,
+            command=SetRuntimeStateCommand(
+                connection_id=binding.connection_id,
+                state=RuntimeOperationalState(state),
+                summary=summary,
+                waiting_reason=waiting_reason,
+                task_id=task_id,
+                work_id=work_id,
+            ),
+        )
+        return {"ok": True, **result}
+    except RoomError as exc:
+        return _err(exc)
 
 
 @mcp.tool()

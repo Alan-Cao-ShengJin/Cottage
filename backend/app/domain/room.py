@@ -358,6 +358,30 @@ class RuntimeRole(str, Enum):
     UNSPECIFIED = "unspecified"
 
 
+class RuntimeOperationalState(str, Enum):
+    """Validated work posture of a durable runtime.
+
+    This is deliberately not presence.  A runtime may report what bounded work it
+    is engaged in, but it cannot report itself connected: liveness is always derived
+    from its open connections and heartbeat age.
+    """
+
+    MONITORING = "monitoring"
+    WORKING = "working"
+    WAITING = "waiting"
+
+
+class RuntimeOperation(BaseModel):
+    """Projected operational state, attributed to one durable attachment."""
+
+    state: RuntimeOperationalState = RuntimeOperationalState.MONITORING
+    summary: str = ""
+    waiting_reason: str = ""
+    task_id: str | None = None
+    work_id: str | None = None
+    updated_at: str | None = None
+
+
 class Attachment(BaseModel):
     """A durable runtime identity, between the seat and the transport (D-032).
 
@@ -386,6 +410,7 @@ class Attachment(BaseModel):
     runtime_role: RuntimeRole = RuntimeRole.UNSPECIFIED
     executor_kind: str = ""
     executor_model: str = ""
+    operation: RuntimeOperation = Field(default_factory=RuntimeOperation)
     created_at: str
     last_seen_at: str
 
@@ -453,6 +478,9 @@ class RuntimeView(BaseModel):
     connection_count: int
     delivery_modes: list[DeliveryMode] = Field(default_factory=list)
     last_seen_at: str | None = None
+    #: Validated and projected by Cottage. It describes work posture only; callers
+    #: must still use `liveness` to decide whether the runtime is actually present.
+    operation: RuntimeOperation | None = None
     #: Self-reported and unverifiable, which is why it is nested under a name that
     #: says so. Attribution, not verification — the same rule as a display name from
     #: an invitation (D-025).

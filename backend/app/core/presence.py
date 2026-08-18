@@ -373,6 +373,11 @@ async def heartbeat(
             """,
             (now, seq or 0, connection_id, participant.id),
         )
+        if not beat:
+            raise InvalidCommand(
+                "Connection is closed or does not belong to this participant; reconnect.",
+                connection_id=connection_id,
+            )
         if beat:
             # One transaction: an expired room cannot accept the connection beat but
             # still refresh the work card (or vice versa).
@@ -596,7 +601,10 @@ async def presence_for_room(room: Room) -> dict[str, PresenceView]:
             ),
             runtime=runtime,
             last_seen_at=max((c.last_heartbeat_at for c in conns), default=None),
-            runtimes=_runtime_views(conns, attachments),
+            runtimes=_runtime_views(
+                conns,
+                {k: v for k, v in attachments.items() if v.participant_id == participant.id},
+            ),
         )
     return views
 
@@ -618,6 +626,11 @@ def _runtime_views(
     grouped: dict[str, list[Connection]] = {}
     for conn in connections:
         grouped.setdefault(conn.attachment_id or conn.id, []).append(conn)
+    # Durable runtimes remain visible after transport loss. Their liveness is still
+    # derived from the empty connection set, so a sibling control surface cannot
+    # mask a dead companion attachment.
+    for attachment_id in attachments:
+        grouped.setdefault(attachment_id, [])
 
     views: list[RuntimeView] = []
     for ref, conns in grouped.items():
@@ -641,6 +654,7 @@ def _runtime_views(
                     host_class=attachment.host_class if attachment else conns[0].host_class,
                     is_resumable=attachment.is_resumable if attachment else False,
                 ),
+                operation=attachment.operation if attachment else None,
             )
         )
     return sorted(views, key=lambda v: (-LIVENESS_RANK[v.liveness], v.label, v.ref))
