@@ -14,6 +14,54 @@ import type {
 export type StreamState = "connecting" | "live" | "reconnecting" | "closed";
 
 /**
+ * The latest thing a participant said it was doing (D-082).
+ *
+ * Folded from durable `activity.noted` events. There is no mutable activity table;
+ * snapshots and realtime both derive the latest-per-runtime value from the log.
+ */
+export interface LiveActivity {
+  ref: string;
+  participantId: string;
+  attachmentId: string | null;
+  phase: string;
+  summary: string;
+  tool: string | null;
+  at: string;
+  seq: number;
+}
+
+function foldLiveActivity(
+  events: EventEnvelope[],
+  initial: Record<string, LiveActivity> = {},
+): Record<string, LiveActivity> {
+  return events.reduce<Record<string, LiveActivity>>((current, event) => {
+    if (event.type !== "activity.noted") return current;
+    const payload = event.payload;
+    const participantId = String(
+      payload["participant_id"] ?? event.actor.participant_id ?? "",
+    );
+    const attachmentId = payload["attachment_id"]
+      ? String(payload["attachment_id"])
+      : null;
+    const ref = attachmentId || participantId;
+    if (!ref || (current[ref]?.seq ?? -1) >= event.seq) return current;
+    return {
+      ...current,
+      [ref]: {
+        ref,
+        participantId,
+        attachmentId,
+        phase: String(payload["phase"] ?? ""),
+        summary: String(payload["summary"] ?? ""),
+        tool: (payload["tool"] as string | null) ?? null,
+        at: event.ts,
+        seq: event.seq,
+      },
+    };
+  }, initial);
+}
+
+/**
  * Subscribes to a room's event stream and folds events into local state.
  *
  * The important behavior is the cursor. The stream opens with a snapshot carrying
@@ -30,14 +78,27 @@ export function useRoom(session: Session | null) {
   const [state, setState] = useState<StreamState>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [activity, setActivity] = useState<EventEnvelope[]>([]);
+  const [liveActivity, setLiveActivity] = useState<Record<string, LiveActivity>>({});
 
   const cursor = useRef(0);
-  const source = useRef<EventSource | null>(null);
+  const source = useRef<WebSocket | null>(null);
   const connectionId = useRef<string | null>(null);
 
   const applyEvent = useCallback((event: EventEnvelope) => {
+    if (event.seq <= cursor.current) return;
     cursor.current = Math.max(cursor.current, event.seq);
     setActivity((prev) => [event, ...prev].slice(0, 300));
+
+    if (event.type === "activity.noted") {
+      // Keyed by durable attachment when the sender supplied a live connection, so
+      // sibling runtimes cannot overwrite each other's narration. Legacy notes fall
+      // back to participant grain.
+      setLiveActivity((prev) => foldLiveActivity([event], prev));
+      // Deliberately no `refresh()`: a note changes no server state, so re-fetching
+      // the snapshot per note would turn a cheap narration channel into a fetch
+      // storm exactly when an agent is busiest.
+      return;
+    }
 
     setSnapshot((prev) => {
       if (!prev) return prev;
@@ -96,8 +157,10 @@ export function useRoom(session: Session | null) {
     if (!session) return;
     try {
       const fresh = await api.snapshot(session.participantToken, session.roomId);
-      cursor.current = fresh.snapshot_seq;
       setSnapshot(fresh);
+      setLiveActivity((previous) =>
+        foldLiveActivity(fresh.latest_activity ?? [], previous),
+      );
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -108,9 +171,34 @@ export function useRoom(session: Session | null) {
     if (!session) return;
     let cancelled = false;
     let heartbeat: ReturnType<typeof setInterval> | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
+
+    const needsRefresh = new Set([
+      "room.closed",
+      "participant.joined",
+      "participant.left",
+      "presence.changed",
+      "runtime.state_changed",
+      "work.declared",
+      "work.updated",
+      "work.ended",
+      "work.stale",
+      "task.created",
+      "task.updated",
+      "task.claimed",
+      "task.claim_renewed",
+      "task.claim_released",
+      "task.claim_expired",
+      "task.completed",
+      "task.cancelled",
+      "conflict.detected",
+      "conflict.resolved",
+    ]);
 
     const start = async () => {
       try {
+        setState(attempts ? "reconnecting" : "connecting");
         const negotiated = await api.connect(
           session.participantToken,
           session.roomId,
@@ -119,8 +207,7 @@ export function useRoom(session: Session | null) {
         if (cancelled) return;
         connectionId.current = negotiated.connection_id;
 
-        // Keep presence honest while the tab is open. The stream itself also
-        // heartbeats server-side, but an explicit beat covers a stalled stream.
+        if (heartbeat) clearInterval(heartbeat);
         heartbeat = setInterval(
           () =>
             api
@@ -129,90 +216,94 @@ export function useRoom(session: Session | null) {
           Math.max(5, negotiated.heartbeat_interval_s - 5) * 1000,
         );
 
-        const es = new EventSource(
-          api.streamUrl(
-            session.participantToken,
+        const issued = await api.streamTicket(
+          session.participantToken,
+          session.roomId,
+        );
+        if (cancelled) return;
+        const ws = new WebSocket(
+          api.websocketUrl(
+            issued.ticket,
             session.roomId,
             cursor.current,
             negotiated.connection_id,
           ),
         );
-        source.current = es;
+        source.current = ws;
 
-        es.addEventListener("snapshot", (raw) => {
-          const frame = JSON.parse((raw as MessageEvent).data) as RoomSnapshot;
-          cursor.current = frame.snapshot_seq;
-          setSnapshot(frame);
+        ws.onopen = () => {
+          attempts = 0;
           setState("live");
           setError(null);
-        });
-
-        es.addEventListener("resume_gap", () => {
-          // History we needed is gone. Discard local state and re-snapshot; carrying
-          // on from a partial view would mean coordinating on stale state.
-          cursor.current = 0;
-          setSnapshot(null);
-          setActivity([]);
-          void refresh();
-        });
-
-        const eventTypes = [
-          "room.closed",
-          "participant.joined",
-          "participant.left",
-          "presence.changed",
-          "message.posted",
-          "work.declared",
-          "work.updated",
-          "work.ended",
-          "work.stale",
-          "task.created",
-          "task.updated",
-          "task.claimed",
-          "task.claim_renewed",
-          "task.claim_released",
-          "task.claim_expired",
-          "task.completed",
-          "task.cancelled",
-          "conflict.detected",
-          "conflict.resolved",
-        ];
-        const needsRefresh = new Set(
-          eventTypes.filter((t) => t !== "message.posted"),
-        );
-
-        for (const type of eventTypes) {
-          es.addEventListener(type, (raw) => {
+        };
+        ws.onmessage = (raw) => {
+          const frame = JSON.parse(raw.data as string) as {
+            frame: "snapshot" | "resume_gap" | "keepalive" | "event";
+            data?: RoomSnapshot;
+            event?: EventEnvelope;
+          };
+          if (frame.frame === "snapshot" && frame.data) {
+            cursor.current = frame.data.snapshot_seq;
+            setSnapshot(frame.data);
+            setLiveActivity(foldLiveActivity(frame.data.latest_activity ?? []));
             setState("live");
-            const event = JSON.parse((raw as MessageEvent).data) as EventEnvelope;
-            applyEvent(event);
-            if (needsRefresh.has(type)) void refresh();
-          });
-        }
-
-        es.onopen = () => setState("live");
-        // EventSource reconnects by itself; surface the gap without tearing down, and
-        // let it resume from our cursor when it comes back.
-        es.onerror = () => setState("reconnecting");
+            setError(null);
+            return;
+          }
+          if (frame.frame === "resume_gap") {
+            cursor.current = 0;
+            setSnapshot(null);
+            setActivity([]);
+            setLiveActivity({});
+            return;
+          }
+          if (frame.frame === "event" && frame.event) {
+            applyEvent(frame.event);
+            if (needsRefresh.has(frame.event.type)) void refresh();
+          }
+        };
+        ws.onerror = () => setState("reconnecting");
+        ws.onclose = () => {
+          if (cancelled) return;
+          setState("reconnecting");
+          void api
+            .disconnect(
+              session.participantToken,
+              session.roomId,
+              negotiated.connection_id,
+            )
+            .catch(() => undefined);
+          attempts += 1;
+          retry = setTimeout(() => void start(), Math.min(10_000, 500 * 2 ** attempts));
+        };
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : String(err));
-          setState("closed");
+          setState("reconnecting");
+          attempts += 1;
+          retry = setTimeout(() => void start(), Math.min(10_000, 500 * 2 ** attempts));
         }
       }
     };
 
-    void refresh().then(start);
+    void start();
 
     return () => {
       cancelled = true;
       if (heartbeat) clearInterval(heartbeat);
+      if (retry) clearTimeout(retry);
       source.current?.close();
       source.current = null;
+      const currentConnection = connectionId.current;
+      if (currentConnection) {
+        void api
+          .disconnect(session.participantToken, session.roomId, currentConnection)
+          .catch(() => undefined);
+      }
     };
   }, [session, applyEvent, refresh]);
 
-  return { snapshot, state, error, activity, refresh };
+  return { snapshot, state, error, activity, liveActivity, refresh };
 }
 
 /** Ticking clock, so lease countdowns and work ages update without a re-fetch. */

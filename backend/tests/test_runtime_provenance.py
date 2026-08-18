@@ -116,7 +116,7 @@ async def test_liveness_is_per_runtime_and_derived(make_room, join):
 
     views = await presence.presence_for_room(await room.refresh())
     runtimes = {r.label: r for r in views[member.participant.id].runtimes}
-    assert "chat" not in runtimes, "a closed runtime is not a live one"
+    assert runtimes["chat"].liveness is Liveness.DISCONNECTED
     assert runtimes["worker-main"].liveness is not Liveness.DISCONNECTED
     assert views[member.participant.id].liveness is not Liveness.DISCONNECTED
 

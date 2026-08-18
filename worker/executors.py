@@ -34,11 +34,11 @@ from typing import Any, Protocol
 class StepContext:
     """Everything an executor is allowed to see about the work.
 
-    Deliberately small, and deliberately *not* a conversation. An executor gets the
-    task it was assigned, where it has got to, and what it was told — never a chat
-    transcript, never other participants' work, never room history. Widening this
-    is how private context leaks into a background process, so it stays a closed
-    dataclass rather than a dict someone can quietly add a field to.
+    Deliberately bounded, privacy-filtered, and never a private transcript. An
+    executor gets its task plus durable continuity selected by the companion: room
+    charter, current work, recent relevant events, checkpoints, blockers, and
+    collaborator outputs. It stays a closed dataclass so context cannot widen by
+    accident.
     """
 
     task_id: str
@@ -52,6 +52,34 @@ class StepContext:
     instructions: tuple[str, ...] = ()
     #: What previous steps recorded, so a restarted process can pick up.
     checkpoints: tuple[str, ...] = ()
+    #: Bounded durable continuity assembled by the companion, never hidden model
+    #: state. These fields survive fresh CLI invocations and process restarts.
+    room_charter: str = ""
+    current_work: tuple[str, ...] = ()
+    recent_events: tuple[str, ...] = ()
+    blockers: tuple[str, ...] = ()
+    collaborator_outputs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReactionContext:
+    """Bounded room context for cognition not tied to a claimed task."""
+
+    room_charter: str = ""
+    current_work: tuple[str, ...] = ()
+    recent_events: tuple[str, ...] = ()
+    checkpoints: tuple[str, ...] = ()
+    blockers: tuple[str, ...] = ()
+    collaborator_outputs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReactionResult:
+    """A public reaction, or an explicit decision that no response is useful."""
+
+    summary: str
+    message: str | None = None
+    concern: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +124,8 @@ class Executor(Protocol):
 
     def run_step(self, context: StepContext) -> StepResult: ...
 
+    def run_reaction(self, context: ReactionContext) -> ReactionResult: ...
+
     def cancel(self) -> None: ...
 
 
@@ -120,6 +150,10 @@ class EchoExecutor:
 
     def cancel(self) -> None:
         """Nothing to cancel: a step here returns before anyone could ask."""
+
+    def run_reaction(self, context: ReactionContext) -> ReactionResult:
+        # Observing conversation must not manufacture a deterministic canned reply.
+        return ReactionResult(summary="No room response needed")
 
     def run_step(self, context: StepContext) -> StepResult:
         done = context.step >= context.total_steps
@@ -314,9 +348,9 @@ class SubprocessExecutor:
     def build_prompt(self, context: StepContext) -> str:
         """Assemble what the agent is asked to do.
 
-        Bounded on purpose. An executor sees its own task and its own history, so a
-        prompt cannot grow to include the room — which is what stops a background
-        process becoming a channel for context nobody agreed to share.
+        Bounded on purpose. Room continuity is privacy-filtered by Cottage and capped
+        by the companion; a prompt cannot grow into an unbounded transcript or carry
+        a control surface's private context.
         """
         lines = [
             f"Task: {context.title}",
@@ -332,6 +366,17 @@ class SubprocessExecutor:
         if context.instructions:
             lines.append("Instructions from a human:")
             lines += [f"  - {i}" for i in context.instructions[-5:]]
+        if context.room_charter:
+            lines.append("Room charter: " + context.room_charter[:2000])
+        for heading, values, cap in (
+            ("Current work", context.current_work, 8),
+            ("Recent relevant room events", context.recent_events, 16),
+            ("Current blockers", context.blockers, 8),
+            ("Collaborator outputs", context.collaborator_outputs, 8),
+        ):
+            if values:
+                lines.append(f"{heading}:")
+                lines += [f"  - {value}" for value in values[-cap:]]
         lines.append(
             "Do one step of this work now. Reply with a short summary of what you "
             "did and what is next. Do not include your reasoning."
@@ -347,6 +392,35 @@ class SubprocessExecutor:
             f"you completed."
         )
         return "\n".join(lines)
+
+    def run_reaction(self, context: ReactionContext) -> ReactionResult:
+        """Use the same hardened subprocess path for a room-level cognition turn."""
+        step = self.run_step(
+            StepContext(
+                task_id="room-reaction",
+                title="Respond to relevant room activity",
+                description=(
+                    "Decide whether a concise room-public response helps coordination. "
+                    "Reply with NO_ACTION if it does not; otherwise reply only with "
+                    "the message to post."
+                ),
+                targets=(),
+                step=1,
+                total_steps=1,
+                instructions=(),
+                checkpoints=context.checkpoints,
+                room_charter=context.room_charter,
+                current_work=context.current_work,
+                recent_events=context.recent_events,
+                blockers=context.blockers,
+                collaborator_outputs=context.collaborator_outputs,
+            )
+        )
+        if step.concern:
+            return ReactionResult(summary="Room reaction failed", concern=step.concern)
+        if step.question or step.summary.strip().upper().startswith("NO_ACTION"):
+            return ReactionResult(summary="No room response needed")
+        return ReactionResult(summary="Responded to room activity", message=step.summary[:2000])
 
     def cancel(self) -> None:
         """Terminate the child and everything it started.
@@ -445,7 +519,7 @@ class SubprocessExecutor:
             )
         return StepResult(
             summary=output[:1500] or f"Step {context.step} produced no output.",
-            done=context.step >= context.total_steps,
+            done=True,
             resume={"phase": f"step-{context.step}"},
         )
 

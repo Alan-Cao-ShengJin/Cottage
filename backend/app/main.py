@@ -1,4 +1,4 @@
-"""ASGI composition: ARP HTTP + SSE, the MCP adapter, and the background reaper.
+"""ASGI composition: ARP HTTP + realtime, the MCP adapter, and the background reaper.
 
 One process, one service layer. The MCP adapter is mounted onto the same app so
 there is nothing extra to run and no way for the two doors into the product to drift

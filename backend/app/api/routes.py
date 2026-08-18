@@ -12,11 +12,12 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from ..config import settings
 from ..core import (
+    activity,
     authz,
     checkpoints,
     directives,
@@ -27,12 +28,14 @@ from ..core import (
     projections,
     questions,
     rooms,
+    runtime_state,
     store,
+    stream_tickets,
     tasks,
     work,
 )
 from ..core.bus import bus
-from ..core.errors import Forbidden, ResumeGap, RoomClosed
+from ..core.errors import Forbidden, ResumeGap, RoomClosed, RoomError
 from ..domain.capabilities import SUGGESTED_CAPABILITIES, Capability
 from ..domain.commands import (
     AcknowledgeDirectiveCommand,
@@ -55,12 +58,14 @@ from ..domain.commands import (
     JoinRoomCommand,
     LeaveRoomCommand,
     MintCredentialCommand,
+    NoteActivityCommand,
     PostMessageCommand,
     ReleaseClaimCommand,
     RenewClaimCommand,
     ResumeRuntimeCommand,
     RevokeCredentialCommand,
     SetParticipantRoleCommand,
+    SetRuntimeStateCommand,
     TakeOverExecutionCommand,
     UpdateRoomCharterCommand,
     UpdateTaskCommand,
@@ -403,20 +408,109 @@ async def get_events(
     participant: ParticipantDep,
     since_seq: int = Query(default=0, ge=0),
     limit: int = Query(default=200, ge=1, le=500),
+    wait_seconds: float = Query(default=0, ge=0, le=settings.max_long_poll_seconds),
 ) -> dict[str, Any]:
-    """Pull replay. Same semantics as the stream; only the delivery differs."""
+    """Pull or long-poll replay with a cursor for the page actually consumed.
+
+    The cursor advances over privacy-filtered events too, but never beyond the raw
+    page read. Advancing straight to the room high-water mark would silently skip a
+    second page or an event committed between the read and response.
+    """
     _assert_room(participant, room_id)
     authz.require_scope(participant, Scope.EVENTS_SUBSCRIBE)
     current = await eventlog.validate_cursor(room_id, since_seq)
-    events = await projections.visible_events_since(
-        room_id=room_id, recipient=participant, since_seq=since_seq, limit=limit
-    )
-    return {"ok": True, "events": events, "cursor": current, "current_seq": current}
+    bus.prime(room_id, current)
+    batch = await eventlog.read_since(room_id, since_seq, limit=limit)
+    if not batch and wait_seconds > 0:
+        await bus.wait_for(room_id, since_seq, timeout=wait_seconds)
+        batch = await eventlog.read_since(room_id, since_seq, limit=limit)
+    room = await store.load_room(room_id)
+    events = [
+        event.model_dump(mode="json")
+        for event in privacy.filter_events(batch, recipient=participant, room=room)
+    ]
+    cursor = batch[-1].seq if batch else since_seq
+    result: dict[str, Any] = {
+        "ok": True,
+        "events": events,
+        "cursor": cursor,
+        "current_seq": await eventlog.current_seq(room_id),
+    }
+    return result
+
+
+@router.post("/rooms/{room_id}/stream-ticket")
+async def create_stream_ticket(room_id: str, participant: ParticipantDep) -> dict[str, Any]:
+    """Exchange the durable participant credential for a one-use realtime ticket."""
+    _assert_room(participant, room_id)
+    authz.require_scope(participant, Scope.EVENTS_SUBSCRIBE)
+    issued = await stream_tickets.issue(participant)
+    return {"ok": True, "ticket": issued.token, "expires_at": issued.expires_at}
 
 
 # ---------------------------------------------------------------------------
 # Live stream
 # ---------------------------------------------------------------------------
+
+
+@router.websocket("/rooms/{room_id}/ws")
+async def websocket_stream(websocket: WebSocket, room_id: str) -> None:
+    """Resumable WebSocket delivery backed by the durable room event log."""
+    try:
+        participant = await stream_tickets.consume(
+            websocket.query_params.get("ticket"), room_id=room_id
+        )
+        authz.require_scope(participant, Scope.EVENTS_SUBSCRIBE)
+        since_seq = int(websocket.query_params.get("since_seq", "0"))
+        if since_seq < 0:
+            raise ValueError
+    except (RoomError, ValueError):
+        await websocket.close(code=4401)
+        return
+
+    connection_id = websocket.query_params.get("connection_id")
+    await websocket.accept()
+    cursor = since_seq
+    try:
+        try:
+            current = await eventlog.validate_cursor(room_id, cursor)
+        except ResumeGap as exc:
+            await websocket.send_json(
+                {"frame": ControlFrame.RESUME_GAP.value, "data": exc.to_payload()}
+            )
+            cursor = 0
+            current = await eventlog.current_seq(room_id)
+
+        if cursor == 0:
+            frame = await projections.snapshot(room_id=room_id, recipient=participant)
+            cursor = int(frame["snapshot_seq"])
+            await websocket.send_json({"frame": ControlFrame.SNAPSHOT.value, "data": frame})
+
+        bus.prime(room_id, current)
+        room = await store.load_room(room_id)
+        while True:
+            batch = await eventlog.read_since(room_id, cursor)
+            if batch:
+                for event in privacy.filter_events(batch, recipient=participant, room=room):
+                    await websocket.send_json(
+                        {"frame": "event", "event": event.model_dump(mode="json")}
+                    )
+                cursor = batch[-1].seq
+                if len(batch) >= eventlog.MAX_REPLAY_BATCH:
+                    continue
+
+            if connection_id:
+                with contextlib.suppress(RoomClosed):
+                    await presence.heartbeat(
+                        connection_id=connection_id, participant=participant, seq=cursor
+                    )
+            reached = await bus.wait_for(
+                room_id, cursor, timeout=float(settings.sse_keepalive_seconds)
+            )
+            if reached <= cursor:
+                await websocket.send_json({"frame": ControlFrame.KEEPALIVE.value})
+    except (WebSocketDisconnect, RuntimeError):
+        return
 
 
 def _sse(event_type: str, data: dict[str, Any], *, seq: int | None = None) -> str:
@@ -520,6 +614,28 @@ async def post_message(
 ) -> dict[str, Any]:
     _assert_room(participant, room_id)
     return {"ok": True, **await messages.post(participant=participant, command=command)}
+
+
+@router.post("/rooms/{room_id}/activity", status_code=201)
+async def note_activity(
+    room_id: str, participant: ParticipantDep, command: NoteActivityCommand
+) -> dict[str, Any]:
+    """One breadcrumb of live narration (D-082). Changes no coordination state."""
+    _assert_room(participant, room_id)
+    return await activity.note(participant=participant, command=command)
+
+
+@router.put("/rooms/{room_id}/runtime-state")
+async def set_runtime_state(
+    room_id: str, participant: ParticipantDep, command: SetRuntimeStateCommand
+) -> dict[str, Any]:
+    """Project the caller attachment's validated work posture.
+
+    This does not set presence. The attachment is derived from ``connection_id`` and
+    its liveness continues to come only from heartbeats.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await runtime_state.set_state(participant=participant, command=command)}
 
 
 @router.post("/rooms/{room_id}/work", status_code=201)

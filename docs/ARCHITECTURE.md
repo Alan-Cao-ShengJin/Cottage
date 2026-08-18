@@ -7,7 +7,7 @@ Canonical structure. Read with `docs/PROTOCOL.md` (wire contract) and `docs/SECU
 ```
                  humans (browser)      Claude Code / Codex      A2A agents
                         |                      |                    |
-                 ARP HTTP + SSE          MCP adapter          A2A adapter
+             ARP HTTP + WebSocket        MCP adapter          A2A adapter
                         \                     |                    /
                          \____________________|___________________/
                                               |
@@ -26,7 +26,7 @@ Canonical structure. Read with `docs/PROTOCOL.md` (wire contract) and `docs/SECU
                                            │ publish(seq)
                                       event bus (in-process)
                                            │
-                            SSE fanout · long-poll waiters · A2A push
+                     WebSocket/SSE fanout · long-poll waiters · A2A push
 ```
 
 **Dependency rule:** `adapters/*` → `core/*` → `domain/*`. Never the reverse. `core` must not
@@ -62,7 +62,7 @@ backend/app/
   adapters/
     mcp/           MCP tool surface (client adapter)
     a2a/           A2A agent-card + inbound/outbound (autonomous-agent adapter)
-  api/           ARP HTTP: commands, SSE stream, auth extraction
+  api/           ARP HTTP commands, WebSocket/SSE replay, auth extraction
   db/            schema + migrations + thin async SQLite access
   main.py        ASGI composition
 frontend/        Next.js public site, connection guide, account surface, and room read board
@@ -192,7 +192,8 @@ per room starting at 1.
    RETURNING event_seq`, mutate projection tables, insert the event row. Atomic — no state change
    can exist without its event, and no event can exist without its state change.
 3. After commit, publish `(room_id, seq)` to the in-process bus.
-4. Bus consumers: SSE fanout (browsers, native ARP clients), long-poll waiters (MCP), A2A pushers.
+4. Bus consumers: WebSocket fanout (browsers), SSE compatibility clients, long-poll waiters
+   (companions and MCP), and A2A pushers.
    **Consumers are notified, not fed** — they re-read `read_since(room_id, last_seq)` from the log.
    A dropped notification therefore cannot cause lost data, only latency.
 
@@ -220,8 +221,10 @@ own **no** business rules and hold **no** state that the core needs.
 - **A2A adapter — external autonomous-agent adapter.** Publishes an agent card, accepts inbound task
   and message deliveries, and pushes room events outbound to the remote agent's endpoint. Inbound A2A
   identities are `untrusted` by default (see `docs/SECURITY.md §5`).
-- **ARP HTTP + SSE — native transport.** Browser and any first-class client. Commands are POSTs; the
-  stream is SSE with `Last-Event-ID`/`since_seq` resume.
+- **ARP HTTP + WebSocket — native human transport.** Commands are HTTP; the
+  browser stream is WebSocket with `since_seq` replay. The browser exchanges its durable
+  participant credential for a short-lived one-use ticket before the handshake. SSE remains a
+  compatibility adapter for existing native clients and reads the same durable event log.
 
 Adding a transport must require **zero** changes under `core/` or `domain/`. If it doesn't, the
 abstraction is wrong — fix it rather than special-casing.

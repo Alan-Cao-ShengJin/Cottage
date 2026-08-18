@@ -159,6 +159,12 @@ export const api = {
       body: JSON.stringify({ connection_id: connectionId }),
     }),
 
+  disconnect: (participantToken: string, roomId: string, connectionId: string) =>
+    request<{ ok: true }>(
+      `/api/rooms/${roomId}/disconnect?connection_id=${encodeURIComponent(connectionId)}`,
+      { method: "POST", token: participantToken },
+    ),
+
   snapshot: (participantToken: string, roomId: string) =>
     request<RoomSnapshot>(`/api/rooms/${roomId}/snapshot`, { token: participantToken }),
 
@@ -259,6 +265,27 @@ export const api = {
       token: participantToken,
       body: JSON.stringify({ note: "" }),
     }),
+
+  streamTicket: (participantToken: string, roomId: string) =>
+    request<{ ticket: string; expires_at: string }>(
+      `/api/rooms/${roomId}/stream-ticket`,
+      { method: "POST", token: participantToken },
+    ),
+
+  websocketUrl: (
+    ticket: string,
+    roomId: string,
+    sinceSeq: number,
+    connectionId?: string,
+  ) => {
+    const origin = API_BASE || window.location.origin;
+    const url = new URL(`/api/rooms/${roomId}/ws`, origin);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.searchParams.set("ticket", ticket);
+    url.searchParams.set("since_seq", String(sinceSeq));
+    if (connectionId) url.searchParams.set("connection_id", connectionId);
+    return url.toString();
+  },
 
   /**
    * SSE URL. `EventSource` cannot set an Authorization header, so the participant

@@ -3676,3 +3676,63 @@ The charter is context, not an instruction channel. It cannot grant scopes, chan
 claimed task, or override the protocol. Those operations retain their existing explicit commands,
 authorization, and audit events. Rejected: stretching `purpose` into a long mutable document,
 requiring joiners to replay history, or making the field adapter-specific.
+
+## D-082 — Live activity is runtime-attributed narration, not progress or reasoning
+
+**Date:** 2026-08-18
+**Status:** accepted
+**Context:** between a claim and a durable checkpoint, a companion can perform minutes of real
+work while a human sees one unchanged card. Treating narration as work progress would let a
+wedged runtime remain healthy by repeatedly saying that it is working; storing free-form
+reasoning would also turn the human feed into a chain-of-thought channel.
+
+### The decision
+
+`activity.noted` is a durable room event with a closed phase, a short observable summary, and an
+optional tool name. When a live connection is supplied, core derives and records its durable
+attachment so sibling runtimes cannot overwrite each other's narration. The command accepts no
+reasoning field, passes through disclosure checks, changes no task/work projection, and refreshes
+neither progress nor liveness clocks. Activity remains suppressed from the compact agent
+coordination view, so routine narration does not trigger cognition or consume peer context.
+
+There is no mutable activity table. Realtime clients replay the durable log, and a fresh human
+snapshot derives the latest visible note per runtime from that same log at its atomic cursor
+boundary. This restores current narration after refresh without creating a second source of truth.
+
+## D-083 — A persistent companion outlives its model turns
+
+**Date:** 2026-08-18
+**Status:** accepted
+**Context:** the previous worker loop treated polling, heartbeats, lease renewal, model execution,
+and task completion as one lifecycle. A long model/tool turn could therefore stop event intake and
+make a healthy participant disappear; completing a turn could also end the process that represented
+the participant. Browser SSE delivered events, but the product lacked an explicit per-runtime work
+posture and a low-latency human surface aligned with durable replay.
+
+### The decision
+
+A durable runtime attachment has validated projected posture `monitoring`, `working`, or `waiting`.
+It cannot assert presence: `disconnected` remains derived from actual connection liveness and
+overrides the last posture in human presentation. Healthy companions normally rest in `monitoring`.
+Model and tool turns are bounded bursts inside that longer lifecycle.
+
+One process is sufficient. An independent in-process monitor owns heartbeat, lease renewal,
+long-poll replay, reconnect, and control-event cancellation while the executor may block in another
+thread. It projects/enqueues each raw event page before durably advancing its cursor. Direct work,
+mentions, and control events wake immediately; ambient conversation is coalesced and may wake
+cognition; routine presence, renewal, and activity noise never does. Pending reactions have their
+own durable queue and idempotency key.
+
+Each fresh executor turn receives bounded privacy-filtered continuity: room charter, current work,
+recent relevant durable events, checkpoints, blockers, explicit input, and collaborator outputs.
+Cottage still hosts none of that cognition. MCP remains the standardized agent/tool interface.
+
+The browser uses WebSocket for low-latency delivery after exchanging its durable credential for a
+short-lived one-use ticket. Every frame is sourced from the durable room log and reconnects from a
+sequence cursor; SSE remains a compatibility adapter. Browser refresh or loss never controls a
+companion runtime.
+
+Rejected: participant-level obligation messages that tell a model to poll again. They assign
+runtime duties to the wrong grain, allow sibling connections to mask each other, leak MCP call
+syntax into transport-neutral core, and couple token-consuming cognition back to monitoring.
+Also rejected: multiple hosted agent services and a custom WebSocket agent protocol.

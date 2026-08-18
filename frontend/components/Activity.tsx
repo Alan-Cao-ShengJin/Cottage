@@ -28,6 +28,10 @@ function summarize(event: EventEnvelope, participants: Participant[]): string {
       return `${who(p["participant_id"])} is now ${p["liveness"]}`;
     case "message.posted":
       return String(p["body"] ?? "");
+    case "activity.noted":
+      return p["tool"]
+        ? `${p["phase"]}: ${p["summary"]} · ${p["tool"]}`
+        : `${p["phase"]}: ${p["summary"]}`;
     case "work.declared":
       return `declared: ${p["headline"]}`;
     case "work.updated":

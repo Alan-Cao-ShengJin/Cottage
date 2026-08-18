@@ -10,6 +10,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .activity import (
+    MAX_ACTIVITY_SUMMARY_CHARS,
+    MAX_ACTIVITY_TOOL_CHARS,
+    ActivityPhase,
+)
 from .capabilities import Capability, HostClass
 from .checkpoint import MAX_SUMMARY_CHARS, ResumeState
 from .directive import DirectiveAction
@@ -24,6 +29,7 @@ from .room import (
     RetentionPolicy,
     RoomPolicy,
     RoomVisibility,
+    RuntimeOperationalState,
     RuntimeRole,
     Scope,
 )
@@ -186,6 +192,21 @@ class HeartbeatCommand(CommandMeta):
     connection_id: str
 
 
+class SetRuntimeStateCommand(CommandMeta):
+    """Change the work posture of the caller's own durable runtime.
+
+    The attachment is intentionally absent: core resolves it from this live
+    connection, preventing one runtime from writing another runtime's projection.
+    """
+
+    connection_id: str = Field(min_length=1, max_length=64)
+    state: RuntimeOperationalState
+    summary: str = Field(default="", max_length=280)
+    waiting_reason: str = Field(default="", max_length=500)
+    task_id: str | None = Field(default=None, max_length=64)
+    work_id: str | None = Field(default=None, max_length=64)
+
+
 class DisconnectCommand(CommandMeta):
     connection_id: str
 
@@ -204,6 +225,37 @@ class PostMessageCommand(CommandMeta):
     disclosure: Disclosure = Field(default_factory=Disclosure)
     #: What this message is about: a task id, work id, or artifact id.
     about_ref: str | None = Field(default=None, max_length=64)
+
+
+class NoteActivityCommand(CommandMeta):
+    """Say what you are doing right now (D-082).
+
+    Cheap and frequent by design — this is the channel that keeps a room looking
+    alive between the events that change state. It changes no mutable coordination
+    projection, lease, or task status. A dropped delivery is recovered from the log.
+
+    `summary` is what you would say out loud to a colleague at the next desk, in one
+    line. Note what there is no field for: your reasoning, your plan, your prompt, or
+    what you were thinking. That absence is deliberate and matches
+    `AppendCheckpointCommand.resume_state` — a narration channel is the most inviting
+    place in this product to paste a chain of thought, so the schema offers nowhere
+    to put one and the disclosure boundary inspects what does arrive.
+    """
+
+    phase: ActivityPhase
+    summary: str = Field(min_length=1, max_length=MAX_ACTIVITY_SUMMARY_CHARS)
+    #: What is being run, for the two tool phases. A name and its target, never a
+    #: full command line — those carry flags, paths and occasionally credentials.
+    tool: str | None = Field(default=None, max_length=MAX_ACTIVITY_TOOL_CHARS)
+    #: The task or work card this narrates, when there is one. Optional because the
+    #: gap being filled includes a worker that is alive and between tasks.
+    task_id: str | None = None
+    work_id: str | None = None
+    #: Identifies the runtime producing the note. Core derives the durable
+    #: attachment from this live connection; callers cannot choose an attachment.
+    #: Optional only for legacy participant-level narration.
+    connection_id: str | None = None
+    disclosure: Disclosure = Field(default_factory=Disclosure)
 
 
 class DeclareWorkCommand(CommandMeta):

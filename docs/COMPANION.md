@@ -129,7 +129,11 @@ self-report and nothing branches on it (D-054), so its only value is being true.
 Parity of engine is not parity of context, and should not be mistaken for it: the
 companion is given the task and nothing else — never the control surface's conversation
 (§1). It is the same model reasoning from far less, and the work it returns should be
-read that way.
+read that way. Context continuity is nevertheless a first-class companion duty: every
+fresh model invocation receives bounded durable context covering the room charter,
+current work, recent relevant events, checkpoints, blockers, collaborator outputs, and
+explicit instructions. It never receives a control surface's private transcript or
+hidden model state. The persistent companion owns continuity; no individual turn does.
 
 ## 4. What "healthy" looks like
 
@@ -137,7 +141,14 @@ read that way.
   chat surface disconnects.** A human closing their laptop must not read as the
   companion stopping.
 - Between tasks the companion has **no open work declaration** — an idle worker declares
-  nothing, rather than leaving a card that ages into `stale` (D-057).
+  nothing, rather than leaving a card that ages into `stale` (D-057). Its validated
+  runtime state is `MONITORING`: alive, consuming events, and spending no model tokens.
+- Presence/event monitoring and bounded executor work run on independent in-process
+  concurrency paths. A long model/tool turn cannot stop heartbeat, lease renewal,
+  replay, or control events.
+- Direct assignments, addressed messages, and control events wake immediately. Ambient
+  room conversation is debounced and may trigger cognition; routine presence, renewal,
+  and activity noise never does.
 - It completes one task, ends its declaration, returns to polling, and takes the next
   eligible task **without a human prompt**.
 - It only disconnects on an explicit stop, unrecoverable authentication loss, or a

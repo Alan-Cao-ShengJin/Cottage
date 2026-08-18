@@ -356,6 +356,12 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("attachments", "epoch", "INTEGER NOT NULL DEFAULT 1"),
     ("attachments", "drained_at", "TEXT"),
     ("attachments", "drained_reason", "TEXT NOT NULL DEFAULT ''"),
+    ("attachments", "operational_state", "TEXT NOT NULL DEFAULT 'monitoring'"),
+    ("attachments", "operational_summary", "TEXT NOT NULL DEFAULT ''"),
+    ("attachments", "waiting_reason", "TEXT NOT NULL DEFAULT ''"),
+    ("attachments", "operational_task_id", "TEXT"),
+    ("attachments", "operational_work_id", "TEXT"),
+    ("attachments", "operational_updated_at", "TEXT"),
 )
 
 

@@ -15,6 +15,7 @@ locking is involved (ADR-009).
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from typing import Any
 
 from ..db import database as db
@@ -148,6 +149,32 @@ async def read_since(
     params = (room_id, since_seq, min(limit, MAX_REPLAY_BATCH))
     rows = await (tx.fetch_all(sql, params) if tx else db.fetch_all(sql, params))
     return [_row_to_envelope(r) for r in rows]
+
+
+async def read_recent(
+    room_id: str,
+    *,
+    through_seq: int,
+    limit: int = 100,
+    types: Collection[str] | None = None,
+    tx: db.Tx | None = None,
+) -> list[EventEnvelope]:
+    """A bounded oldest-first continuity window ending at ``through_seq``.
+
+    This is context, not replay: callers must never use it to advance a cursor.
+    Reading it in the snapshot transaction lets hydration describe a room state and
+    the events leading to it at one consistent boundary.
+    """
+    where = "room_id = ? AND seq <= ?"
+    params: list[Any] = [room_id, through_seq]
+    if types:
+        selected = sorted(types)
+        where += f" AND type IN ({','.join('?' for _ in selected)})"
+        params.extend(selected)
+    sql = f"SELECT * FROM room_events WHERE {where} ORDER BY seq DESC LIMIT ?"
+    params.append(min(limit, MAX_REPLAY_BATCH))
+    rows = await (tx.fetch_all(sql, params) if tx else db.fetch_all(sql, params))
+    return [_row_to_envelope(r) for r in reversed(rows)]
 
 
 async def current_seq(room_id: str, *, tx: db.Tx | None = None) -> int:

@@ -22,8 +22,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import cottage_worker  # noqa: E402
-from cottage_worker import CottageError, Lease, Worker  # noqa: E402
-from executors import Executor, StepContext, StepResult  # noqa: E402
+from cottage_worker import Lease, Worker  # noqa: E402
+from executors import Executor, ReactionContext, ReactionResult, StepContext, StepResult  # noqa: E402
 
 
 class SlowExecutor(Executor):
@@ -45,6 +45,9 @@ class SlowExecutor(Executor):
 
     def cancel(self) -> None:
         self.cancelled.set()
+
+    def run_reaction(self, context: ReactionContext) -> ReactionResult:
+        return ReactionResult(summary="no action")
 
 
 def _worker(executor: Executor, **kwargs) -> Worker:
@@ -84,7 +87,7 @@ def _context() -> StepContext:
 
 
 def test_a_running_step_keeps_heartbeating(monkeypatch):
-    """The regression. A worker that is plainly working must not read as absent."""
+    """The independent monitor beats while cognition occupies another thread."""
     executor = SlowExecutor(seconds=0.4)
     worker = _worker(executor)
     beats: list[dict] = []
@@ -93,25 +96,31 @@ def test_a_running_step_keeps_heartbeating(monkeypatch):
         if path == "/heartbeat":
             beats.append(payload)
             return {"ok": True}
+        if path.startswith("/events"):
+            time.sleep(0.02)
+            return {"events": [], "cursor": worker.cursor}
         if path.startswith("/tasks/"):  # halted() poll
             return {"task": {"steering": "running", "claim": {"participant_id": "par_test"}}}
         raise AssertionError(f"unexpected call {method} {path}")
 
     monkeypatch.setattr(worker, "call", fake_call)
 
+    worker.poll_seconds = 0
+    worker.start_monitor()
     assert worker.run_step_watched(_context()) is not None
+    worker.request_stop()
+    assert worker.monitor_thread is not None
+    worker.monitor_thread.join(2)
     assert len(beats) >= 3, f"only {len(beats)} heartbeats across a step of ~8 intervals"
     assert all(b == {"connection_id": "con_test"} for b in beats)
 
 
 def test_a_failing_heartbeat_does_not_kill_the_step(monkeypatch):
-    """A missed beat costs presence grading, which recovers. Raising would cost the work."""
+    """Transport recovery is independent from the executor's bounded turn."""
     executor = SlowExecutor(seconds=0.3)
     worker = _worker(executor)
 
     def fake_call(method, path, payload=None):
-        if path == "/heartbeat":
-            raise CottageError(503, "transport", "the network blinked")
         if path.startswith("/tasks/"):
             return {"task": {"steering": "running", "claim": {"participant_id": "par_test"}}}
         raise AssertionError(f"unexpected call {method} {path}")
@@ -149,8 +158,8 @@ def test_a_reaped_claim_still_abandons_the_step(monkeypatch):
     assert executor.cancelled.is_set(), "an abandoned step must cancel its child"
 
 
-def test_the_idle_path_still_beats(monkeypatch):
-    """`wait` used to own the only heartbeat; extracting it must not have lost one."""
+def test_the_monitoring_path_still_beats(monkeypatch):
+    """Monitoring owns heartbeat even when the executor has nothing to do."""
     worker = _worker(SlowExecutor(), poll_seconds=0)
     seen: list[str] = []
 
@@ -163,7 +172,13 @@ def test_the_idle_path_still_beats(monkeypatch):
     monkeypatch.setattr(worker, "call", fake_call)
     monkeypatch.setattr(cottage_worker.time, "sleep", lambda _: None)
 
-    worker.wait()
+    worker.start_monitor()
+    deadline = time.monotonic() + 2
+    while "/heartbeat" not in seen and time.monotonic() < deadline:
+        time.sleep(0.01)
+    worker.request_stop()
+    assert worker.monitor_thread is not None
+    worker.monitor_thread.join(2)
     assert "/heartbeat" in seen
 
 

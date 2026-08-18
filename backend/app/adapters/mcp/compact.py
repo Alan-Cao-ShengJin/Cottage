@@ -301,6 +301,21 @@ def event(envelope: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+#: Event types the coordination view drops entirely (D-082).
+#:
+#: Activity notes exist so a *human* watching the room cannot mistake a working agent
+#: for a dead one. They are high-frequency by design and carry no coordination
+#: decision: another agent does not act differently because a peer said "running the
+#: tests". Relaying them into every poll would spend one participant's context
+#: narrating another's work — `docs/PRODUCT.md` §9 is explicit that filtering is a
+#: deterministic code path, and this is that filter.
+#:
+#: Dropped from the compact view only. `detail="full"` still returns them, the SSE
+#: stream and ARP HTTP are untouched, and the cursor advances across them either way —
+#: so nothing is lost, and a client that wants the narration can have it.
+SUPPRESSED_IN_COORDINATION_VIEW: frozenset[str] = frozenset({"activity.noted"})
+
+
 def events(
     envelopes: list[dict[str, Any]], *, max_events: int = DEFAULT_MAX_EVENTS
 ) -> tuple[list[dict[str, Any]], int]:
@@ -309,8 +324,14 @@ def events(
     Keeps the *newest* when over the cap, since a client that has been away cares about
     the current state of play more than the beginning of what it missed — and the cursor
     still lets it page back if it wants.
+
+    `dropped_count` counts only what the *cap* removed. Suppressed types are not
+    "older events omitted" — they were never part of this view, and reporting them
+    would send a client paging back through history to look for something the view
+    will never show it.
     """
-    if len(envelopes) <= max_events:
-        return [event(e) for e in envelopes], 0
-    kept = envelopes[-max_events:]
-    return [event(e) for e in kept], len(envelopes) - len(kept)
+    relevant = [e for e in envelopes if e.get("type") not in SUPPRESSED_IN_COORDINATION_VIEW]
+    if len(relevant) <= max_events:
+        return [event(e) for e in relevant], 0
+    kept = relevant[-max_events:]
+    return [event(e) for e in kept], len(relevant) - len(kept)

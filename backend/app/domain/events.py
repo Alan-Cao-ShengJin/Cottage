@@ -53,8 +53,16 @@ class EventType(str, Enum):
     #: separately-authorized undo; there is deliberately no automatic one.
     RUNTIME_DRAINED = "presence.runtime_drained"
     RUNTIME_RESUMED = "presence.runtime_resumed"
+    #: A durable runtime changed its validated work posture. This never asserts
+    #: liveness; consumers compose it with connection-derived presence.
+    RUNTIME_STATE_CHANGED = "runtime.state_changed"
 
     MESSAGE_POSTED = "message.posted"
+
+    #: One breadcrumb of live narration from a runtime (D-082). It writes no mutable
+    #: projection: the log is the feed and fresh snapshots derive its latest visible
+    #: value. Genuine coordination state remains in the events that already model it.
+    ACTIVITY_NOTED = "activity.noted"
 
     WORK_DECLARED = "work.declared"
     WORK_UPDATED = "work.updated"
