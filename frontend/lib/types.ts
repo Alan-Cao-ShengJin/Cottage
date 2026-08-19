@@ -209,6 +209,12 @@ export interface Message {
    * reading a transcript in which everybody sounds like an agent.
    */
   speaking_for: Speaker;
+  /**
+   * The person's name when this is a relay. **Self-asserted** — the room cannot verify who
+   * typed — so it is rendered beside the seat, never instead of it. Shown alone it would
+   * let one participant appear as another with nothing to mark the difference.
+   */
+  speaking_as: string;
   created_at: string;
 }
 

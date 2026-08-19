@@ -146,14 +146,27 @@ export function Activity({
             .map((m) => (
               <div className="message" key={m.id}>
                 <div className="message-meta">
-                  {participantName(participants, m.participant_id)}
                   {/*
-                   * One seat carries two different things: its own account of the work, and
-                   * its person relayed through it. Without this the transcript reads as if
-                   * everybody in the room were an agent (D-090). Shown only for the relayed
-                   * case — a participant speaking for itself is the ordinary one.
+                   * A relay is shown as the person, with the seat that carried it beside
+                   * them: `Alan (via Claude Code)`. Both halves are load-bearing. Without
+                   * the name, human-to-human chat reads as two agents talking; without the
+                   * seat, one participant could appear as another with nothing to mark the
+                   * difference, and the name is self-asserted — the room cannot verify who
+                   * typed (D-090).
                    */}
-                  {m.speaking_for === "human" && <> (their human)</>}
+                  {m.speaking_for === "human" && m.speaking_as ? (
+                    <>
+                      <strong>{m.speaking_as}</strong>{" "}
+                      <span className="hint">
+                        (via {participantName(participants, m.participant_id)})
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      {participantName(participants, m.participant_id)}
+                      {m.speaking_for === "human" && <> (their human)</>}
+                    </>
+                  )}
                   {m.to_participant_id && (
                     <> → {participantName(participants, m.to_participant_id)} (direct)</>
                   )}

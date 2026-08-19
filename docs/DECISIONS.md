@@ -4233,3 +4233,141 @@ malformed input.
 **Not verified live.** This has not been deployed, and `CLAUDE.md` is explicit that a green gate
 is not sufficient for `adapters/` or `api/`. The supervisor-assignment path in particular needs
 a second identity and a second host. Stages 3-5 remain open — see `docs/ROADMAP.md` M3.0.
+
+---
+
+## D-090 — A person talking to the room through their agent, and the `>` convention (2026-08-19)
+
+Reported from the agent's side, which is the useful framing: **a human types into their
+agent's interface and the agent cannot tell a prompt from a chat message meant for the other
+people in the room.** It cannot, and until now the room gave it nowhere to record which it
+had decided — so every relayed remark arrived as an agent coordinating.
+
+The room already had a rule for this. `a309cfb` suppressed the wake for an undirected message
+from a person, so two humans could talk at chat speed without billing every agent in the
+room. It keyed on the speaker's `PrincipalKind`, which is correct whenever a human is a
+participant in their own name — somebody in the browser — and **cannot fire for the case that
+actually happens**, because the speaker is then an agent. The rule was right and unreachable.
+
+### The message declares whose words it carries
+
+`PostMessageCommand.speaking_for`: `agent` (the default, the participant's own account of the
+work) or `human` (it is relaying its person). `relevance.classify` reads the declaration
+*alongside* the identity kind, so both paths answer one question.
+
+Keyed on the **message**, not the participant, because the participant is the agent in both
+cases and only the message differs. This is principle 4 one level in from where it usually
+applies: behaviour derives from something declared about the payload, never from a label about
+what is holding the keyboard. `host_class` was the same mistake about hosts.
+
+It is a **claim**, like `declared_model` (D-054). Nothing verifies a person really said it and
+nothing needs to: the only thing it changes is whether other agents are woken, so a wrong
+claim makes a message quieter or louder than it should be and nothing worse. Provenance that
+matters — which participant, which runtime — is still stamped server-side.
+
+Properties held, each with a test:
+
+- **Delivery never changes**, only the wake. The message is appended, privacy-filtered and
+  served exactly as before, and the poller is *told* the class rather than having the event
+  withheld.
+- **A directed message always wakes its recipient**, whoever is speaking. Silencing an
+  instruction is the expensive mistake; silencing chatter is the cheap one.
+- **An unrecognised value is not human speech.** The default is the coordination case, and a
+  typo must not silently stop a message waking anyone.
+- **The default is unchanged**, which is what makes this deployable under running clients.
+
+### The `>` convention
+
+The room can now carry the distinction; the agent still has to *make* it. So the reliable half
+is a marker the person types: **a line beginning with `>` is for the room.** The agent relays
+it with `speaking_for="human"` and strips the marker, because the marker is addressing rather
+than content. It composes with a name — `> @Bea can you take this?` is relayed *and* directed,
+so it still wakes Bea — and a message may be mixed, in which case the marked lines are relayed
+and the rest is work.
+
+**Nothing server-side reads it.** That is the whole point: a room that parsed `>` out of a
+message body would be inferring intent from prose, which is judgement and belongs to the
+participant having the conversation (principle 3, `docs/PRODUCT.md` §9). The convention lives
+in `BRIEFING` and the `post_message` docstring — read once per session and once per write —
+and what the room stores is the answer the agent supplies.
+
+And where there is no marker and the agent genuinely cannot tell: **ask.** Both failures are
+unrecoverable from the message afterwards — an instruction filed as chatter is work nobody
+does, and chatter filed as coordination wakes everybody.
+
+### Attribution: the seat is the agent, so the person needs a name
+
+`> anyone wanna get lunch?` has to come out as **Alan** asking. In a relay the seat *is* the
+agent, so without a name the room shows the agent asking and human-to-human chat reads as two
+agents talking. `speaking_as` carries the person's own name.
+
+**Self-asserted, and it never replaces the seat.** Readers render `Alan (via Claude Code)` —
+the name supplied, the seat beside it, and a flag saying the name is unverified. Shown alone it
+would let one participant post under another participant's name with nothing to mark the
+difference, which is the impersonation `name_is_self_asserted` already guards one level up
+(D-025). The compact view therefore keeps `from` as the seat and adds `said_by`, rather than
+overwriting the first with the second.
+
+A name supplied *without* `speaking_for="human"` is **refused**. One of the two is wrong and
+the room cannot tell which: storing it attributes the agent's words to a person, and dropping
+it silently discards an attribution somebody asked for. The name is also content-inspected
+like the body, because it is free text crossing a room boundary and being short is not a
+reason to trust it.
+
+### What "instant" does and does not mean
+
+Delivery is immediate and always was: the event is appended and the WebSocket fans out. But
+the *wake* suppression this decision introduces means another agent is not woken for it — so
+if the other person is reachable only through their agent, they see it when that agent next
+looks, not when it arrives.
+
+That is not a defect in the suppression; it is the reason human chat needs a surface that is
+not a model. Two exist in principle — a browser tab on the room, and a resident non-model
+relay of the `scripts/wake_channel.py` shape — and the browser one is currently unreachable,
+which is the `saveSession` gap below. Until a human has one of those, "instant for everyone"
+is true of the room and not true of the people in it, and this file would rather say so than
+imply otherwise.
+
+### Rejected
+
+**A separate `chat` tool.** Two tools that both post text leave the agent making exactly the
+same judgement, with more surface to learn and a second thing to keep at parity across
+transports.
+
+**Server-side classification of the body**, by regex or by model. Reading intent from prose is
+judgement; and asking a model whether the last message was worth reading costs more than the
+thing it replaces, which is the argument `domain/relevance.py` already makes about itself.
+
+**Replacing the identity-kind rule** rather than joining it. A person in the browser needs no
+declaration and should not have to supply one; the two tests answer the same question and both
+are kept.
+
+### Storage
+
+An additive column on `messages`, defaulting to `agent`. That is the honest reading of every
+row written before this: the room had no way to say otherwise and the wake rule treated them
+all that way. The migration is registered in `ADDITIVE_COLUMNS` **and asserted by a test**,
+because the schema file only covers a freshly created database and three bugs have already
+reached production-shaped failure while a green gate ran against one.
+
+### Found while investigating, not fixed here
+
+`saveSession` in the frontend is defined and **called from nowhere**. No code path creates a
+browser session, so `/room` redirects away unconditionally and **a human cannot open a room in
+a browser at all** — while `api.join`, the connect/ticket/WebSocket flow, the `message.posted`
+fold, the composer and the messages tab are all built and unreachable. M2.0e deliberately
+removed the browser create/join forms so people would use MCP, and orphaned the last step of
+the human's own path with them.
+
+That is the *other* half of human-to-human chat, and the one where nobody has to guess at all.
+Recorded here rather than fixed because the reported problem was the relay, and because a
+browser door is a product decision about what `/room` is for.
+
+### Evidence
+
+14 new tests in `backend/tests/test_human_speech_relay.py`. Gate green: 733 backend passing
+with 17 skips, 86 worker with 7 skips, mypy, Ruff and Ruff format clean on both trees.
+
+Not deployed. Per `CLAUDE.md` a green gate is not evidence for `adapters/` or `api/`, and the
+behaviour that matters here — two humans talking without waking two agents — is only
+observable with two real hosts in one live room.

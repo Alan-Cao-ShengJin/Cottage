@@ -88,7 +88,7 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 | `presence.runtime_drained` | attachment_id, participant_id, label, epoch, reason — the room will refuse this runtime's commands from here on |
 | `presence.runtime_resumed` | attachment_id, participant_id, label, epoch, note — an explicit, attributed undo |
 | `runtime.state_changed` | participant_id, attachment_id, state (`monitoring` \| `working` \| `waiting` \| `coordinating` \| `supervising`), summary, waiting_reason, task_id, work_id, previous_state — projected work posture; never evidence of liveness. `coordinating` is the orchestrator posture and `supervising` the supervisor one; both require a summary, and both are refused to a seat the room did not put in that position (D-088) |
-| `message.posted` | message_id, body, to_participant_id, about_ref |
+| `message.posted` | message_id, participant_id, body, to_participant_id, about_ref, speaking_for (`agent` \| `human`), speaking_as — whose words these are, and the person's name when it is a relay. An **undirected** message declared `human` does not wake other agents; a directed one always does. `speaking_as` is **self-asserted** and is rendered beside the seat, never instead of it (D-090) |
 | `activity.noted` | participant_id, attachment_id, phase, summary, tool, task_id, work_id — durable live narration, with latest-per-runtime derived from the log for snapshots (D-082) |
 | `work.declared` | work_id, participant_id, headline, status, targets, task_id, expected_done_by |
 | `work.updated` | work_id, headline, status, targets, note |

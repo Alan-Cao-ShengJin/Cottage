@@ -252,3 +252,100 @@ async def test_the_briefing_tells_an_agent_how_to_decide():
     assert "Relaying is not acting" in briefing
     # The instruction for the case it genuinely cannot resolve.
     assert "ask them" in briefing
+
+
+# ---------------------------------------------------------------------------
+# Attribution: a relayed remark must read as the person, not as the seat
+# ---------------------------------------------------------------------------
+
+
+async def test_a_relay_is_attributed_to_the_person_with_the_seat_beside_it(make_room):
+    """`> anyone wanna get lunch?` has to come out as *Alan* asking, not as Alan's agent.
+
+    The seat is the agent in a relay, so without a name the room shows the agent saying it and
+    human-to-human chat reads as two agents talking. With one it shows both — and both halves
+    are load-bearing, which is the next test.
+    """
+    fixture = await make_room()
+    await mcp_tools.post_message(
+        body="anyone wanna get lunch?",
+        speaking_for="human",
+        speaking_as="Alan",
+        participant_token=fixture.owner_token,
+    )
+
+    snapshot = await projections.snapshot(room_id=fixture.room.id, recipient=fixture.owner)
+    row = snapshot["messages"][0]
+    assert row["speaking_as"] == "Alan"
+    assert row["participant_id"] == fixture.owner.id
+
+    rendered = compact.room_state(snapshot)["recent_messages"][0]
+    assert rendered["said_by"] == "Alan"
+    # The seat survives, in `from`, and the name is marked as unverified.
+    assert rendered["from"] == fixture.owner.id
+    assert rendered["said_by_is_self_asserted"] is True
+
+
+async def test_the_name_never_replaces_the_seat(make_room, join):
+    """Rendered alone, a self-asserted name lets one participant post under another
+    participant's name with nothing to show the difference. The room cannot verify who typed,
+    so it shows what it knows — the seat — beside what it was told."""
+    fixture = await make_room()
+    other = await join(fixture, display_name="Bea's agent")
+    await mcp_tools.post_message(
+        body="I approve the merge",
+        speaking_for="human",
+        speaking_as="Bea",
+        participant_token=fixture.owner_token,
+    )
+
+    snapshot = await projections.snapshot(room_id=fixture.room.id, recipient=fixture.owner)
+    rendered = compact.room_state(snapshot)["recent_messages"][0]
+    assert rendered["said_by"] == "Bea"
+    # Claimed to be Bea; posted from the owner's seat, and the reader can see that.
+    assert rendered["from"] == fixture.owner.id
+    assert rendered["from"] != other.participant.id
+
+
+async def test_a_name_without_a_relay_is_refused_rather_than_dropped(make_room):
+    """A person's name attached to the agent's own words: one of the two is wrong and the room
+    cannot tell which. Storing it would attribute the agent's words to a person; dropping it
+    would silently discard an attribution somebody asked for."""
+    fixture = await make_room()
+    result = await mcp_tools.post_message(
+        body="ported the reducers",
+        speaking_as="Alan",
+        participant_token=fixture.owner_token,
+    )
+    assert result["ok"] is False
+    assert result["error"] == "invalid_command"
+    assert 'speaking_for="human"' in result["message"]
+
+
+async def test_the_relayed_name_is_content_inspected_like_the_body(make_room):
+    """Free text crossing a room boundary, so it goes through the disclosure path rather than
+    being trusted because it is short."""
+    from app.core.errors import PrivacyViolation
+
+    fixture = await make_room()
+    with pytest.raises(PrivacyViolation):
+        await messages.post(
+            participant=fixture.owner,
+            command=PostMessageCommand(
+                body="lunch?",
+                speaking_for=Speaker.HUMAN,
+                speaking_as="sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                disclosure=Disclosure(),
+            ),
+        )
+
+
+async def test_the_briefing_and_the_tool_both_tell_an_agent_to_pass_the_name():
+    """The room can carry the attribution; the agent has to supply it. A field nobody is told
+    about is a field nobody sets — and the failure is silent, because the message still posts."""
+    briefing = await mcp_tools.get_protocol_briefing()
+    assert "speaking_as" in briefing
+    assert "via Claude Code" in briefing
+    # And the convention itself, where a person will be told to type it.
+    assert "anyone want lunch?" in briefing
+    assert "> " in briefing

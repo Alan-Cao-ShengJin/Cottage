@@ -366,6 +366,7 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # agent, which is the honest reading: back then the room had no way to say otherwise,
     # and the wake rule treated all of them as the participant speaking for itself.
     ("messages", "speaking_for", "TEXT NOT NULL DEFAULT 'agent'"),
+    ("messages", "speaking_as", "TEXT NOT NULL DEFAULT ''"),
 )
 
 

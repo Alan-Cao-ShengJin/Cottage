@@ -145,6 +145,7 @@ export function useRoom(session: Session | null) {
                       (payload["to_participant_id"] as string | null) ?? null,
                     speaking_for:
                       (payload["speaking_for"] as "agent" | "human" | undefined) ?? "agent",
+                    speaking_as: String(payload["speaking_as"] ?? ""),
                     created_at: event.ts,
                   },
                 ],

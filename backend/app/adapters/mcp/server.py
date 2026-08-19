@@ -606,8 +606,35 @@ one from an agent does. Get it wrong one way and a room full of agents each pays
 turn for "anyone want lunch?"; wrong the other way and an instruction is filed as chatter.
 
 Relaying is not acting. If what they said was work for you, do it — do not repeat it here
-and call that progress. And if you genuinely cannot tell which they meant, **ask them.**
-Neither mistake can be recovered from the message afterwards.
+and call that progress.
+
+### The `>` convention, so nobody has to guess
+**A line your person begins with `>` is for the room, not for you.** Relay it with
+`post_message(speaking_for="human")` and **strip the `>`** before you do — the marker is
+addressing, not content.
+
+    > anyone want lunch?            -> relay this, verbatim, minus the marker
+    fix the failing reconnect test  -> this is work for you; do it
+
+**Pass their name in `speaking_as`.** The seat is you, so a relay without it reads as *you*
+asking about lunch. With it the room shows `Alan (via Claude Code)` — their name, and your
+seat beside it, because the room cannot verify who typed and will not pretend it can.
+
+It composes with a name. `> @Bea can you take the schema change?` is relayed *and* directed:
+pass `to_participant_id` for Bea, so it still wakes her. Being for the people in the room and
+being for one specific person are different questions, and `>` only answers the first.
+
+A message can be both. If some lines are marked and others are not, relay the marked ones and
+act on the rest — do not make your person choose between talking to a colleague and giving you
+an instruction in the same breath.
+
+The convention is **yours and your person's, not the room's.** Nothing server-side reads it:
+the room would then be inferring intent from prose, which is the thing it refuses to do. What
+the room stores is the answer you supply.
+
+And when there is no marker and you genuinely cannot tell which they meant, **ask them.**
+Neither mistake can be recovered from the message afterwards: an instruction filed as chatter
+is work nobody does, and chatter filed as coordination wakes everybody.
 
 ## Errors are information
 `lease_conflict` means someone else is on it — pick different work or say something.
@@ -2782,6 +2809,7 @@ async def post_message(
     to_participant_id: str | None = None,
     about_ref: str | None = None,
     speaking_for: str = "agent",
+    speaking_as: str = "",
     participant_token: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
@@ -2817,9 +2845,24 @@ async def post_message(
     default when you are reporting, asking or coordinating in your own voice.
 
     Relaying is not the same as acting: if what they said was an instruction to *you*, do
-    the work instead of repeating it here. **And when you genuinely cannot tell which they
-    meant, ask them** — posting an instruction as chat loses the work, posting chat as
-    coordination wakes everybody, and neither is recoverable from the message alone.
+    the work instead of repeating it here.
+
+    **Pass `speaking_as` with their name.** The seat is *you*, so without it a relayed
+    remark reads as you saying it and human-to-human chat looks like two agents talking. With
+    it a reader sees `Alan (via Claude Code)`: the name you supplied, and the seat beside it.
+    It is self-asserted and shown as such — the room cannot verify Alan said it — which is
+    why it never replaces the seat. Use the name your person actually goes by in this room.
+
+    **The `>` convention.** A line your person begins with `>` is for the room. Relay it with
+    `speaking_for="human"` and strip the marker — it is addressing, not content. `>` composes
+    with a name: `> @Bea can you take this?` is relayed *and* directed, so pass
+    `to_participant_id` and it still wakes her. If some lines are marked and others are not,
+    relay the marked ones and act on the rest. Nothing server-side reads the marker; the room
+    stores the answer you supply.
+
+    **When there is no marker and you cannot tell, ask them** — posting an instruction as
+    chat loses the work, posting chat as coordination wakes everybody, and neither is
+    recoverable from the message alone.
     """
     try:
         if speaking_for not in {s.value for s in Speaker}:
@@ -2831,6 +2874,7 @@ async def post_message(
                 body=body,
                 about_ref=about_ref,
                 speaking_for=Speaker(speaking_for),
+                speaking_as=speaking_as,
                 disclosure=_disclosure(to_participant_id=to_participant_id),
             ),
         )

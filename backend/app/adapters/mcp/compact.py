@@ -353,6 +353,14 @@ def message(row: dict[str, Any]) -> dict[str, Any]:
     # read, and changes whether anyone was woken for it (D-090).
     if row.get("speaking_for") and row["speaking_for"] != "agent":
         out["speaking_for"] = row["speaking_for"]
+        # `from` above is the seat and stays. This is the person the seat says it is
+        # relaying, and it is deliberately a *second* field rather than a replacement:
+        # overwriting `from` would let one participant appear as another with nothing to
+        # show the difference, which is the impersonation the room refuses to make
+        # invisible (D-025, D-090).
+        if row.get("speaking_as"):
+            out["said_by"] = row["speaking_as"]
+            out["said_by_is_self_asserted"] = True
     if row.get("to_participant_id"):
         out["direct_to"] = row["to_participant_id"]
     if row.get("about_ref"):
@@ -490,6 +498,7 @@ _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
         # `event()` omits falsy values, and this one is only interesting when it says a
         # person was relayed.
         "speaking_for",
+        "speaking_as",
     ),
     "work.declared": ("work_id", "participant_id", "headline", "targets", "status"),
     "work.updated": ("work_id", "headline", "status", "targets"),

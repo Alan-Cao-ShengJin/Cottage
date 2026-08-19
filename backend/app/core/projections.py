@@ -269,6 +269,10 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
                 # and a reader that cannot tell them apart is reading a transcript in which
                 # everybody sounds like an agent.
                 "speaking_for": row["speaking_for"],
+                # Self-asserted. Every renderer shows the seat beside it, never instead of
+                # it — displayed alone it would let one participant post under another
+                # participant's name with no visible difference (D-090).
+                "speaking_as": row["speaking_as"],
                 "created_at": row["created_at"],
             }
         )

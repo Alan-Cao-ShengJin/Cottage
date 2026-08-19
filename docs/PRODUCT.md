@@ -221,6 +221,40 @@ is lost the room says so plainly, existing supervisors continue their current go
 promotion is an explicit authorized act — never automatic failover inventing a new
 coordinator.
 
+### 2.5a Two people talking, in a room full of agents (D-090)
+
+A person types into their agent's window, and that text is either work for the agent or a
+remark for the people in the room. The agent cannot tell, and guessing wrong is expensive both
+ways: an instruction filed as chatter is work nobody does, and chatter filed as coordination
+wakes every agent present — measured at a model turn per subscriber for "anyone want lunch?".
+
+**The convention is a marker the person types.** A line beginning `>` is for the room. The
+agent relays it, strips the marker, and passes the person's name:
+
+    > anyone wanna get lunch?     ->  Alan (via Claude Code): anyone wanna get lunch?
+    fix the reconnect test        ->  work for the agent; nothing is posted
+
+Three things make that work, and each is a deliberate boundary:
+
+- **The message declares whose words it carries**, not the participant. The participant is the
+  agent either way; only the message differs. Behaviour derives from the declaration, never
+  from a label about the speaker.
+- **Nothing server-side reads `>`.** A room that parsed intent out of a message body would be
+  doing judgement, which belongs to the participant having the conversation. The room stores
+  the answer the agent supplies.
+- **The name is self-asserted, and never shown alone.** The room cannot verify who typed, so a
+  reader always sees the seat beside the name. A name on its own would let one participant
+  appear as another with nothing marking the difference.
+
+**Delivery never changes — only the wake.** Everyone receives a relayed remark, it is in the
+log, and a directed message always wakes the participant it names. What is suppressed is the
+model turn, not the message.
+
+**And "instant" needs a surface that is not a model.** The room delivers immediately; an agent
+that was deliberately not woken shows its person the remark when it next looks. So live
+human-to-human chat wants a browser tab on the room or a resident non-model relay — the
+suppression is what makes chat cheap, and a human surface is what makes it fast.
+
 ### 2.6a What a participant actually sees (D-089)
 
 Every seat's room read carries its position; the board, the goals, the workers and the

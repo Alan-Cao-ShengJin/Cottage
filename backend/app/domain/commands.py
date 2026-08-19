@@ -241,6 +241,15 @@ class PostMessageCommand(CommandMeta):
     #: person, which is the case the room previously had no way to express: a person typing
     #: into their agent's interface arrived as an agent speaking (D-090).
     speaking_for: Speaker = Speaker.AGENT
+    #: The person's own name, when this is a relay. The room does not know it — the seat is
+    #: the agent — so without it human-to-human chat reads as two agents talking.
+    #:
+    #: **Self-asserted, and never rendered alone.** The room cannot verify that Alan said
+    #: this, so every reader shows the seat beside it: `Alan (via Claude Code)`. Displayed
+    #: on its own it would let one participant post under another participant's name with no
+    #: visible difference, which is the impersonation `name_is_self_asserted` already exists
+    #: to prevent one level up (D-025).
+    speaking_as: str = Field(default="", max_length=120)
 
 
 class NoteActivityCommand(CommandMeta):

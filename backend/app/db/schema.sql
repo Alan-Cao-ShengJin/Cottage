@@ -551,6 +551,9 @@ CREATE TABLE IF NOT EXISTS messages (
     -- changes is whether other agents are woken. Defaulted so every row written before
     -- this reads as the participant speaking for itself, which is what they were.
     speaking_for       TEXT NOT NULL DEFAULT 'agent',
+    -- The person's name when this is a relay. Self-asserted: the room cannot verify that
+    -- Alan said it, so readers render it beside the seat rather than instead of it (D-090).
+    speaking_as        TEXT NOT NULL DEFAULT '',
     created_at         TEXT NOT NULL
 );
 
