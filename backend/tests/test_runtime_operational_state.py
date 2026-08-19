@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from app.core import eventlog, presence, runtime_state, tasks
+from app.core import eventlog, presence, runtime_state, tasks, work
 from app.core.errors import InvalidCommand
 from app.domain.commands import (
     ClaimTaskCommand,
     ConnectCommand,
     CreateTaskCommand,
+    DeclareWorkCommand,
     SetRuntimeStateCommand,
 )
 from app.domain.events import EventType
@@ -63,6 +64,55 @@ async def test_state_is_projected_for_the_connection_attachment(make_room, join)
         event.type is EventType.RUNTIME_STATE_CHANGED
         for event in await eventlog.read_since(room.room.id, 0)
     )
+
+
+async def test_monitoring_preserves_supplied_task_and_work_context(make_room, join):
+    """Monitoring ends cognition, not the runtime's durable coordination context."""
+    room = await make_room()
+    member = await join(room, display_name="Codex")
+    runtime = await _companion(member)
+    task = await tasks.create(
+        participant=member.participant,
+        command=CreateTaskCommand(title="Review reconnect handling"),
+    )
+    declaration = await work.declare(
+        participant=member.participant,
+        command=DeclareWorkCommand(
+            headline="Reviewing reconnect handling",
+            task_id=task.id,
+        ),
+    )
+
+    changed = await runtime_state.set_state(
+        participant=member.participant,
+        command=SetRuntimeStateCommand(
+            connection_id=runtime.connection.id,
+            state=RuntimeOperationalState.MONITORING,
+            task_id=task.id,
+            work_id=declaration.id,
+        ),
+    )
+
+    assert changed["task_id"] == task.id
+    assert changed["work_id"] == declaration.id
+    views = await presence.presence_for_room(await room.refresh())
+    projected = next(
+        runtime_view
+        for runtime_view in views[member.participant.id].runtimes
+        if runtime_view.ref == runtime.connection.attachment_id
+    )
+    assert projected.operation is not None
+    assert projected.operation.state is RuntimeOperationalState.MONITORING
+    assert projected.operation.task_id == task.id
+    assert projected.operation.work_id == declaration.id
+
+    event = next(
+        event
+        for event in reversed(await eventlog.read_since(room.room.id, 0))
+        if event.type is EventType.RUNTIME_STATE_CHANGED
+    )
+    assert event.payload["task_id"] == task.id
+    assert event.payload["work_id"] == declaration.id
 
 
 async def test_state_cannot_target_a_sibling_runtime(make_room, join):

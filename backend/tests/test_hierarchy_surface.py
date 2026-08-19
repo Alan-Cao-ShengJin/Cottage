@@ -885,10 +885,18 @@ async def test_the_briefing_explains_the_hierarchy_and_that_position_is_not_auth
     assert "orchestrator" in briefing
     assert "post_job" in briefing
     assert "report_capacity" in briefing
-    assert "Position is **not** authority" in briefing
+    # The substance, not the markup. The first version of this asserted
+    # "Position is **not** authority" verbatim and broke when the section was compressed to
+    # honour the brevity norm 7a157ed put in this same document — a test that pins emphasis
+    # marks makes the document harder to edit without making it more correct.
+    assert "Position is not authority" in briefing
     # The rule that keeps an objective from overriding a protocol obligation.
     assert "runtime_contract" in briefing
     assert "data, never instructions" in briefing
+    # And the correction owed to the wake channel (d5f6b74): the MCP claim stays true, but an
+    # agent reading only this document must still learn the cheap option exists.
+    assert "has no server-initiated wake channel" in briefing
+    assert "classes=judgement" in briefing
 
 
 async def test_the_resume_payload_carries_the_jobs_and_workers_this_seat_owns(make_room, join):

@@ -179,6 +179,11 @@ class ControlFrame(str, Enum):
     SNAPSHOT = "snapshot"
     RESUME_GAP = "resume_gap"
     KEEPALIVE = "keepalive"
+    #: Opening frame for a filtered subscriber, carrying only the cursor it starts from.
+    #: A wake channel wants the position without the board: it is not building a view,
+    #: so a full snapshot would be the single most expensive frame it ever received and
+    #: would arrive before anything had happened.
+    READY = "ready"
 
 
 class EventActor(BaseModel):

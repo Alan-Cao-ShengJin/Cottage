@@ -40,6 +40,7 @@ from ..core import (
 )
 from ..core.bus import bus
 from ..core.errors import Forbidden, InvalidCommand, ResumeGap, RoomClosed, RoomError
+from ..domain import relevance
 from ..domain.capabilities import SUGGESTED_CAPABILITIES, Capability
 from ..domain.commands import (
     AcceptJobCommand,
@@ -474,7 +475,26 @@ async def create_stream_ticket(room_id: str, participant: ParticipantDep) -> dic
 
 @router.websocket("/rooms/{room_id}/ws")
 async def websocket_stream(websocket: WebSocket, room_id: str) -> None:
-    """Resumable WebSocket delivery backed by the durable room event log."""
+    """Resumable WebSocket delivery backed by the durable room event log.
+
+    Two subscriber shapes over one socket, chosen by `classes`:
+
+    * `classes=all` (default) — every visible frame, plus the opening snapshot and
+      periodic keepalives. This is the browser: it is building a live view of the
+      board, and rendering a frame costs it nothing.
+    * `classes=judgement` — only events `domain.relevance` classes as needing a
+      decision, no snapshot, no keepalives. This is a **wake channel** for a
+      model-backed agent, where every delivered frame bills someone. Silence is the
+      correct output when nothing needs deciding, and a host that turns frames into
+      model turns will rate-limit or drop a firehose — so a keepalive every few
+      seconds would defeat the entire subscription.
+
+    The filtered mode deliberately does not honor the snapshot half of the resume
+    contract (`docs/PROTOCOL.md` §5). A wake subscriber keeps no mirror to reconcile;
+    it is told *that* something happened and reads the room over its own transport.
+    The cursor still advances across suppressed events, so nothing is replayed twice
+    and the position stays honest.
+    """
     try:
         participant = await stream_tickets.consume(
             websocket.query_params.get("ticket"), room_id=room_id
@@ -483,10 +503,14 @@ async def websocket_stream(websocket: WebSocket, room_id: str) -> None:
         since_seq = int(websocket.query_params.get("since_seq", "0"))
         if since_seq < 0:
             raise ValueError
+        classes = websocket.query_params.get("classes", "all")
+        if classes not in ("all", "judgement"):
+            raise ValueError
     except (RoomError, ValueError):
         await websocket.close(code=4401)
         return
 
+    wake_only = classes == "judgement"
     connection_id = websocket.query_params.get("connection_id")
     await websocket.accept()
     cursor = since_seq
@@ -494,6 +518,9 @@ async def websocket_stream(websocket: WebSocket, room_id: str) -> None:
         try:
             current = await eventlog.validate_cursor(room_id, cursor)
         except ResumeGap as exc:
+            # Still reported when filtering: losing history is itself a thing the
+            # reader must decide about, and it is the one case where a wake
+            # subscriber has to go and re-read the room.
             await websocket.send_json(
                 {"frame": ControlFrame.RESUME_GAP.value, "data": exc.to_payload()}
             )
@@ -501,9 +528,15 @@ async def websocket_stream(websocket: WebSocket, room_id: str) -> None:
             current = await eventlog.current_seq(room_id)
 
         if cursor == 0:
-            frame = await projections.snapshot(room_id=room_id, recipient=participant)
-            cursor = int(frame["snapshot_seq"])
-            await websocket.send_json({"frame": ControlFrame.SNAPSHOT.value, "data": frame})
+            if wake_only:
+                cursor = current
+                await websocket.send_json(
+                    {"frame": ControlFrame.READY.value, "data": {"cursor": cursor}}
+                )
+            else:
+                frame = await projections.snapshot(room_id=room_id, recipient=participant)
+                cursor = int(frame["snapshot_seq"])
+                await websocket.send_json({"frame": ControlFrame.SNAPSHOT.value, "data": frame})
 
         bus.prime(room_id, current)
         room = await store.load_room(room_id)
@@ -511,9 +544,21 @@ async def websocket_stream(websocket: WebSocket, room_id: str) -> None:
             batch = await eventlog.read_since(room_id, cursor)
             if batch:
                 for event in privacy.filter_events(batch, recipient=participant, room=room):
+                    if wake_only and not relevance.wakes(
+                        event_type=event.type,
+                        payload=event.payload,
+                        actor_participant_id=event.actor.participant_id,
+                        viewer_participant_id=participant.id,
+                        actor_kind=event.actor.kind,
+                        viewer_kind=participant.identity.kind,
+                    ):
+                        continue
                     await websocket.send_json(
                         {"frame": "event", "event": event.model_dump(mode="json")}
                     )
+                # Advances past suppressed events too. A filtered subscriber that
+                # rewound to the last frame it was *sent* would re-read every
+                # judgement event behind a quiet stretch on the next reconnect.
                 cursor = batch[-1].seq
                 if len(batch) >= eventlog.MAX_REPLAY_BATCH:
                     continue
@@ -526,7 +571,7 @@ async def websocket_stream(websocket: WebSocket, room_id: str) -> None:
             reached = await bus.wait_for(
                 room_id, cursor, timeout=float(settings.sse_keepalive_seconds)
             )
-            if reached <= cursor:
+            if reached <= cursor and not wake_only:
                 await websocket.send_json({"frame": ControlFrame.KEEPALIVE.value})
     except (WebSocketDisconnect, RuntimeError):
         return
