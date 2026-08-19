@@ -38,11 +38,11 @@ async def set_state(*, participant: Participant, command: SetRuntimeStateCommand
     if command.state is RuntimeOperationalState.MONITORING:
         summary = summary or "Monitoring room activity"
         waiting_reason = ""
-        task_id = None
-        work_id = None
-    else:
-        task_id = command.task_id
-        work_id = command.work_id
+    # Monitoring ends active cognition, not necessarily the runtime's durable task
+    # context. Preserve explicit references in every state; the validation below
+    # still prevents a runtime from inventing tasks or another seat's work card.
+    task_id = command.task_id
+    work_id = command.work_id
 
     known = [p.id for p in await store.list_participants(room.id)]
     privacy.check_disclosure(

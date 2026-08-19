@@ -207,6 +207,58 @@ async def test_reaped_session_reconnects_its_exact_declared_runtime(make_room) -
 
 
 @pytest.mark.asyncio
+async def test_complete_task_uses_the_mcp_sessions_exact_runtime(make_room) -> None:
+    """A multi-runtime seat completes through its bound runtime without ambiguity."""
+    from app.core import presence, store, tasks
+    from app.domain.commands import ClaimTaskCommand, ConnectCommand, CreateTaskCommand
+    from app.domain.room import RuntimeRole
+
+    room = await make_room()
+    ctx = ctx_for("abababababababababababababababab")
+    joined = await mcp_server.join_room(
+        invitation_token=room.join_token,
+        execution_mode="unattended_loop",
+        display_name="Multi-runtime agent",
+        ctx=ctx,
+    )
+    assert joined["ok"] is True
+
+    participant = await store.load_participant(joined["participant_id"])
+    task = await tasks.create(
+        participant=participant,
+        command=CreateTaskCommand(title="Finish from the bound MCP runtime"),
+    )
+    claimed = await tasks.claim(
+        participant=participant,
+        command=ClaimTaskCommand(
+            task_id=task.id,
+            connection_id=joined["connection_id"],
+        ),
+    )
+    await presence.connect(
+        participant=participant,
+        command=ConnectCommand(
+            capabilities=[],
+            transport="long_poll",
+            attachment_label="sibling-worker",
+            attachment_resumable=True,
+            runtime_role=RuntimeRole.COMPANION,
+        ),
+        transport="long_poll",
+    )
+
+    completed = await mcp_server.complete_task(
+        task_id=task.id,
+        fence=claimed.claim.fence,
+        result="Completed by the MCP runtime that claimed it.",
+        ctx=ctx,
+    )
+
+    assert completed["ok"] is True
+    assert completed["task"]["status"] == "done"
+
+
+@pytest.mark.asyncio
 async def test_explicit_token_restores_mcp_profile_after_server_restart(make_room) -> None:
     """Process memory may vanish while durable membership and connection rows remain.
 

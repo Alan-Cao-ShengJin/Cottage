@@ -1644,10 +1644,21 @@ async def complete_task(
     """
     try:
         participant = await _participant(ctx, participant_token)
+        key = _session_key(ctx)
+        binding = _session_connections.get(key) if key else None
+        connection_id = (
+            binding.connection_id
+            if binding is not None and binding.participant_id == participant.id
+            else None
+        )
         task = await tasks.complete(
             participant=participant,
             command=CompleteTaskCommand(
-                task_id=task_id, fence=fence, result=result, disclosure=_disclosure()
+                task_id=task_id,
+                fence=fence,
+                result=result,
+                connection_id=connection_id,
+                disclosure=_disclosure(),
             ),
         )
         return {"ok": True, "task": task.model_dump(mode="json")}
