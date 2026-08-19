@@ -1,0 +1,480 @@
+"""The wake channel: which events are worth spending a reader's turn on.
+
+These are cost tests, not disclosure tests. Privacy is enforced before relevance is
+ever consulted — `filter_events` runs first in the fanout — so nothing here asserts
+who may see what. What they pin is that a filtered subscriber is woken for decisions
+and left alone for narration, because a wake channel that fires on keepalives and
+activity notes is indistinguishable from the polling loop it exists to replace.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import dataclasses
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+from app.api import routes
+from app.api.routes import websocket_stream
+from app.config import settings
+from app.core import eventlog, stream_tickets
+from app.core.actors import actor_for
+from app.db import database as db
+from app.domain import relevance
+from app.domain.events import ControlFrame, EventType
+from app.domain.relevance import RelevanceClass
+
+pytestmark = pytest.mark.asyncio
+
+
+def _classify(event_type, payload=None, **kwargs) -> RelevanceClass:
+    return relevance.classify(event_type=event_type, payload=payload or {}, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# What earns a turn
+# ---------------------------------------------------------------------------
+
+
+async def test_work_offered_to_this_seat_wakes_it():
+    """The whole point: a joiner proposing a task must reach an idle agent."""
+    assert _classify(EventType.TASK_PROPOSED) is RelevanceClass.JUDGEMENT
+    assert relevance.wakes(event_type=EventType.TASK_PROPOSED, payload={})
+
+
+async def test_being_told_to_do_something_wakes():
+    for kind in (
+        EventType.DIRECTIVE_ISSUED,
+        EventType.TASK_STEERED,
+        EventType.QUESTION_ASKED,
+        EventType.RUNTIME_DRAINED,
+    ):
+        assert _classify(kind) is RelevanceClass.JUDGEMENT, kind
+
+
+async def test_losing_a_lease_wakes_because_nothing_else_says_so():
+    assert _classify(EventType.TASK_CLAIM_EXPIRED) is RelevanceClass.JUDGEMENT
+    assert _classify(EventType.TASK_EXECUTOR_CHANGED) is RelevanceClass.JUDGEMENT
+
+
+# ---------------------------------------------------------------------------
+# What must never spend a turn
+# ---------------------------------------------------------------------------
+
+
+async def test_narration_never_wakes_a_model():
+    """D-082 breadcrumbs are the feed, not news. One turn per breadcrumb is the
+    anti-pattern this module exists to prevent."""
+    assert _classify(EventType.ACTIVITY_NOTED, {"summary": "still going"}) is (RelevanceClass.NOISE)
+
+
+async def test_reattachment_and_healthy_presence_are_noise():
+    assert _classify(EventType.ATTACHMENT_REGISTERED) is RelevanceClass.NOISE
+    assert _classify(EventType.PRESENCE_CHANGED, {"liveness": "live_poll"}) is (
+        RelevanceClass.NOISE
+    )
+
+
+async def test_a_peer_going_quiet_is_news_even_though_presence_is_usually_noise():
+    """Suppressing the whole event type would throw away every peer disconnect,
+    which is the transition a supervisor most needs."""
+    for liveness in ("idle", "stale", "disconnected"):
+        assert _classify(EventType.PRESENCE_CHANGED, {"liveness": liveness}) is (
+            RelevanceClass.JUDGEMENT
+        ), liveness
+
+
+async def test_a_seat_is_not_woken_by_its_own_message():
+    mine = "part_me"
+    assert (
+        _classify(
+            EventType.MESSAGE_POSTED,
+            {"body": "hello"},
+            actor_participant_id=mine,
+            viewer_participant_id=mine,
+        )
+        is RelevanceClass.NOISE
+    )
+    assert (
+        _classify(
+            EventType.MESSAGE_POSTED,
+            {"body": "hello"},
+            actor_participant_id="part_someone_else",
+            viewer_participant_id=mine,
+        )
+        is RelevanceClass.JUDGEMENT
+    )
+
+
+async def test_own_checkpoint_still_wakes_because_it_came_from_the_companion():
+    """Two runtimes share one seat. A checkpoint attributed to me was written by my
+    companion, and its trouble report is news to the supervisor half."""
+    mine = "part_me"
+    assert (
+        _classify(
+            EventType.TASK_CHECKPOINTED,
+            {"summary": "the gate failed"},
+            actor_participant_id=mine,
+            viewer_participant_id=mine,
+        )
+        is RelevanceClass.JUDGEMENT
+    )
+
+
+# ---------------------------------------------------------------------------
+# The contested case: progress vs. trouble
+# ---------------------------------------------------------------------------
+
+
+async def test_a_checkpoint_is_routine_unless_it_reports_trouble():
+    assert _classify(EventType.TASK_CHECKPOINTED, {"summary": "ported 12 of 40"}) is (
+        RelevanceClass.ROUTINE
+    )
+    assert _classify(EventType.TASK_CHECKPOINTED, {"summary": "the suite is red"}) is (
+        RelevanceClass.JUDGEMENT
+    )
+
+
+async def test_trouble_is_read_structurally_before_it_is_read_lexically():
+    assert relevance.reports_trouble({"ok": False, "summary": "all good"})
+    assert not relevance.reports_trouble({"ok": True, "summary": "all good"})
+
+
+async def test_both_contraction_and_spelled_out_forms_count_as_trouble():
+    """`couldn't` was covered and `could not` was not, so 'gave up, could not reach
+    the room' classified as routine progress."""
+    for phrase in ("couldn't reach it", "could not reach it", "gave up"):
+        assert relevance.reports_trouble({"summary": phrase}), phrase
+
+
+async def test_an_unknown_event_type_renders_rather_than_disappearing():
+    """Everything unlisted is routine on purpose: a new event type must show up in a
+    feed rather than being silently dropped from one."""
+    assert _classify("some.type_added_next_quarter") is RelevanceClass.ROUTINE
+
+
+# ---------------------------------------------------------------------------
+# Drift protection
+# ---------------------------------------------------------------------------
+
+
+def _load_watcher_module():
+    """Import the standalone script by path.
+
+    Registered in `sys.modules` before `exec_module`, because its `@dataclass`
+    declarations under `from __future__ import annotations` resolve their annotations
+    through `sys.modules[cls.__module__]` and get `None` if the module is not there
+    yet.
+    """
+    name = "_room_watcher_under_test"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().parents[2] / "scripts" / "room_watcher.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
+    return module
+
+
+async def test_the_standalone_watcher_agrees_with_the_domain_on_what_wakes():
+    """`scripts/room_watcher.py` is stdlib-only by design and cannot import this
+    package, so the two lists are duplicated. Duplication that must agree is pinned
+    by a test rather than trusted: this fails the moment one side learns about an
+    event type and the other does not."""
+    watcher = _load_watcher_module()
+
+    domain_types = {t.value for t in relevance.JUDGEMENT_TYPES}
+    # The watcher folds the content-judged types into its `classify`, not its set.
+    watcher_types = set(watcher.JUDGEMENT_TYPES)
+
+    assert watcher_types - domain_types == set(), (
+        f"the watcher wakes on types the room does not: {watcher_types - domain_types}"
+    )
+    assert domain_types - watcher_types == set(), (
+        f"the room wakes on types the watcher does not: {domain_types - watcher_types}"
+    )
+    assert set(watcher.PRESENCE_WORTH_WAKING) == set(relevance.PRESENCE_WORTH_WAKING)
+
+
+async def test_the_two_classifiers_agree_on_every_wake_decision():
+    """Same inputs, same answer to *does this cost a turn* — including the checkpoint
+    content split, the rule most likely to be changed on one side only.
+
+    Deliberately compares the wake decision rather than the three-way class. The
+    routine/noise boundary is allowed to differ because the two readers do different
+    things with a non-waking event: the watcher renders it into `ROOM.md`, where
+    narration is wanted and free, while the wake channel renders nothing at all and so
+    has no use for the distinction. Pinning the full class here would force one
+    reader's display choice onto the other.
+    """
+    cases = [
+        (EventType.TASK_PROPOSED.value, {}),
+        (EventType.ACTIVITY_NOTED.value, {"summary": "narrating"}),
+        (EventType.TASK_CHECKPOINTED.value, {"summary": "ported 12 of 40"}),
+        (EventType.TASK_CHECKPOINTED.value, {"summary": "the suite is red"}),
+        (EventType.TASK_COMPLETED.value, {"result": "shipped"}),
+        (EventType.TASK_COMPLETED.value, {"result": "gave up, could not reach it"}),
+        (EventType.PRESENCE_CHANGED.value, {"liveness": "live_push"}),
+        (EventType.PRESENCE_CHANGED.value, {"liveness": "disconnected"}),
+        (EventType.ATTACHMENT_REGISTERED.value, {}),
+        (EventType.WORK_DECLARED.value, {}),
+    ]
+    watcher = _load_watcher_module()
+    for kind, payload in cases:
+        watcher_wakes = watcher.classify({"type": kind, "payload": payload}) == "judgement"
+        domain_wakes = relevance.wakes(event_type=kind, payload=payload)
+        assert watcher_wakes == domain_wakes, (
+            f"{kind} {payload}: watcher wakes={watcher_wakes} domain wakes={domain_wakes}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The transport contract
+# ---------------------------------------------------------------------------
+
+
+async def test_a_wake_subscriber_is_offered_a_cursor_not_a_board():
+    """A full snapshot would be the most expensive frame a wake channel ever
+    received, and it would arrive before anything had happened."""
+    assert ControlFrame.READY.value == "ready"
+    assert ControlFrame.READY is not ControlFrame.SNAPSHOT
+
+
+# ---------------------------------------------------------------------------
+# The endpoint, driven through its own socket contract
+# ---------------------------------------------------------------------------
+
+
+def _fast_keepalive(monkeypatch, seconds: float = 0.05) -> None:
+    """Shorten the keepalive so its absence in filtered mode is evidence, not luck.
+
+    `Settings` is a frozen dataclass, so the module reference is replaced rather than
+    the field mutated — `dataclasses.replace` re-runs the one validation it carries
+    (the room TTL bound), which this does not touch.
+    """
+    monkeypatch.setattr(
+        routes, "settings", dataclasses.replace(settings, sse_keepalive_seconds=seconds)
+    )
+
+
+class _FakeSocket:
+    """Enough WebSocket to drive `websocket_stream` and record what it sent."""
+
+    def __init__(self, **params: str) -> None:
+        self.query_params = params
+        self.frames: list[dict] = []
+        self.closed_with: int | None = None
+        self.accepted = False
+
+    async def accept(self) -> None:
+        self.accepted = True
+
+    async def send_json(self, data: dict) -> None:
+        self.frames.append(data)
+
+    async def close(self, code: int = 1000) -> None:
+        self.closed_with = code
+
+    def kinds(self) -> list[str]:
+        """Frame names, with each event frame named by its event type."""
+        return [
+            f["event"]["type"] if f.get("frame") == "event" else str(f.get("frame"))
+            for f in self.frames
+        ]
+
+
+async def _drive(socket: _FakeSocket, room_id: str, *, seconds: float = 0.6) -> None:
+    """Run the endpoint until it goes quiet, then cancel it.
+
+    A wake subscriber with nothing to say produces no frames at all, so there is no
+    natural end to wait for — that silence is the property under test.
+    """
+    with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+        await asyncio.wait_for(websocket_stream(socket, room_id), timeout=seconds)
+
+
+async def _append(room_id: str, participant, type_, payload: dict) -> None:
+    async with db.transaction() as tx:
+        await eventlog.append(
+            tx,
+            room_id=room_id,
+            type_=type_,
+            actor=actor_for(participant),
+            payload=payload,
+        )
+
+
+async def test_a_wake_subscriber_hears_the_proposal_and_nothing_else(make_room, join, monkeypatch):
+    """The scenario the channel exists for: a room full of narration, one task
+    proposed, and an idle agent that must be woken exactly once."""
+    # Keepalives every 50ms, so their absence below is evidence rather than luck.
+    _fast_keepalive(monkeypatch)
+    room = await make_room()
+    author = await join(room, display_name="Peer")
+    reader = await join(room, display_name="Agent")
+    start = await eventlog.current_seq(room.room.id)
+
+    for index in range(8):
+        await _append(
+            room.room.id,
+            author.participant,
+            EventType.ACTIVITY_NOTED,
+            {"phase": "working", "summary": f"still going {index}"},
+        )
+    await _append(
+        room.room.id, author.participant, EventType.TASK_PROPOSED, {"title": "Do the thing"}
+    )
+
+    ticket = await stream_tickets.issue(reader.participant)
+    socket = _FakeSocket(ticket=ticket.token, since_seq=str(start), classes="judgement")
+    await _drive(socket, room.room.id)
+
+    assert socket.accepted
+    assert socket.kinds() == ["task.proposed"], socket.kinds()
+
+
+async def test_the_same_socket_unfiltered_carries_the_narration_and_keepalives(
+    make_room, join, monkeypatch
+):
+    """The control. Default behavior is unchanged, which is what makes the filtered
+    mode's silence meaningful rather than a broken subscription."""
+    _fast_keepalive(monkeypatch)
+    room = await make_room()
+    author = await join(room, display_name="Peer")
+    reader = await join(room, display_name="Browser")
+    start = await eventlog.current_seq(room.room.id)
+
+    for index in range(3):
+        await _append(
+            room.room.id,
+            author.participant,
+            EventType.ACTIVITY_NOTED,
+            {"phase": "working", "summary": f"still going {index}"},
+        )
+
+    ticket = await stream_tickets.issue(reader.participant)
+    socket = _FakeSocket(ticket=ticket.token, since_seq=str(start))
+    await _drive(socket, room.room.id)
+
+    kinds = socket.kinds()
+    assert kinds.count("activity.noted") == 3, kinds
+    assert ControlFrame.KEEPALIVE.value in kinds, kinds
+
+
+async def test_a_wake_subscriber_opening_fresh_gets_a_cursor_not_the_board(
+    make_room, join, monkeypatch
+):
+    """`since_seq=0` means "I have no history" — for a browser that earns a snapshot
+    of the whole board, and for a wake channel it must not."""
+    _fast_keepalive(monkeypatch)
+    room = await make_room()
+    reader = await join(room, display_name="Agent")
+
+    ticket = await stream_tickets.issue(reader.participant)
+    socket = _FakeSocket(ticket=ticket.token, since_seq="0", classes="judgement")
+    await _drive(socket, room.room.id, seconds=0.3)
+
+    assert socket.kinds() == [ControlFrame.READY.value], socket.kinds()
+    ready = socket.frames[0]
+    assert ready["data"]["cursor"] == await eventlog.current_seq(room.room.id)
+    assert ControlFrame.SNAPSHOT.value not in socket.kinds()
+
+
+async def test_an_unknown_class_is_refused_rather_than_silently_widened(make_room, join):
+    """Failing open would hand a wake channel the full firehose, which its host
+    rate-limits — so the subscription would look alive and then be dropped."""
+    room = await make_room()
+    reader = await join(room, display_name="Agent")
+
+    ticket = await stream_tickets.issue(reader.participant)
+    socket = _FakeSocket(ticket=ticket.token, classes="everything")
+    await websocket_stream(socket, room.room.id)
+
+    assert socket.closed_with == 4401
+    assert not socket.accepted
+    assert socket.frames == []
+
+
+# ---------------------------------------------------------------------------
+# The client must fail closed against a server that ignores the filter
+# ---------------------------------------------------------------------------
+
+
+def _load_wake_channel():
+    name = "_wake_channel_under_test"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().parents[2] / "scripts" / "wake_channel.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
+    return module
+
+
+async def test_a_snapshot_on_a_filtered_subscription_is_refused_not_streamed():
+    """Found against the deployed instance, which predates `classes` and dropped it:
+    three narration notes became three wake-ups. The server-side guard rejects an
+    unknown *value* and cannot help against a server that never learned the parameter,
+    so the client must confirm the filter rather than assume it."""
+    wc = _load_wake_channel()
+    with pytest.raises(wc.UnfilteredServer, match="full snapshot"):
+        wc.handle_frame({"frame": "snapshot", "data": {"snapshot_seq": 6}}, cursor=0)
+
+
+async def test_a_keepalive_on_a_filtered_subscription_is_refused():
+    """The tell when resuming from a cursor, where no opening frame is sent at all —
+    so a snapshot check alone would miss an unfiltered resume."""
+    wc = _load_wake_channel()
+    with pytest.raises(wc.UnfilteredServer, match="keepalive"):
+        wc.handle_frame({"frame": "keepalive"}, cursor=9)
+
+
+async def test_the_filtered_path_still_wakes_and_advances():
+    wc = _load_wake_channel()
+    cursor, line = wc.handle_frame({"frame": "ready", "data": {"cursor": 6}}, cursor=0)
+    assert cursor == 6 and line is None
+
+    cursor, line = wc.handle_frame(
+        {
+            "frame": "event",
+            "event": {
+                "seq": 11,
+                "type": "task.proposed",
+                "actor": {"display_name": "Joiner"},
+                "payload": {"title": "Migrate the session store"},
+            },
+        },
+        cursor=cursor,
+    )
+    assert cursor == 11
+    assert line == "[11] task.proposed | Joiner | Migrate the session store"
+
+
+async def test_a_resume_gap_wakes_because_the_cursor_can_no_longer_be_trusted():
+    wc = _load_wake_channel()
+    cursor, line = wc.handle_frame({"frame": "resume_gap", "data": {}}, cursor=40)
+    assert cursor == 0
+    assert line is not None and "resume_gap" in line
+
+
+async def test_an_unknown_frame_is_logged_rather_than_woken_or_dropped_silently(capsys):
+    wc = _load_wake_channel()
+    cursor, line = wc.handle_frame({"frame": "something_new"}, cursor=7)
+    assert (cursor, line) == (7, None)
+    assert "unrecognised frame" in capsys.readouterr().err

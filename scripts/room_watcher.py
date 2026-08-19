@@ -178,6 +178,12 @@ JUDGEMENT_TYPES = frozenset(
         # Work is being offered to us, or taken away.
         "task.proposed",
         "task.cancelled",
+        # Execution moved between two runtimes of one seat. The holder did not change,
+        # so nothing else tells an executor it is no longer the executor.
+        "task.executor_changed",
+        # This runtime was told to stop. The decision is the only notice it gets —
+        # the room never learns whether the process ended (D-062).
+        "presence.runtime_drained",
         # We lost a lease we thought we held. Nothing else in the log says so.
         "task.claim_expired",
         # Two participants disagree about the same thing.
