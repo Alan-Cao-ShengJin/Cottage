@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import dataclasses
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -881,3 +882,50 @@ async def test_a_server_restart_reconnects_the_relay_instead_of_killing_it():
 
     assert watcher._close_code(_Socket()) == 1012
     assert watcher._close_code(object()) is None
+
+
+async def test_the_cursor_survives_an_abrupt_close_instead_of_being_discarded():
+    """The bug the *first* reconnect fix left behind, and the reason it shipped twice (D-091).
+
+    `websockets` splits a close in two: `ConnectionClosedOK` ends the iterator and falls
+    through to the return, while `ConnectionClosedError` is *raised* out of it. A server
+    restart sends 1012 — the second kind — so the return was unreachable in exactly the case
+    it was written for. The exception reached `run`, the assignment never happened, and because
+    the cursor is an int passed by value every position the socket had reached was discarded.
+
+    Two symptoms, one defect: with an explicit `--from-seq` the reconnect replays everything
+    since; with the default it starts from *now* and silently skips whatever arrived while it
+    was gone. A relay that replays and one that dies are the same failure from opposite ends.
+
+    Driven against a real socket rather than asserted structurally, because the first fix
+    passed every structural check it had.
+    """
+    import websockets
+
+    watcher = _load_wake_channel()
+
+    async def serve(connection):
+        await connection.send(json.dumps({"frame": "ready", "data": {"cursor": 40}}))
+        await connection.send(
+            json.dumps(
+                {
+                    "frame": "event",
+                    "event": {
+                        "seq": 41,
+                        "type": "task.proposed",
+                        "actor": {"display_name": "Bea"},
+                        "payload": {},
+                    },
+                }
+            )
+        )
+        # 1012 is what a deploy sends, and it is the raising kind.
+        await connection.close(code=1012, reason="service restart")
+
+    async with websockets.serve(serve, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        cursor, close_code = await watcher.stream_once(f"ws://127.0.0.1:{port}", cursor=0)
+
+    # The position the socket actually reached, returned rather than lost.
+    assert cursor == 41, "an abrupt close must not discard the cursor"
+    assert close_code in watcher.TRANSIENT_CLOSE_CODES or close_code == 1012

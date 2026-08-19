@@ -464,15 +464,39 @@ async def stream_once(url: str, *, cursor: int) -> tuple[int, int | None]:
 
     async with websockets.connect(url, max_size=None) as socket:
         log("connected; the room will push from here")
-        async for raw in socket:
-            try:
-                frame = json.loads(raw)
-            except (TypeError, ValueError):
-                log(f"ignored a frame that was not JSON: {raw!r:.120}")
-                continue
-            cursor, line = handle_frame(frame, cursor=cursor)
-            if line is not None:
-                print(line, flush=True)
+        try:
+            async for raw in socket:
+                try:
+                    frame = json.loads(raw)
+                except (TypeError, ValueError):
+                    log(f"ignored a frame that was not JSON: {raw!r:.120}")
+                    continue
+                cursor, line = handle_frame(frame, cursor=cursor)
+                if line is not None:
+                    print(line, flush=True)
+        except _ConnectionClosed:
+            # **The cursor must leave this function by return, never by exception.**
+            #
+            # `websockets` splits a close in two: `ConnectionClosedOK` ends the iterator and
+            # falls through below, while `ConnectionClosedError` is *raised* out of it. A
+            # server restart sends 1012, which is the second kind — so the return statement
+            # was unreachable in exactly the case it was written for. The exception reached
+            # `run`, `cursor = await stream_once(...)` never assigned, and `cursor` is an int
+            # passed by value, so every position this socket had reached was discarded.
+            #
+            # Two different symptoms follow, and both are the same defect (D-091, diagnosed by
+            # the Laptop 1 session after a redeploy):
+            #
+            # * With an explicit `--from-seq`, the next connect asks for it again and the room
+            #   replays everything since — a wall of old chat presented as new.
+            # * With the default, `since_seq=0` means "start from now" on a filtered
+            #   subscription, so the reconnect **skips whatever arrived while it was gone.**
+            #   That is the quieter and worse half: the relay says nothing happened.
+            #
+            # A relay that replays on reconnect and one that dies silently are the same
+            # failure from opposite ends — neither lets a reader trust that what arrived is
+            # what is new. One says nothing ever happens, the other says everything just did.
+            pass
     return cursor, _close_code(socket)
 
 
@@ -539,9 +563,10 @@ async def run(args: argparse.Namespace, token: str) -> int:
             log(f"ticket request failed ({exc.code}); retrying in {backoff:.0f}s")
             backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
         except _ConnectionClosed as exc:
-            # The bug this file existed to avoid, and the one it had. `ConnectionClosed`
-            # derives from `WebSocketException`, so it fell past every handler below and
-            # ended the process — silently, after the relay had already proved it worked.
+            # A backstop, and now only reachable for a close during the handshake itself —
+            # `stream_once` catches everything after that and returns its cursor. Kept because
+            # a close before the socket is open genuinely advanced nothing, so there is no
+            # position to preserve and starting over is correct.
             code = getattr(getattr(exc, "rcvd", None), "code", None)
             if code in TRANSIENT_CLOSE_CODES or code is None:
                 log(f"the socket dropped ({code}); reconnecting")
