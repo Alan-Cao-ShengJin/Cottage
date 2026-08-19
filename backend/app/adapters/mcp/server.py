@@ -1166,13 +1166,24 @@ async def await_room_events(
     `max_events` (newest kept). `detail="full"` returns whole envelopes, which on a busy
     room costs several thousand tokens of your context per call.
 
+    `timeout_seconds` is capped by the room's server-side ceiling, and the response
+    always reports what you actually got as `polled_seconds`. Size your loop on that
+    number rather than on what you asked for: a client requesting 240s against a 25s
+    ceiling wakes roughly ten times as often as it planned, and until now nothing in the
+    response said so.
+
     A `resume_gap` result means history you missed was truncated; call
     `get_room_state` and start from its `cursor`.
     """
     try:
         participant = await _participant(ctx, participant_token)
         room_id = participant.room_id
-        timeout = max(1.0, min(float(timeout_seconds), float(settings.max_long_poll_seconds)))
+        # Clamped rather than refused, because a client already looping must not start
+        # erroring on an upgrade. But a silent clamp let a live participant run ten times
+        # its intended wake rate with nothing in the response to reveal it, so the
+        # effective value is reported below and the difference is named when it matters.
+        requested_timeout = float(timeout_seconds)
+        timeout = max(1.0, min(requested_timeout, float(settings.max_long_poll_seconds)))
 
         current = await eventlog.validate_cursor(room_id, since_seq)
         bus.prime(room_id, current)
@@ -1209,6 +1220,9 @@ async def await_room_events(
             "events": payload_events,
             "cursor": cursor,
             "timed_out": not visible,
+            #: What this call actually blocked for. Always present, so a client sizes its
+            #: loop on the truth rather than on what it asked for.
+            "polled_seconds": timeout,
             "next_call": f"await_room_events(since_seq={cursor})",
             # Keyed off what this response actually carries, not off `visible`. The
             # coordination view suppresses activity notes (D-082), so a poll can wake
@@ -1222,6 +1236,20 @@ async def await_room_events(
                 else "Act on these events, then poll again with since_seq=cursor."
             ),
         }
+        if requested_timeout > timeout:
+            # Said plainly rather than left for the client to infer from a number it did
+            # not ask about: the whole failure was a participant confidently wrong about
+            # its own cost.
+            result["timeout_was_capped"] = {
+                "requested_seconds": requested_timeout,
+                "granted_seconds": timeout,
+                "note": (
+                    f"This room caps a long poll at {timeout:g}s, so it returned after "
+                    f"{timeout:g}s rather than {requested_timeout:g}s. Expect roughly "
+                    f"{requested_timeout / timeout:.0f}x more calls than you planned and "
+                    "size your loop on polled_seconds."
+                ),
+            }
         if dropped:
             # Never drop silently: a client that thinks it saw everything would
             # coordinate on a partial view.
@@ -1233,6 +1261,27 @@ async def await_room_events(
         return result
     except RoomError as exc:
         return _err(exc)
+
+
+def _session_connection_id(ctx: Context | None, participant: Participant) -> str | None:
+    """Which of this seat's runtimes is speaking, as an id core can compare against.
+
+    Every lease-gated command needs this, because a seat shared by a chat surface and a
+    companion is two runtimes with one name (D-032, D-034) and only one of them is the
+    task's executor. Passing `None` does not skip the check — it makes `caller_executor`
+    resolve the newest open connection instead, which is a guess, and a sibling that
+    attached after the claim wins it. That is how a runtime got refused permission to
+    finish work it was doing.
+
+    `None` is still returned when there is genuinely no bound session: an explicit-token
+    caller or an adapter test has no transport identity to offer, and inventing one would
+    be worse than admitting the absence.
+    """
+    key = _session_key(ctx)
+    binding = _session_connections.get(key) if key else None
+    if binding is not None and binding.participant_id == participant.id:
+        return binding.connection_id
+    return None
 
 
 async def _touch(participant: Participant, seq: int, ctx: Context | None = None) -> None:
@@ -1306,13 +1355,6 @@ async def note_activity(
                 "message": (f"phase must be one of {sorted(p.value for p in ActivityPhase)}."),
             }
         participant = await _participant(ctx, participant_token)
-        key = _session_key(ctx)
-        binding = _session_connections.get(key) if key else None
-        connection_id = (
-            binding.connection_id
-            if binding is not None and binding.participant_id == participant.id
-            else None
-        )
         result = await activity.note(
             participant=participant,
             command=NoteActivityCommand(
@@ -1321,7 +1363,7 @@ async def note_activity(
                 tool=tool,
                 task_id=task_id,
                 work_id=work_id,
-                connection_id=connection_id,
+                connection_id=_session_connection_id(ctx, participant),
                 disclosure=_disclosure(),
             ),
         )
@@ -1524,7 +1566,11 @@ async def claim_task(
         participant = await _participant(ctx, participant_token)
         task = await tasks.claim(
             participant=participant,
-            command=ClaimTaskCommand(task_id=task_id, requested_lease_seconds=lease_seconds),
+            command=ClaimTaskCommand(
+                task_id=task_id,
+                requested_lease_seconds=lease_seconds,
+                connection_id=_session_connection_id(ctx, participant),
+            ),
         )
         return {
             "ok": True,
@@ -1550,7 +1596,12 @@ async def renew_task_claim(
         participant = await _participant(ctx, participant_token)
         task = await tasks.renew(
             participant=participant,
-            command=RenewClaimCommand(task_id=task_id, fence=fence, extend_seconds=extend_seconds),
+            command=RenewClaimCommand(
+                task_id=task_id,
+                fence=fence,
+                extend_seconds=extend_seconds,
+                connection_id=_session_connection_id(ctx, participant),
+            ),
         )
         return {
             "ok": True,
@@ -1574,7 +1625,12 @@ async def release_task_claim(
         participant = await _participant(ctx, participant_token)
         task = await tasks.release(
             participant=participant,
-            command=ReleaseClaimCommand(task_id=task_id, fence=fence, note=note),
+            command=ReleaseClaimCommand(
+                task_id=task_id,
+                fence=fence,
+                note=note,
+                connection_id=_session_connection_id(ctx, participant),
+            ),
         )
         return {"ok": True, "task": task.model_dump(mode="json")}
     except RoomError as exc:
@@ -1658,20 +1714,13 @@ async def complete_task(
     """
     try:
         participant = await _participant(ctx, participant_token)
-        key = _session_key(ctx)
-        binding = _session_connections.get(key) if key else None
-        connection_id = (
-            binding.connection_id
-            if binding is not None and binding.participant_id == participant.id
-            else None
-        )
         task = await tasks.complete(
             participant=participant,
             command=CompleteTaskCommand(
                 task_id=task_id,
                 fence=fence,
                 result=result,
-                connection_id=connection_id,
+                connection_id=_session_connection_id(ctx, participant),
                 disclosure=_disclosure(),
             ),
         )
@@ -1721,7 +1770,11 @@ async def record_checkpoint(
         checkpoint = await checkpoints.append(
             participant=participant,
             command=AppendCheckpointCommand(
-                task_id=task_id, fence=fence, summary=summary, resume_state=resume
+                task_id=task_id,
+                fence=fence,
+                summary=summary,
+                resume_state=resume,
+                connection_id=_session_connection_id(ctx, participant),
             ),
         )
         return {"ok": True, "checkpoint": checkpoint.model_dump(mode="json")}

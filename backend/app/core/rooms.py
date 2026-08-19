@@ -44,6 +44,7 @@ from ..domain.identity import (
 from ..domain.room import (
     ROLE_RANK,
     RUNTIME_SCOPES,
+    UNTRUSTED_DENIED_SCOPES,
     Invitation,
     InvitationTargetKind,
     LeaveReason,
@@ -717,7 +718,37 @@ async def set_participant_role(
 
     target = await store.load_participant_for_room(room.id, command.target_participant_id)
 
+    # An untrusted identity loses the denied set *after* the grant resolves, so asking
+    # for one of those scopes used to succeed, emit `participant.scopes_changed`
+    # recording it, and then hand back a participant that did not have it. The admin was
+    # told yes and got no, with nothing in the room disagreeing — the exact shape D-024,
+    # D-026, D-027 and D-030 were all written about, and the reason `CommandMeta` rejects
+    # unknown fields rather than dropping them.
+    #
+    # Only an *explicit* request raises. A role default that happens to include a denied
+    # scope must still narrow quietly, or an admin could not set a role on an untrusted
+    # participant at all; that case is reported instead, below.
+    if command.scopes is not None and target.trust == TrustTier.UNTRUSTED:
+        refused = sorted(s.value for s in set(command.scopes) & UNTRUSTED_DENIED_SCOPES)
+        if refused:
+            raise Forbidden(
+                f"{', '.join(refused)} cannot be granted to an untrusted identity, so this "
+                f"request would have been recorded and then silently narrowed. Vouch for "
+                f"the participant first, or ask only for scopes it can hold.",
+                target_participant_id=target.id,
+                refused_scopes=refused,
+                trust=target.trust.value,
+            )
+
     scopes = authz.effective_scopes(command.role, command.scopes, target.trust)
+    # What the role would have carried for a trusted identity, minus what this one got.
+    # Returned so a caller reading the result can see the gap without diffing it against
+    # a table of role defaults it does not have.
+    withheld = sorted(
+        s.value
+        for s in set(authz.effective_scopes(command.role, command.scopes, TrustTier.MEMBER))
+        - set(scopes)
+    )
 
     async def body(tx: db.Tx) -> CommandOutcome:
         affected = await tx.execute(
@@ -737,6 +768,10 @@ async def set_participant_role(
                 "scopes": [s.value for s in scopes],
                 "changed_by_participant_id": participant.id,
                 "reason": command.reason,
+                # Present only when the grant was cut down. A reader of the log should be
+                # able to see that an admin asked for more than the participant can hold,
+                # rather than having to diff the result against a table of role defaults.
+                **({"withheld_scopes": withheld} if withheld else {}),
             },
             causation_id=command.command_id,
         )
