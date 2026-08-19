@@ -719,8 +719,11 @@ adapter-level on purpose, since the two role defects were found by a projection 
 the 52 core tests already passing. `tsc` skips in this environment (not installed); no frontend
 change was made in this stage.
 
-**Not verified live.** Not deployed, and `CLAUDE.md` is explicit that a green gate is not
-evidence for `adapters/` or `api/`. `docs/INTEROP.md` §3.1 states what may not be claimed yet.
+**Verified live (2026-08-20).** Was "not deployed" when written; the surface has since been
+deployed to `app.cottageai.dev` and exercised over the wire — the welcome sheet, `cross_org`, the
+job board, `room_role: orchestrator`, and the `classes=judgement,human_visible` subscription all
+answered from the live instance. `docs/INTEROP.md` §3.1 still states what may not be claimed
+beyond that.
 
 **Open:** stage 3 (worker pool and review gate in the companion, capacity reported from the
 runtime, parallel execution beyond the single `Worker.lease`), stage 4 (the orchestrator
@@ -801,7 +804,9 @@ That is correct and is now asserted rather than assumed away.
 The bar every later path must clear: add an adapter, add it to this harness.
 
 ### M2.1b — A work declaration must stay fresh while its owner is working
-**In progress (2026-08-15).** Decision recorded in **D-059** before implementation.
+**Done.** Decision recorded in **D-059** before implementation; `work_declarations.progress_at`
+is in the schema and `no_progress` is live in `core/work.py`. The header read "in progress" long
+after it landed.
 
 Two participants in one room — our companion and the Codex participant — were marked
 `work.stale reason=heartbeat_lapsed` while actively mid-step, because
@@ -1174,11 +1179,19 @@ Deepen M2.4: richer digests, pasteable turn output, lease tuning for `attended` 
   reachable seat; over-claiming sends work to one nobody is reading. The evidence above is what
   that decision should be made against.
 
-- **No second-vendor client has ever joined a room.** Every "verified" row in
-  `docs/INTEROP.md` was verified by our own software. Until that changes, cross-platform is a
-  design property, not an observed one. **This is now the most important open item**, and the
-  two things that used to block it — no reachable instance, no way for a stranger to
-  authenticate — are gone.
+- **Only one other vendor has ever joined a room, and the strongest form of the claim is
+  unrun.** This line previously read "no second-vendor client has ever joined a room", which
+  `docs/INTEROP.md` §2 has contradicted since 2026-08-15: a real ChatGPT connector discovered the
+  authorization server from a 401, registered under RFC 7591, ran PKCE, joined a room holding a
+  Claude Code participant, posted, and completed a task — re-confirmed 2026-08-18 after a
+  regression and repair. INTEROP is the accountability record and wins; this list had simply gone
+  stale, and the correction matters because the stale version understates what has been observed
+  while the true version still names a real gap.
+  What remains open is the *strength* of the claim, not its existence: one other vendor, through
+  one path (MCP + OAuth). Codex, Cursor, Gemini and Grok are untested, and **four vendors at once
+  with humans on each end has never been run.** Codex and claude.ai web are already
+  `implemented`, so the next step is a connection attempt rather than development — which is what
+  keeps this the most important open item.
 - **PostgreSQL compatibility is argued, not demonstrated** (D-011). No invariant depends on
   SQLite locking, but that needs proving: a migration mechanism, a `TEXT` vs `timestamptz`
   review, and the concurrency invariants (I1, I3) run against Postgres. Deferred to M5 by

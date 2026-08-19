@@ -208,11 +208,16 @@ absent and become failing assertions the moment it is installed. An adapter that
 task but not a job, or a lease but not a goal, cannot host the room §4 describes — and a matrix
 that stayed quiet about that is the drift this file exists to catch.
 
-**Not yet observed live.** The hierarchy surface has a green gate and no deployment behind it.
-Per `CLAUDE.md`, a green gate is explicitly not evidence for `adapters/` or `api/`, so no row
-in §2 may be widened to claim hierarchy interop until a real outside client posts a job or
-acknowledges a goal against the deployed instance. The supervisor-assignment path needs a
-second identity on a second host and has not been exercised at all.
+**Deployed, but not yet observed with an outside client.** The "no deployment behind it" half of
+this note went stale on 2026-08-20: the surface is live on `app.cottageai.dev` and was exercised
+over the wire by our own client — the job board, `room_role: orchestrator`, and the
+`classes=judgement,human_visible` subscription all answered from the deployed instance.
+
+The restriction it imposed still stands, and is the part that matters. Our own client is not
+evidence of interop, so **no row in §2 may be widened to claim hierarchy interop until a real
+outside client posts a job or acknowledges a goal against the deployed instance.** The
+supervisor-assignment path needs a second identity on a second host and has not been exercised at
+all.
 
 ## 4. What must stay true for universality
 
