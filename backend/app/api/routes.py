@@ -445,10 +445,26 @@ async def get_events(
         await bus.wait_for(room_id, since_seq, timeout=wait_seconds)
         batch = await eventlog.read_since(room_id, since_seq, limit=limit)
     room = await store.load_room(room_id)
-    events = [
-        event.model_dump(mode="json")
-        for event in privacy.filter_events(batch, recipient=participant, room=room)
-    ]
+    # Each event carries the class `domain.relevance` gives it *for this reader*. The
+    # WebSocket wake channel uses the same judgement to decide what to deliver; here nothing
+    # is withheld, the class is simply stated, so a polling client stops re-deriving it.
+    #
+    # That mattered concretely: the companion had grown its own three-tier table, and two
+    # classifiers with different vocabularies is worse than either (D-089). It is computed
+    # per recipient because the interesting rules — a message read back to its author, an
+    # allocation naming this seat — are about who is reading.
+    events = []
+    for event in privacy.filter_events(batch, recipient=participant, room=room):
+        body = event.model_dump(mode="json")
+        body["relevance"] = relevance.classify(
+            event_type=event.type,
+            payload=event.payload,
+            actor_participant_id=event.actor.participant_id,
+            viewer_participant_id=participant.id,
+            actor_kind=event.actor.kind,
+            viewer_kind=participant.identity.kind,
+        ).value
+        events.append(body)
     cursor = batch[-1].seq if batch else since_seq
     result: dict[str, Any] = {
         "ok": True,

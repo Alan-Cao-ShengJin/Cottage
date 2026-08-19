@@ -84,51 +84,42 @@ RENEW_AT_FRACTION = 0.4
 # Relevance tiers are deliberately protocol-shaped rather than executor-shaped.
 # Routine events update local continuity without waking cognition; ambient room talk
 # is coalesced; direct work and control wake immediately.
-IMMEDIATE_EVENT_TYPES = frozenset(
-    {
-        "directive.issued",
-        "task.proposed",
-        "question.answered",
-        "task.steered",
-        "task.executor_changed",
-    }
-)
-AMBIENT_EVENT_TYPES = frozenset(
-    {
-        "message.posted",
-        "task.checkpointed",
-        "task.completed",
-        "task.blocked",
-        "task.unblocked",
-        "conflict.detected",
-        "conflict.resolved",
-        "work.declared",
-        "work.updated",
-        "work.ended",
-        # The coordination hierarchy (D-088). Another seat's allocation and direction are
-        # worth a look but not worth interrupting for; the two that concern *this* seat are
-        # promoted to `immediate` by `_event_tier`, which reads the payload rather than
-        # trusting the type. `supervisor.capacity_changed` and `worker.state_changed` are
-        # deliberately absent: they churn like presence and describe the wire, not the work.
-        "job.posted",
-        "job.assigned",
-        "job.closed",
-        "job.state_changed",
-        "supervisor.goal_replaced",
-        "supervisor.goal_closed",
-        "participant.room_role_assigned",
-        "worker.finished",
-    }
-)
-
-#: Event types whose relevance depends on *whom* they name, not on what they are. Handled
-#: exactly as `message.posted` already is: a goal replaced for somebody else is context, and
-#: the same event addressed to this seat changes what it is responsible for right now.
-_ADDRESSED_EVENT_FIELDS: dict[str, str] = {
-    "supervisor.goal_replaced": "target_supervisor_participant_id",
-    "supervisor.goal_closed": "participant_id",
-    "job.assigned": "assigned_to_participant_id",
+#: The room says what an event costs this reader; this runtime does not decide.
+#:
+#: There used to be two tables here — `IMMEDIATE_EVENT_TYPES`, `AMBIENT_EVENT_TYPES` and an
+#: addressed-field map — duplicating `backend/app/domain/relevance.py` with a different
+#: vocabulary. Two classifiers that must agree and cannot be tested together is the shape of
+#: a slow divergence, and the room's copy is the better-placed one: it already knows who is
+#: reading, so it can answer "is this addressed to me", which was the only reason this side
+#: looked necessary. `GET /events` now states `relevance` per event and this maps it onto the
+#: two things the loop actually branches on (D-089).
+#:
+#: What stays here is what the server genuinely cannot know: how long to coalesce a quiet
+#: stretch, what state each queued reaction is in, and whether a turn is already running.
+_RELEVANCE_TO_TIER: dict[str, str] = {
+    # Worth a turn. The room decided that, per reader.
+    "judgement": "immediate",
+    # Worth reading when something else wakes us. Coalesced behind the debounce window.
+    "routine": "ambient",
+    # Not worth a line.
+    "noise": "routine",
 }
+
+#: Where a relevance class this build has never heard of lands. Surfaced rather than dropped,
+#: matching `relevance.py`'s own rule that an unlisted type is ROUTINE: a relay that quietly
+#: stops mentioning things is the failure worth engineering against.
+_UNKNOWN_CLASS_TIER = "ambient"
+
+#: Where an event with *no* class at all lands - an older server, or a delivery path that
+#: states none.
+#:
+#: Deliberately `routine`, and this is the one place the two defaults differ. Treating an
+#: unclassified page as ambient would make narration and presence churn into reaction
+#: candidates, which is exactly the firehose the wake channel exists to avoid: pointed at a
+#: server that predates the class, the companion would react to everything while believing it
+#: had been told to. So an unclassified event is ignored *except* for the one distinction
+#: this loop cannot do without, which `_event_tier` applies directly - being spoken to.
+_UNCLASSIFIED_TIER = "routine"
 
 MAX_LOCAL_EVENTS = 120
 MAX_CONTEXT_EVENTS = 40
@@ -2545,12 +2536,30 @@ class Worker:
         self.monitor_state_sink(self.cursor, pending, reacted)
 
     def _event_tier(self, event: dict[str, Any]) -> str:
-        type_ = str(event.get("type") or "")
-        payload = event.get("payload") or {}
+        """Translate the room's relevance class into what this loop does about it.
+
+        A translation, not a judgement. The room has already decided what this event costs
+        *this reader*, including the rules that need to know who is reading - a message read
+        back to its author, an allocation naming this seat. Re-deciding it here is how two
+        answers to one question drift apart.
+
+        One local rule survives, and only because the room cannot see it: an `@mention` of
+        this runtime's display name in a message body. The room already classes a message
+        from another participant as judgement, so this can only ever *keep* a wake the room
+        also wanted - it cannot manufacture one.
+        """
+        stated = str(event.get("relevance") or "")
+        if stated:
+            return _RELEVANCE_TO_TIER.get(stated, _UNKNOWN_CLASS_TIER)
+
+        # No class on the wire. Keep only being-spoken-to; ignore the rest rather than
+        # treating an unclassified page as ambient, which would turn narration and presence
+        # churn into reaction candidates.
         actor = event.get("actor") or {}
         if actor.get("participant_id") == self.participant_id:
             return "routine"
-        if type_ == "message.posted":
+        payload = event.get("payload") or {}
+        if str(event.get("type") or "") == "message.posted":
             body = str(payload.get("body") or "").casefold()
             display_name = str(
                 (self.latest_state.get("you") or {}).get("display_name") or ""
@@ -2561,20 +2570,7 @@ class Worker:
                 if payload.get("to_participant_id") == self.participant_id or mentioned
                 else "ambient"
             )
-        # Addressed events (D-089): a goal replaced for another supervisor, or a job
-        # allocated to somebody else, is context. The same event naming this seat changes what
-        # it is responsible for right now, so it is promoted rather than debounced. Read from
-        # the payload for the same reason `message.posted` is: the type alone cannot tell you
-        # whether it is about you, and waking for every room-wide allocation would spend one
-        # participant's context narrating another's.
-        addressed_field = _ADDRESSED_EVENT_FIELDS.get(type_)
-        if addressed_field is not None:
-            return "immediate" if payload.get(addressed_field) == self.participant_id else "ambient"
-        if type_ in IMMEDIATE_EVENT_TYPES:
-            return "immediate"
-        if type_ in AMBIENT_EVENT_TYPES:
-            return "ambient"
-        return "routine"
+        return _UNCLASSIFIED_TIER
 
     def _control_fast_path(self, event: dict[str, Any]) -> None:
         if event.get("type") == "supervisor.goal_replaced":

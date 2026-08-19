@@ -254,6 +254,98 @@ async def test_both_contraction_and_spelled_out_forms_count_as_trouble():
         assert relevance.reports_trouble({"summary": phrase}), phrase
 
 
+async def test_direction_addressed_to_this_seat_wakes_it_and_a_peers_does_not():
+    """The coordination hierarchy's addressed events (D-089), on the `message.posted` shape.
+    A room-wide allocation waking every agent in the room is the cost this channel exists to
+    avoid; the same event naming this seat changes what it is responsible for right now."""
+    for kind, field in relevance.ADDRESSED_JUDGEMENT_FIELDS.items():
+        assert relevance.wakes(
+            event_type=kind, payload={field: "me"}, viewer_participant_id="me"
+        ), kind
+        assert not relevance.wakes(
+            event_type=kind, payload={field: "someone-else"}, viewer_participant_id="me"
+        ), kind
+        # Rendered rather than silenced: somebody else's direction changing is news worth a
+        # line, and this set is deliberately not in the unconditional JUDGEMENT_TYPES.
+        assert (
+            relevance.classify(
+                event_type=kind, payload={field: "someone-else"}, viewer_participant_id="me"
+            )
+            is relevance.RelevanceClass.ROUTINE
+        ), kind
+
+
+async def test_a_reader_that_cannot_say_who_it_is_renders_rather_than_waking():
+    for kind, field in relevance.ADDRESSED_JUDGEMENT_FIELDS.items():
+        assert not relevance.wakes(event_type=kind, payload={field: "me"}), kind
+
+
+async def test_capacity_and_declared_worker_state_are_explicit_noise():
+    """They churn like presence. Explicit rather than defaulted, because the default is
+    ROUTINE and these would render a line per capacity report and per declared state change."""
+    for kind in relevance.HIERARCHY_NOISE_TYPES:
+        assert (
+            relevance.classify(event_type=kind, payload={"participant_id": "me"})
+            is relevance.RelevanceClass.NOISE
+        ), kind
+
+
+async def test_a_finished_worker_wakes_only_when_it_did_not_land():
+    """Same split as a checkpoint: one that finished cleanly is progress, and one that gave up
+    is the most important thing its supervisor can be told."""
+    clean = {"state": "completed", "summary": "ported the reducers", "result_reference": "ckp_1"}
+    assert not relevance.wakes(event_type="worker.finished", payload=clean)
+    assert relevance.wakes(event_type="worker.finished", payload={"state": "failed", "summary": ""})
+
+
+async def test_a_terminal_failure_state_is_read_structurally_not_lexically():
+    """`failed` and `rejected` were caught only by accident — `state` is in OUTCOME_FIELDS and
+    TROUBLE matches `fail\\w*`. `cancelled` was matched by nothing at all, so renaming a state
+    or adding one could silently stop a wake. The states are named now."""
+    assert relevance.reports_trouble({"state": "cancelled"})
+    assert relevance.reports_trouble({"state": "abandoned"})
+    assert not relevance.reports_trouble({"state": "completed"})
+    # And the structural read comes first: no prose is needed for it to fire.
+    assert relevance.reports_trouble({"state": "failed"})
+
+
+async def test_the_long_poll_states_the_class_so_a_poller_stops_deriving_it(make_room, join):
+    """The companion polls `GET /events` rather than holding the wake socket, so without this
+    it had no way to consume the room's judgement and grew its own table instead."""
+    from app.core import messages
+    from app.domain.commands import PostMessageCommand
+    from app.domain.disclosure import Disclosure
+
+    fixture = await make_room()
+    reader = await join(fixture, display_name="Bea")
+    # Directed, deliberately. An *undirected* remark from a human identity is NOISE under
+    # a309cfb, and the room owner here is one — so an undirected message would have proved the
+    # field is populated while quietly asserting the wrong value.
+    await messages.post(
+        participant=fixture.owner,
+        command=PostMessageCommand(
+            body="please look at this",
+            disclosure=Disclosure(to_participant_id=reader.participant.id),
+        ),
+    )
+
+    from app.api import routes as http
+
+    # Every argument explicit: called as a plain coroutine, FastAPI's `Query` defaults are
+    # unresolved `Query` objects rather than ints.
+    page = await http.get_events(
+        room_id=fixture.room.id,
+        participant=reader.participant,
+        since_seq=0,
+        limit=200,
+        wait_seconds=0,
+    )
+    classes = {e["type"]: e["relevance"] for e in page["events"]}
+    assert classes["message.posted"] == "judgement"
+    # Every event carries one, so a reader never has to guess which are missing.
+    assert all("relevance" in e for e in page["events"])
+
+
 async def test_an_unknown_event_type_renders_rather_than_disappearing():
     """Everything unlisted is routine on purpose: a new event type must show up in a
     feed rather than being silently dropped from one."""

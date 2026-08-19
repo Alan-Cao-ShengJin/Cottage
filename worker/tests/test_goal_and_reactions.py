@@ -231,26 +231,44 @@ def test_completed_records_are_pruned_before_anything_unfinished_is_touched():
 # ---------------------------------------------------------------------------
 
 
-def test_a_goal_replaced_for_this_seat_is_immediate_and_for_another_seat_is_ambient():
-    """The type alone cannot say whether an event is about you. Waking for every room-wide
-    allocation would spend one participant's context narrating another's."""
+def test_the_rooms_class_decides_the_tier_and_this_runtime_only_translates():
+    """The companion had grown its own three-tier table duplicating domain/relevance.py with
+    a different vocabulary. Two classifiers that must agree and cannot be tested together is
+    the shape of a slow divergence, so the room's copy won: it already knows who is reading,
+    which was the only reason a local table looked necessary (D-089).
+
+    The classification tests for these event types now live in
+    `backend/tests/test_wake_channel_relevance.py`, which is where the decision is made."""
     worker = _worker()
-    mine = _event(
-        20, "supervisor.goal_replaced", payload={"target_supervisor_participant_id": "me"}
+    assert worker._event_tier(_event(20, "anything.at.all") | {"relevance": "judgement"}) == (
+        "immediate"
     )
-    theirs = _event(
-        21, "supervisor.goal_replaced", payload={"target_supervisor_participant_id": "someone"}
-    )
-    assert worker._event_tier(mine) == "immediate"
-    assert worker._event_tier(theirs) == "ambient"
+    assert worker._event_tier(_event(21, "anything.at.all") | {"relevance": "routine"}) == "ambient"
+    assert worker._event_tier(_event(22, "anything.at.all") | {"relevance": "noise"}) == "routine"
 
 
-def test_a_job_assigned_to_this_seat_is_immediate():
+def test_a_class_this_build_has_never_heard_of_surfaces_rather_than_vanishing():
+    """`relevance.py` defaults an unlisted type to ROUTINE for this reason, and the rule holds
+    one layer out: a relay that quietly stops mentioning things is the failure to engineer
+    against."""
     worker = _worker()
-    mine = _event(22, "job.assigned", payload={"assigned_to_participant_id": "me"})
-    theirs = _event(23, "job.assigned", payload={"assigned_to_participant_id": "other"})
-    assert worker._event_tier(mine) == "immediate"
-    assert worker._event_tier(theirs) == "ambient"
+    assert worker._event_tier(_event(24, "job.posted") | {"relevance": "urgent"}) == "ambient"
+
+
+def test_an_unclassified_page_keeps_only_being_spoken_to():
+    """A server that predates the field states no class. Treating that as ambient would make
+    narration and presence churn into reaction candidates — the exact firehose the wake
+    channel exists to avoid — so everything else is ignored instead."""
+    worker = _worker()
+    assert worker._event_tier(_event(25, "activity.noted", payload={"summary": "x"})) == "routine"
+    assert worker._event_tier(_event(26, "presence.changed")) == "routine"
+    assert (
+        worker._event_tier(_event(27, "job.assigned", payload={"assigned_to_participant_id": "me"}))
+        == "routine"
+    )
+    directed = _event(28, "message.posted", payload={"body": "hi", "to_participant_id": "me"})
+    assert worker._event_tier(directed) == "immediate"
+    assert worker._event_tier(_event(29, "message.posted", payload={"body": "chat"})) == "ambient"
 
 
 def test_capacity_churn_stays_routine_and_never_queues_a_turn():

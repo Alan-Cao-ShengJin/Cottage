@@ -85,8 +85,45 @@ PRESENCE_WORTH_WAKING: frozenset[str] = frozenset({"disconnected", "stale", "idl
 #: Types split by content rather than by name, because the room stores no structured
 #: "did it work" flag for either: a checkpoint carries free-text `summary` and a
 #: completion a free-text `result`, so the prose is the only evidence there is.
+#:
+#: `worker.finished` joins them and is the one member that *does* have a structured answer
+#: — a `state` of `failed` says so outright. It is handled here anyway because the split is
+#: the same split: a worker that finished cleanly is progress, and one that gave up is the
+#: most important thing its supervisor can be told (D-089).
 CONTENT_JUDGED_TYPES: frozenset[EventType] = frozenset(
-    {EventType.TASK_CHECKPOINTED, EventType.TASK_COMPLETED}
+    {EventType.TASK_CHECKPOINTED, EventType.TASK_COMPLETED, EventType.WORKER_FINISHED}
+)
+
+#: Terminal states meaning the work did not land. Read structurally, before the prose.
+#:
+#: The lexical path already catches `failed` and `rejected` by accident — `state` is in
+#: `OUTCOME_FIELDS` and `TROUBLE` matches `fail\w*` and `reject\w*`. An accident is a poor
+#: guard: renaming a state, or `cancelled`, which the pattern does not match at all, would
+#: silently stop a wake. So the states are named.
+FAILED_STATES: frozenset[str] = frozenset({"failed", "rejected", "cancelled", "abandoned"})
+
+#: Event types whose relevance depends on *whom* they name rather than on what they are,
+#: mapped to the payload field naming them. Handled exactly as `message.posted` already is,
+#: for the same reason: a goal replaced for another supervisor is worth rendering and not
+#: worth a turn, while the same event addressed to this seat changes what it is responsible
+#: for right now (D-089).
+#:
+#: Deliberately **not** in `JUDGEMENT_TYPES`. That set is unconditional, and a room-wide
+#: allocation waking every agent in the room is the cost a wake channel exists to avoid. A
+#: non-match falls to `ROUTINE`, never `NOISE`: somebody else's direction changing is news
+#: worth a line.
+ADDRESSED_JUDGEMENT_FIELDS: dict[str, str] = {
+    EventType.GOAL_REPLACED.value: "target_supervisor_participant_id",
+    EventType.GOAL_CLOSED.value: "participant_id",
+    EventType.JOB_ASSIGNED.value: "assigned_to_participant_id",
+}
+
+#: Hierarchy events that churn like presence. Explicit rather than defaulted, because the
+#: default is `ROUTINE` and these would then render a line per capacity report and a line
+#: per declared worker state change. A supervisor's capacity is pulled when somebody is
+#: about to allocate, and a worker's state is its supervisor's claim rather than news.
+HIERARCHY_NOISE_TYPES: frozenset[EventType] = frozenset(
+    {EventType.CAPACITY_CHANGED, EventType.WORKER_STATE_CHANGED}
 )
 
 #: Free-text fields that may carry a report of trouble.
@@ -118,6 +155,9 @@ def reports_trouble(payload: Mapping[str, Any]) -> bool:
     for flag in ("ok", "success", "succeeded", "passed"):
         if payload.get(flag) is False:
             return True
+    state = payload.get("state")
+    if isinstance(state, str) and state in FAILED_STATES:
+        return True
     for field_name in OUTCOME_FIELDS:
         value = payload.get(field_name)
         if isinstance(value, str) and TROUBLE.search(value):
@@ -201,6 +241,18 @@ def classify(
         # channel, not the surface work happens on.
         return RelevanceClass.NOISE
 
+    if kind in {t.value for t in HIERARCHY_NOISE_TYPES}:
+        return RelevanceClass.NOISE
+    addressed_field = ADDRESSED_JUDGEMENT_FIELDS.get(kind)
+    if addressed_field is not None:
+        # Judgement only when it names this reader. With no viewer there is nothing to
+        # compare against, so it renders rather than waking — the safe direction for a
+        # reader that cannot say who it is.
+        return (
+            RelevanceClass.JUDGEMENT
+            if viewer_participant_id and body.get(addressed_field) == viewer_participant_id
+            else RelevanceClass.ROUTINE
+        )
     if kind in {t.value for t in JUDGEMENT_TYPES}:
         return RelevanceClass.JUDGEMENT
     if kind in {t.value for t in CONTENT_JUDGED_TYPES}:

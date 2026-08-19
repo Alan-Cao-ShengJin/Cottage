@@ -205,6 +205,27 @@ JUDGEMENT_TYPES = frozenset(
 #: disconnect, which is precisely the event a supervisor needs to act on.
 PRESENCE_WORTH_WAKING = frozenset({"disconnected", "stale", "idle"})
 
+#: Terminal states meaning the work did not land, read structurally before the prose: the
+#: lexical path catches `failed` and `rejected` only by accident and misses `cancelled`
+#: entirely. Mirrors `domain/relevance.FAILED_STATES`.
+FAILED_STATES = frozenset({"failed", "rejected", "cancelled", "abandoned"})
+
+#: Events whose relevance depends on whom they name, mapped to the field naming them.
+#: Mirrors `domain/relevance.ADDRESSED_JUDGEMENT_FIELDS`. Not in `JUDGEMENT_TYPES`, because
+#: that set is unconditional and a room-wide allocation must not wake every reader.
+ADDRESSED_JUDGEMENT_FIELDS = {
+    "supervisor.goal_replaced": "target_supervisor_participant_id",
+    "supervisor.goal_closed": "participant_id",
+    "job.assigned": "assigned_to_participant_id",
+}
+
+#: Hierarchy events that churn like presence: a line per capacity report and a line per
+#: declared worker state change would make this file unreadable. Mirrors
+#: `domain/relevance.HIERARCHY_NOISE_TYPES`.
+HIERARCHY_NOISE_TYPES = frozenset(
+    {"supervisor.capacity_changed", "worker.state_changed"}
+)
+
 #: Free-text fields that may contain a report of trouble. A checkpoint's `summary` and a
 #: completion's `result` are prose: the room stores no structured "did it work" flag, so
 #: whether an event reports failure can only be read out of the words (see below).
@@ -239,6 +260,9 @@ def reports_trouble(payload: dict[str, Any]) -> bool:
     for flag in ("ok", "success", "succeeded", "passed"):
         if payload.get(flag) is False:
             return True
+    state = payload.get("state")
+    if isinstance(state, str) and state in FAILED_STATES:
+        return True
     for field_name in OUTCOME_FIELDS:
         value = payload.get(field_name)
         if isinstance(value, str) and TROUBLE.search(value):
@@ -273,15 +297,27 @@ def classify(event: dict[str, Any], *, me: str = "") -> str:
     if kind == "presence.changed":
         liveness = str(payload.get("liveness") or "")
         return JUDGEMENT if liveness in PRESENCE_WORTH_WAKING else NOISE
-    if kind == "message.posted" and me and (event.get("actor") or {}).get("participant_id") == me:
+    if (
+        kind == "message.posted"
+        and me
+        and (event.get("actor") or {}).get("participant_id") == me
+    ):
         # Something I said, read back to me. Only messages: a checkpoint or a task
         # change from this same seat comes from the *companion* runtime, which is news
         # to the supervisor even though the room attributes it to one participant.
         return NOISE
 
+    if kind in HIERARCHY_NOISE_TYPES:
+        return NOISE
+    addressed_field = ADDRESSED_JUDGEMENT_FIELDS.get(kind)
+    if addressed_field is not None:
+        # Judgement only when it names this reader. `me` is empty when the caller did not
+        # say who it is, and then this renders rather than waking - the safe direction for a
+        # reader that cannot identify itself.
+        return JUDGEMENT if me and payload.get(addressed_field) == me else ROUTINE
     if kind in JUDGEMENT_TYPES:
         return JUDGEMENT
-    if kind in ("task.checkpointed", "task.completed"):
+    if kind in ("task.checkpointed", "task.completed", "worker.finished"):
         return JUDGEMENT if reports_trouble(payload) else ROUTINE
     if kind == "message.posted":
         # Free-form text from another participant. There is no schema to reason from,
