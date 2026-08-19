@@ -4512,3 +4512,60 @@ model-backed reader in this project. Delivery of a *cross-participant* relay is 
 needs a second speaker, and the one seat available was the reader's own. That is the next thing
 to observe, and until it is observed this entry claims only that the class is accepted and the
 predicate is tested.
+
+## D-092 — The relay needed a lifetime, and then a credential to match (2026-08-20)
+
+**Context.** `>` chat works by a resident relay on `127.0.0.1:8787`: the UserPromptSubmit hook
+hands it a line, it posts, and the person gets a receipt in about half a second (D-090, D-091).
+The relay lives inside `scripts/wake_channel.py`, which was the right home — one resident process
+per room, already reporting its own failures.
+
+It was being started as a child of a Claude Code session. That is the wrong *lifetime* for
+something a keystroke depends on. It died on restart, twice in one evening, and the second time
+it had already been proven working.
+
+**The failure is silent, which is what makes it serious.** `cottage_chat_hook.py` correctly
+stands down when the port refuses, so the prompt reaches the model and gets relayed the slow way.
+A dead relay therefore looks exactly like a slow one. That is the same shape as the reconnect
+defect in D-091: a relay that is not running and a room where nothing is happening produce
+identical evidence, and the person typing cannot tell which they are in.
+
+**Decision.** `scripts/cottage_relay_service.py` supervises it: a detached process, a pidfile,
+and a `status` that answers the only question that matters.
+
+* **The port is the truth, not the pid.** `status` connects. A live process with a dead relay
+  thread is reported as a failure and named as one, because what `>` needs is the socket. It
+  exits non-zero whenever chat would fall back, so it is usable in a check.
+* **It also reports a relay it did not start.** Believing its own bookkeeping over the socket
+  would make the tool wrong in the case where everything is fine.
+* **The port check precedes the credential check.** Found by a test: a second `start` from a
+  shell without the token answered "no credential" while a healthy relay was serving. A refusal
+  that reads as "nothing is running" is worse than no output.
+* **The log is appended, never truncated.** The reason a relay died is worth more than a tidy
+  file, and a restart that erased it would do so exactly when somebody went looking.
+
+**The credential has the same problem as the process, and this is the part that was missed.**
+Detaching alone just moves the failure: a participant token minted inside a session dies with it,
+so the relay outlives the session and cannot be restarted. That is not hypothetical — it is how
+this entry came to be written, with a live room, a free port, and no way to reconnect to it.
+
+So `--token-file` (already supported by the channel, per D-058) is the durable path, and
+`--save-token` copies the environment token into it once, owner-only. Writing a credential to
+disk is **never** a side effect of `start`; it requires the flag. On Windows the ACL is the real
+control rather than the mode bits, so `icacls` is what narrows it and a failure there is printed
+rather than swallowed — a token that is world-readable while the tool implied otherwise is worse
+than one whose exposure was stated.
+
+**Consequences.** A participant token now exists at rest when a machine opts into the durable
+mode. That is a real trade, accepted deliberately: the alternative is a chat path that breaks on
+every restart, and it breaks *quietly*. It is scoped to one participant seat in one room, and
+`stop` plus deleting the file ends it.
+
+**Not done.** It does not survive a reboot, and it is not a Windows service or a systemd unit.
+Either would be a further decision about a credential at rest and is not something to add behind
+a convenience script. `status` exists so the gap is visible rather than assumed away.
+
+**Verified.** `backend/tests/test_relay_service.py`, 20 tests. One of them narrows its `Popen`
+stub to the channel launch alone: patching `subprocess.Popen` wholesale also captured the
+`icacls` call, so the permission test would have passed by never narrowing anything. A stub broad
+enough to swallow the security-relevant call proves nothing.

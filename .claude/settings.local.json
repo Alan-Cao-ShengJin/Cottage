@@ -1,4 +1,16 @@
 {
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "D:/Code/Cottage/backend/.venv/Scripts/python.exe D:/Code/Cottage/worker/cottage_chat_hook.py"
+          }
+        ]
+      }
+    ]
+  },
   "enabledMcpjsonServers": ["agent-rooms"],
   "statusLine": {
     "type": "command",

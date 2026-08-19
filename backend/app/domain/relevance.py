@@ -83,6 +83,20 @@ JUDGEMENT_TYPES: frozenset[EventType] = frozenset(
 #: disconnect, which is exactly the transition a supervisor needs to act on.
 PRESENCE_WORTH_WAKING: frozenset[str] = frozenset({"disconnected", "stale", "idle"})
 
+#: A seat's own decay down these rungs is not news to it (D-091, reported by the Laptop 1
+#: session after watching its own relay wake it to say its own seat had gone idle). It costs
+#: two wakes per idle cycle per seat, and it scales with the number of participants rather
+#: than with activity — so a quiet room with six seats spends more on self-notification than
+#: a busy one with two.
+#:
+#: `disconnected` is deliberately **not** here. Losing your last connection releases your
+#: exclusive claims (`_on_disconnected_tx` → `release_all_claims_tx`), and the
+#: `task.claim_released` that produces is *routine* — so this is the only wake that tells a
+#: seat its leases are gone. Same reasoning that puts `task.claim_expired` in
+#: `JUDGEMENT_TYPES`: nothing else in the log says so. Suppressing it would have fixed a cost
+#: problem by opening a correctness hole.
+OWN_PRESENCE_NOT_NEWS: frozenset[str] = frozenset({"idle", "stale"})
+
 #: Types split by content rather than by name, because the room stores no structured
 #: "did it work" flag for either: a checkpoint carries free-text `summary` and a
 #: completion a free-text `result`, so the prose is the only evidence there is.
@@ -220,6 +234,14 @@ def classify(
         return RelevanceClass.NOISE
     if kind == EventType.PRESENCE_CHANGED.value:
         liveness = str(body.get("liveness") or "")
+        own = bool(viewer_participant_id) and (
+            body.get("participant_id") == viewer_participant_id
+            or actor_participant_id == viewer_participant_id
+        )
+        if own and liveness in OWN_PRESENCE_NOT_NEWS:
+            # Told about its own quiet. A reader knows it has been quiet — it is the one that
+            # was quiet — and there is nothing to act on.
+            return RelevanceClass.NOISE
         return (
             RelevanceClass.JUDGEMENT if liveness in PRESENCE_WORTH_WAKING else RelevanceClass.NOISE
         )

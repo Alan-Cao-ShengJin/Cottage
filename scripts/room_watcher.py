@@ -205,6 +205,11 @@ JUDGEMENT_TYPES = frozenset(
 #: disconnect, which is precisely the event a supervisor needs to act on.
 PRESENCE_WORTH_WAKING = frozenset({"disconnected", "stale", "idle"})
 
+#: A seat's own decay to `idle` or `stale` is not news to it. Mirrors
+#: `domain/relevance.OWN_PRESENCE_NOT_NEWS`. `disconnected` is absent on purpose: it is the
+#: only wake that tells a seat its exclusive claims were released (D-091).
+OWN_PRESENCE_NOT_NEWS = frozenset({"idle", "stale"})
+
 #: Terminal states meaning the work did not land, read structurally before the prose: the
 #: lexical path catches `failed` and `rejected` only by accident and misses `cancelled`
 #: entirely. Mirrors `domain/relevance.FAILED_STATES`.
@@ -296,6 +301,13 @@ def classify(event: dict[str, Any], *, me: str = "") -> str:
         return NOISE
     if kind == "presence.changed":
         liveness = str(payload.get("liveness") or "")
+        actor_id = (event.get("actor") or {}).get("participant_id")
+        own = bool(me) and (payload.get("participant_id") == me or actor_id == me)
+        if own and liveness in OWN_PRESENCE_NOT_NEWS:
+            # Its own quiet is not news to it. Mirrors
+            # `domain/relevance.OWN_PRESENCE_NOT_NEWS`; `disconnected` stays wakeable because
+            # it is the only signal that this seat's claims were released (D-091).
+            return NOISE
         return JUDGEMENT if liveness in PRESENCE_WORTH_WAKING else NOISE
     if (
         kind == "message.posted"

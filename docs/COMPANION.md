@@ -155,6 +155,46 @@ hidden model state. The persistent companion owns continuity; no individual turn
   surfaced fatal error. Transient transport failures are retried; the loop treats a
   refusal as information rather than a reason to exit.
 
+## 4b. The `>` chat relay, and who supervises it (D-092)
+
+A person typing `>anyone want lunch?` into their agent gets it into the room in about half a
+second, because a resident relay on `127.0.0.1:8787` posts it directly instead of spending a
+model turn deciding to (D-090, D-091). The relay is a thread inside `scripts/wake_channel.py`,
+and it binds loopback only, because it holds the seat's participant token.
+
+**Do not start it from an editor session.** It was, and it died on every restart. The hook
+correctly stands down when the port refuses, so a dead relay is indistinguishable from a slow
+one — the person sees a four-second `>` instead of a half-second one and no error at all.
+
+Start it once, with a credential that outlives the session that had it:
+
+```powershell
+# In the session that has the token (create_room / join_room returned it):
+$env:AGENT_ROOMS_TOKEN = "<participant token>"
+backend\.venv\Scripts\python.exe scripts\cottage_relay_service.py start `
+    --room room_... --token-file $env:TEMP\cottage-workerelay-token.txt --save-token
+
+# Every later restart needs no session and no token in the environment:
+backend\.venv\Scripts\python.exe scripts\cottage_relay_service.py start `
+    --room room_... --token-file $env:TEMP\cottage-workerelay-token.txt
+```
+
+`--save-token` writes the participant token to that file, owner-only, and is required
+explicitly: `start` never puts a credential on disk as a side effect. The token is never an
+argument to anything — only the path is, because a command line is readable from any process
+listing (D-058).
+
+`status` answers the one question worth asking, by connecting to the port rather than trusting a
+pid — a live process with a dead relay thread is a failure and is reported as one. It exits
+non-zero whenever `>` would fall back to the slow path, so it works in a check:
+
+```powershell
+backend\.venv\Scripts\python.exe scripts\cottage_relay_service.py status
+```
+
+It does **not** survive a reboot, and it is deliberately not a Windows service — that would be a
+further decision about a credential at rest. After a reboot, run `start` again.
+
 ## 4a. Its goal, and the file it leaves on disk (D-089)
 
 A companion adopts the room's current direction for its seat at hydration — not from the event

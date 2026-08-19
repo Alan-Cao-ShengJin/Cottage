@@ -929,3 +929,71 @@ async def test_the_cursor_survives_an_abrupt_close_instead_of_being_discarded():
     # The position the socket actually reached, returned rather than lost.
     assert cursor == 41, "an abrupt close must not discard the cursor"
     assert close_code in watcher.TRANSIENT_CLOSE_CODES or close_code == 1012
+
+
+async def test_a_seat_is_not_woken_by_its_own_quiet():
+    """Reported by the Laptop 1 session from watching its own relay tell it its own seat had
+    gone idle (D-091). Two wakes per idle cycle per seat, scaling with the number of
+    participants rather than with activity — a quiet room with six seats spent more on
+    self-notification than a busy one with two."""
+    for liveness in ("idle", "stale"):
+        assert not relevance.wakes(
+            event_type="presence.changed",
+            payload={"participant_id": "me", "liveness": liveness},
+            actor_participant_id="me",
+            viewer_participant_id="me",
+        ), liveness
+        # A *peer* on the same rung is still news: what it was holding may now be nobody's.
+        assert relevance.wakes(
+            event_type="presence.changed",
+            payload={"participant_id": "them", "liveness": liveness},
+            actor_participant_id="them",
+            viewer_participant_id="me",
+        ), liveness
+
+
+async def test_its_own_disconnect_still_wakes_it_because_its_claims_went_with_it():
+    """The correctness hole the obvious version of this fix would have opened.
+
+    Losing your last connection releases your exclusive claims — `_on_disconnected_tx` calls
+    `release_all_claims_tx(reason="presence_lost")` — and the `task.claim_released` that
+    produces is **routine**. So this is the only wake that tells a seat its leases are gone,
+    exactly the reasoning that puts `task.claim_expired` in JUDGEMENT_TYPES: nothing else in
+    the log says so.
+    """
+    assert not relevance.wakes(event_type="task.claim_released", payload={"participant_id": "me"})
+    assert relevance.wakes(
+        event_type="presence.changed",
+        payload={"participant_id": "me", "liveness": "disconnected"},
+        actor_participant_id="me",
+        viewer_participant_id="me",
+    )
+    assert "disconnected" not in relevance.OWN_PRESENCE_NOT_NEWS
+
+
+async def test_a_reader_that_cannot_say_who_it_is_keeps_every_presence_wake():
+    """No viewer means nothing can be identified as "own", and the safe direction is to keep
+    the wake rather than to guess a seat is talking about itself."""
+    for liveness in ("idle", "stale", "disconnected"):
+        assert relevance.wakes(
+            event_type="presence.changed", payload={"participant_id": "me", "liveness": liveness}
+        ), liveness
+
+
+async def test_the_standalone_watcher_agrees_on_own_presence_too():
+    """The duplication is pinned by a test rather than trusted, and this rule is viewer-aware —
+    the watcher's `classify` takes `me`, so it is mirrored exactly rather than approximated."""
+    watcher = _load_watcher_module()
+    mine = {
+        "type": "presence.changed",
+        "actor": {"participant_id": "me"},
+        "payload": {"participant_id": "me", "liveness": "idle"},
+    }
+    theirs = {
+        "type": "presence.changed",
+        "actor": {"participant_id": "them"},
+        "payload": {"participant_id": "them", "liveness": "idle"},
+    }
+    assert watcher.classify(mine, me="me") == watcher.NOISE
+    assert watcher.classify(theirs, me="me") == watcher.JUDGEMENT
+    assert set(watcher.OWN_PRESENCE_NOT_NEWS) == set(relevance.OWN_PRESENCE_NOT_NEWS)

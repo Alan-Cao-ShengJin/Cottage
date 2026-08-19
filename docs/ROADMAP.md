@@ -755,6 +755,16 @@ And the relay had been dying on every deploy, silently — `ConnectionClosed` de
 ran. Worse than a crash, because a relay that has already proved it works reads as a quiet
 room rather than a dead one.
 
+Then it kept dying for a second, unrelated reason: it was a child of a Claude Code session, so
+a restart took it with it. Fixed by giving it a supervisor that is not a session
+(`scripts/cottage_relay_service.py`, D-092) whose `status` connects to the port rather than
+trusting a pid, and exits non-zero whenever `>` would fall back to the slow path. The same
+question applies to the credential and had been missed: a participant token minted in a session
+dies with it, so detaching alone left a relay that outlives its session and cannot be restarted.
+`--token-file` plus an explicit `--save-token` is the durable answer, and it puts a scoped
+participant token at rest — a deliberate trade against a chat path that breaks on every restart
+and breaks quietly. It does not survive a reboot; `status` is there so that gap stays visible.
+
 Evidence: 753 backend tests passing with 17 skips, 86 worker with 7 skips, mypy and Ruff
 clean. Live on `app.cottageai.dev`: the socket accepts the new class, and a resident channel
 received a `task.proposed` unprompted — the first time this project's push has reached a
