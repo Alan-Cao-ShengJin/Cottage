@@ -734,3 +734,150 @@ async def test_a_person_directing_the_agent_does_reach_its_wake_channel(
     await _drive(socket, room.room.id)
 
     assert socket.kinds() == ["message.posted"], socket.kinds()
+
+
+# ---------------------------------------------------------------------------
+# The second axis: show a person, without making a model think (D-091)
+# ---------------------------------------------------------------------------
+
+
+async def test_relayed_human_speech_is_shown_to_a_person_without_waking_a_model():
+    """The cell that had no home. Suppressing the wake for chat was right and made chat
+    undeliverable: this socket is the only push a resident process holds, so "not worth a
+    turn" silently meant "the person it was for never receives it"."""
+    chat = {"body": "anyone wanna get lunch?", "speaking_for": "human"}
+    assert not relevance.wakes(
+        event_type="message.posted",
+        payload=chat,
+        actor_participant_id="them",
+        viewer_participant_id="me",
+        actor_kind=PrincipalKind.AGENT,
+        viewer_kind=PrincipalKind.AGENT,
+    )
+    assert relevance.shows_to_human(
+        event_type="message.posted",
+        payload=chat,
+        actor_participant_id="them",
+        viewer_participant_id="me",
+        actor_kind=PrincipalKind.AGENT,
+        viewer_kind=PrincipalKind.AGENT,
+    )
+
+
+async def test_a_human_identity_talking_is_shown_too():
+    """Both paths to "a person said this" answer the same question, on this axis as well."""
+    assert relevance.shows_to_human(
+        event_type="message.posted",
+        payload={"body": "lunch?"},
+        actor_participant_id="them",
+        viewer_participant_id="me",
+        actor_kind=PrincipalKind.HUMAN,
+        viewer_kind=PrincipalKind.AGENT,
+    )
+
+
+async def test_your_own_relay_is_not_read_back_to_you():
+    """The sender already has the receipt (D-090). Echoing it would make every remark arrive
+    twice in the window the person typed it in."""
+    assert not relevance.shows_to_human(
+        event_type="message.posted",
+        payload={"body": "lunch?", "speaking_for": "human"},
+        actor_participant_id="me",
+        viewer_participant_id="me",
+        actor_kind=PrincipalKind.AGENT,
+        viewer_kind=PrincipalKind.AGENT,
+    )
+
+
+async def test_anything_worth_a_decision_is_also_worth_showing():
+    """The axes are orthogonal, not opposed. Nothing that wakes a model should be hidden from
+    the person it concerns."""
+    for kind in ("task.proposed", "directive.issued", "conflict.detected", "participant.left"):
+        assert relevance.shows_to_human(event_type=kind, payload={}), kind
+
+
+async def test_churn_is_invisible_on_both_axes():
+    """The narrowness is the design. Widening this to "everything a browser renders" is what
+    `classes=all` is already for."""
+    for kind, payload in (
+        ("activity.noted", {"summary": "running the tests"}),
+        ("presence.changed", {"liveness": "live_poll"}),
+        ("presence.attachment_registered", {}),
+        ("supervisor.capacity_changed", {"participant_id": "them"}),
+        ("worker.state_changed", {"worker_id": "w"}),
+    ):
+        assert not relevance.shows_to_human(event_type=kind, payload=payload), kind
+
+
+async def test_the_socket_accepts_the_second_axis_and_still_refuses_nonsense(make_room, join):
+    """Additive: `classes=judgement` keeps working, so a client that predates this is
+    unaffected. An unknown value is still refused rather than silently widened."""
+    from app.api import routes as http
+
+    assert "judgement,human_visible" in http.websocket_stream.__doc__
+    src = Path(http.__file__).read_text(encoding="utf-8")
+    assert 'classes not in ("all", "judgement", "judgement,human_visible")' in src
+
+
+async def test_the_wake_channel_asks_for_both_and_marks_chat_as_the_person():
+    """A host reading a line must be able to tell "somebody spoke to you" from "a decision is
+    needed" — and a chat line has to read as the person, not the seat that carried it."""
+    watcher = _load_wake_channel()
+    url = watcher.socket_url(
+        "https://example.test", "room_x", ticket="t", since_seq=0, connection_id=""
+    )
+    assert "classes=judgement%2Chuman_visible" in url
+
+    line = watcher.describe(
+        {
+            "seq": 41,
+            "type": "message.posted",
+            "actor": {"display_name": "Claude Code"},
+            "payload": {
+                "body": "anyone wanna get lunch?",
+                "speaking_for": "human",
+                "speaking_as": "Alan",
+            },
+        }
+    )
+    assert line == "[41] [chat] Alan | anyone wanna get lunch?"
+    # And a coordination event keeps its existing shape.
+    work = watcher.describe(
+        {"seq": 42, "type": "task.proposed", "actor": {"display_name": "Bea"}, "payload": {}}
+    )
+    assert work == "[42] task.proposed | Bea"
+
+
+async def test_a_server_restart_reconnects_the_relay_instead_of_killing_it():
+    """The bug this file existed to prevent, and the one it had (D-091).
+
+    `ConnectionClosed` derives from `WebSocketException`, so it matched none of the reconnect
+    loop's handlers and ended the process. Every deploy permanently killed every relay
+    watching — and silently, in the one direction that matters: the relay had already proved
+    it worked, so its silence afterwards read as a quiet room rather than a dead relay.
+    Nobody goes looking at a quiet room.
+    """
+    watcher = _load_wake_channel()
+
+    # 1012 service restart is what a deploy sends. It, and every other "come back" code, must
+    # be treated as transient rather than as the room refusing this subscriber.
+    assert 1012 in watcher.TRANSIENT_CLOSE_CODES
+    for code in (1001, 1006, 1013):
+        assert code in watcher.TRANSIENT_CLOSE_CODES, code
+    # A deliberate close is not transient: reconnecting into a shut door forever is a busy
+    # loop, so that path still escalates its backoff.
+    assert 1000 not in watcher.TRANSIENT_CLOSE_CODES
+
+    # The handler exists and names the real exception type, rather than relying on OSError —
+    # which is what let this through.
+    source = Path(watcher.__file__).read_text(encoding="utf-8")
+    assert "except _ConnectionClosed" in source
+    assert watcher._ConnectionClosed.__name__ == "ConnectionClosed"
+
+    # And the close code is read defensively, because `websockets` has moved it between
+    # attributes across versions and a wrong guess stops the relay reconnecting.
+    class _Socket:
+        close_code = 1012
+
+    assert watcher._close_code(_Socket()) == 1012
+    assert watcher._close_code(object()) is None

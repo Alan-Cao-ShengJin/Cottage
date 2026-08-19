@@ -284,6 +284,58 @@ def classify(
     return RelevanceClass.ROUTINE
 
 
+def shows_to_human(
+    *,
+    event_type: EventType | str,
+    payload: Mapping[str, Any] | None = None,
+    actor_participant_id: str | None = None,
+    viewer_participant_id: str | None = None,
+    actor_kind: PrincipalKind | None = None,
+    viewer_kind: PrincipalKind | None = None,
+) -> bool:
+    """Should a person see this, whether or not a model should think about it?
+
+    A **second axis**, deliberately not a fourth `RelevanceClass`. The three classes are
+    ordered by what delivery costs a *model*, and this asks something orthogonal — so
+    ranking it among them would force a false comparison. The table that made it obvious:
+
+    | | worth a model turn | worth putting in front of a person |
+    |---|---|---|
+    | presence churn, narration | no | no |
+    | **a person's words, relayed** | **no** | **yes** |
+    | a job assigned to you | yes | yes |
+
+    Relayed human speech is the cell with no home. `a309cfb` and D-090 correctly stopped it
+    waking a model, and that is *why* it never reached anybody: the wake channel is the only
+    push a resident process holds, so "not worth a turn" became "not delivered". The person it
+    was addressed to never received it, and the sender was talking to nobody (D-091).
+
+    Anything worth a decision is also worth showing, so `JUDGEMENT` is included. What this adds
+    beyond it is exactly the chat case — and it stays narrow on purpose: presence churn and
+    narration are `noise` on both axes, and widening this to "everything a browser renders" is
+    what `classes=all` is already for.
+    """
+    if wakes(
+        event_type=event_type,
+        payload=payload,
+        actor_participant_id=actor_participant_id,
+        viewer_participant_id=viewer_participant_id,
+        actor_kind=actor_kind,
+        viewer_kind=viewer_kind,
+    ):
+        return True
+    kind = event_type.value if isinstance(event_type, EventType) else str(event_type)
+    if kind != EventType.MESSAGE_POSTED.value:
+        return False
+    body: Mapping[str, Any] = payload or {}
+    # Not read back to its own author. A person does not need their own remark returned to
+    # them — they have the receipt (D-090), and echoing it would make every relay arrive twice
+    # in the window they typed it in.
+    if viewer_participant_id and actor_participant_id == viewer_participant_id:
+        return False
+    return _relays_a_person(body) or actor_kind is PrincipalKind.HUMAN
+
+
 def wakes(
     *,
     event_type: EventType | str,

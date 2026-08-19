@@ -6,14 +6,7 @@ import { Activity } from "../../components/Activity";
 import { CurrentWork } from "../../components/CurrentWork";
 import { PresenceRail } from "../../components/Presence";
 import { TaskBoard } from "../../components/TaskBoard";
-import {
-  api,
-  ArpError,
-  clearSession,
-  loadSession,
-  saveSession,
-  type Session,
-} from "../../lib/api";
+import { api, ArpError, clearSession, loadSession, type Session } from "../../lib/api";
 import { openConflicts, openWork, useNow, useRoom } from "../../lib/useRoom";
 
 /**
@@ -26,8 +19,7 @@ import { openConflicts, openWork, useNow, useRoom } from "../../lib/useRoom";
  * export and a build cannot pre-render an id that does not exist yet (`next.config.js`).
  */
 function RoomView() {
-  const params = useSearchParams();
-  const roomId = params.get("room");
+  const roomId = useSearchParams().get("room");
   const router = useRouter();
   const [session, setSession] = useState<Session | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -35,71 +27,16 @@ function RoomView() {
   const [invite, setInvite] = useState<string | null>(null);
   const now = useNow();
 
-  // An invitation arriving in the URL is the whole point of a shareable link, and it is
-  // also a credential — so it is lifted into state once and removed from the address bar
-  // before anything else happens. Left there it would sit in history, in a bookmark, and in
-  // the `Referer` of every subsequent request.
-  const [pendingInvite, setPendingInvite] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [checkedSession, setCheckedSession] = useState(false);
-
   useEffect(() => {
     const existing = loadSession();
-    if (existing && existing.roomId === roomId) {
-      setSession(existing);
-      setCheckedSession(true);
+    // A room screen with no matching session cannot show anything truthful, so it sends
+    // you back to the console rather than rendering an empty board.
+    if (!existing || existing.roomId !== roomId) {
+      router.replace("/");
       return;
     }
-    const fromUrl = params.get("invite");
-    if (fromUrl) {
-      setPendingInvite(fromUrl);
-      const stripped = new URLSearchParams(params.toString());
-      stripped.delete("invite");
-      router.replace(`/room/?${stripped.toString()}`);
-    }
-    // Deliberately *not* a redirect to `/`. A person following an invitation link had no
-    // session by definition, and bouncing them to a marketing page was indistinguishable
-    // from the room being broken — which is exactly how it was reported.
-    setCheckedSession(true);
-  }, [roomId, router, params]);
-
-  const joinWithInvitation = useCallback(
-    async (token: string, name: string) => {
-      setBusy(true);
-      setError(null);
-      try {
-        const joined = await api.join({
-          invitation_token: token.trim(),
-          display_name: name.trim(),
-        });
-        const next: Session = {
-          participantToken: joined.participant_token,
-          participantId: joined.participant.id,
-          // The invitation names the room, and it is the authority on which room this is.
-          // A `?room=` that disagrees is a stale or mistyped link, not a second opinion.
-          roomId: joined.room.id,
-          displayName: name.trim(),
-        };
-        saveSession(next);
-        setPendingInvite("");
-        if (joined.room.id !== roomId) {
-          router.replace(`/room/?room=${encodeURIComponent(joined.room.id)}`);
-        }
-        setSession(next);
-      } catch (err) {
-        setError(
-          err instanceof ArpError
-            ? `${err.code}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-        );
-      } finally {
-        setBusy(false);
-      }
-    },
-    [roomId, router],
-  );
+    setSession(existing);
+  }, [roomId, router]);
 
   const { snapshot, state, error: streamError, activity, liveActivity, refresh } =
     useRoom(session);
@@ -134,72 +71,7 @@ function RoomView() {
   );
   const runtime = you?.presence?.runtime ?? null;
 
-  if (!session) {
-    if (!checkedSession) return null;
-    return (
-      <div className="shell">
-        <div className="topbar">
-          <span className="brand">
-            Cottage
-            <small>join a room</small>
-          </span>
-          <span className="spacer" />
-          <a className="btn" href="/">
-            Home
-          </a>
-        </div>
-        <div className="landing">
-          <div className="card">
-            <h2>Open a room you were invited to</h2>
-            <p className="hint">
-              Paste the invitation you were given. It is the only credential you need — the
-              room it names is the room you join. Agents use the same invitation with{" "}
-              <code>join_room</code>; this is the same door for a person.
-            </p>
-            {error && <div className="error">{error}</div>}
-            <div className="field">
-              <label htmlFor="join-name">Your name in the room</label>
-              <input
-                id="join-name"
-                value={displayName}
-                placeholder="Alan"
-                autoComplete="name"
-                onChange={(e) => setDisplayName(e.target.value)}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="join-invite">Invitation</label>
-              <input
-                id="join-invite"
-                value={pendingInvite}
-                placeholder="paste the invitation token"
-                autoComplete="off"
-                spellCheck={false}
-                onChange={(e) => setPendingInvite(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && pendingInvite.trim() && displayName.trim()) {
-                    void joinWithInvitation(pendingInvite, displayName);
-                  }
-                }}
-              />
-            </div>
-            <button
-              className="btn"
-              disabled={busy || !pendingInvite.trim() || !displayName.trim()}
-              onClick={() => void joinWithInvitation(pendingInvite, displayName)}
-            >
-              {busy ? "Joining…" : "Join room"}
-            </button>
-            <span className="hint" style={{ display: "block", marginTop: 8 }}>
-              If this returns <code>unauthenticated</code>, this instance requires an
-              account before joining. <a href="/account/login">Sign in</a> and open the link
-              again — the invitation is still valid.
-            </span>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  if (!session) return null;
 
   if (!snapshot) {
     return (

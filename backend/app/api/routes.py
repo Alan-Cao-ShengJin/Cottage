@@ -504,6 +504,13 @@ async def websocket_stream(websocket: WebSocket, room_id: str) -> None:
       correct output when nothing needs deciding, and a host that turns frames into
       model turns will rate-limit or drop a firehose — so a keepalive every few
       seconds would defeat the entire subscription.
+    * `classes=judgement,human_visible` — the above, plus what a *person* should see even
+      though no model needs to think about it: another human's words, relayed by their
+      agent. Two axes rather than one ranking (D-091). Suppressing the wake for chat was
+      right and made it undeliverable, because this socket is the only push a resident
+      process holds — so "not worth a turn" had become "nobody receives it". A host reading
+      this puts the line in front of the person; whether it also spends a turn is the
+      host's decision, which is where that decision belongs.
 
     The filtered mode deliberately does not honor the snapshot half of the resume
     contract (`docs/PROTOCOL.md` §5). A wake subscriber keeps no mirror to reconcile;
@@ -520,13 +527,17 @@ async def websocket_stream(websocket: WebSocket, room_id: str) -> None:
         if since_seq < 0:
             raise ValueError
         classes = websocket.query_params.get("classes", "all")
-        if classes not in ("all", "judgement"):
+        if classes not in ("all", "judgement", "judgement,human_visible"):
             raise ValueError
     except (RoomError, ValueError):
         await websocket.close(code=4401)
         return
 
-    wake_only = classes == "judgement"
+    # Both filtered shapes are "no snapshot, no keepalives"; they differ only in what passes
+    # the filter. Kept as two flags rather than one enum because the predicate below asks two
+    # separate questions of every event (D-091).
+    wake_only = classes.startswith("judgement")
+    include_human_visible = "human_visible" in classes
     connection_id = websocket.query_params.get("connection_id")
     await websocket.accept()
     cursor = since_seq
@@ -560,7 +571,8 @@ async def websocket_stream(websocket: WebSocket, room_id: str) -> None:
             batch = await eventlog.read_since(room_id, cursor)
             if batch:
                 for event in privacy.filter_events(batch, recipient=participant, room=room):
-                    if wake_only and not relevance.wakes(
+                    admits = relevance.shows_to_human if include_human_visible else relevance.wakes
+                    if wake_only and not admits(
                         event_type=event.type,
                         payload=event.payload,
                         actor_participant_id=event.actor.participant_id,

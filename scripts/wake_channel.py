@@ -7,13 +7,21 @@ its human next types. `scripts/room_watcher.py` already relays such events, but 
 *polls*: it asks the room every `--interval` seconds whether anything happened. This
 does not ask. It holds the room's WebSocket open and is told.
 
-**Why it is cheap.** The socket subscribes with `classes=judgement`, so the server
+**Why it is cheap.** The socket subscribes with `classes=judgement,human_visible`, so the server
 applies `app/domain/relevance.py` and sends only events that need somebody to decide
 something — no keepalives, no presence churn, no activity narration. The filtering is
 server-side and decided in code, never by a model: a channel that woke a model to ask
 it whether the last frame was worth waking for would cost more than the polling loop
 it replaces. An idle room therefore produces no lines, no notifications, and no
 tokens, for as long as it stays idle.
+
+**Two axes, not one threshold.** `judgement` is what a model should think about;
+`human_visible` is what a *person* should see even when no model needs to. Only one thing
+falls in the second and not the first — another human's words, relayed by their agent — and
+it is the reason this script asks for both. Suppressing the wake for chat was correct and
+made chat undeliverable: this socket is the only push a resident process holds, so "not
+worth a turn" had become "nobody receives it" (D-091). Such lines are marked `[chat]`, so a
+host can put them in front of its person without treating them as work.
 
 **How it wakes anything.** It prints one line per event to stdout and nothing else, so
 it can be run under a host that converts stdout lines into notifications:
@@ -51,6 +59,27 @@ import urllib.request
 from typing import Any
 
 DEFAULT_BASE = "https://agent-rooms.fly.dev"
+
+
+def _connection_closed_type() -> type[BaseException]:
+    """`websockets.exceptions.ConnectionClosed`, or a type that can never be raised.
+
+    Imported lazily and defensively so this module still loads for `--help` and for tests
+    on a machine without `websockets` — the same reason the library is imported inside
+    `stream_once` rather than at the top.
+    """
+    try:
+        from websockets.exceptions import ConnectionClosed
+    except ImportError:
+
+        class _Never(BaseException):
+            pass
+
+        return _Never
+    return ConnectionClosed
+
+
+_ConnectionClosed = _connection_closed_type()
 
 #: Fields worth putting in the one line a reader gets, in the order worth trying. An
 #: event with none of them is still announced by type: knowing a lease moved matters
@@ -120,9 +149,7 @@ def mint_ticket(base: str, room: str, token: str) -> str:
     return str(ticket)
 
 
-def socket_url(
-    base: str, room: str, *, ticket: str, since_seq: int, connection_id: str
-) -> str:
+def socket_url(base: str, room: str, *, ticket: str, since_seq: int, connection_id: str) -> str:
     scheme = "wss" if base.startswith("https") else "ws"
     host = base.split("://", 1)[-1].rstrip("/")
     params: dict[str, str] = {
@@ -130,7 +157,15 @@ def socket_url(
         "since_seq": str(since_seq),
         # The point of the whole script. Without this the socket is the browser's
         # firehose and every keepalive becomes a notification.
-        "classes": "judgement",
+        #
+        # `human_visible` is the second half, and it is not an optimisation (D-091):
+        # relayed human speech is deliberately not worth a model turn, and this socket is
+        # the only push a resident process holds — so without asking for it, "not worth a
+        # turn" silently meant "the person it was for never receives it". Requested
+        # unconditionally because a wake channel that drops human chat is the bug, not a
+        # cheaper mode; a server that does not know the value refuses the subscription,
+        # which is the fail-closed behaviour this script already relies on.
+        "classes": "judgement,human_visible",
     }
     if connection_id:
         params["connection_id"] = connection_id
@@ -154,6 +189,14 @@ def describe(event: dict[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             detail = " ".join(value.split())
             break
+    # Chat is marked, and marked as the *person* rather than the seat that carried it. A
+    # host reading this puts it in front of its human; treating it as work would be the
+    # mistake, and the person's own name is what makes it read as somebody talking rather
+    # than as an agent reporting (D-090, D-091).
+    if kind == "message.posted" and payload.get("speaking_for") == "human":
+        who = str(payload.get("speaking_as") or "").strip() or actor
+        said = detail or str(payload.get("body") or "").strip()
+        return f"[{seq}] [chat] {who} | {' '.join(said.split())[:280]}"
     line = f"[{seq}] {kind} | {actor}"
     if detail:
         line = f"{line} | {detail[:280]}"
@@ -225,7 +268,27 @@ def handle_frame(frame: dict[str, Any], *, cursor: int) -> tuple[int, str | None
     return cursor, None
 
 
-async def stream_once(url: str, *, cursor: int) -> int:
+def _close_code(socket: Any) -> int | None:
+    """The socket's close code, defensively.
+
+    `websockets` has moved this between attributes across versions, and the reconnect
+    decision must not depend on which one this install exposes — guessing wrong here is how
+    a relay stops reconnecting.
+    """
+    for attribute in ("close_code",):
+        code = getattr(socket, attribute, None)
+        if isinstance(code, int):
+            return code
+    return None
+
+
+#: Close codes that mean "come back", not "go away". 1012 is a service restart, which is what
+#: a deploy sends; 1001 is going away; 1006 is an abnormal close with no code at all. None of
+#: them says the room is finished with this subscriber.
+TRANSIENT_CLOSE_CODES = frozenset({1001, 1006, 1012, 1013})
+
+
+async def stream_once(url: str, *, cursor: int) -> tuple[int, int | None]:
     """Hold the socket open, printing judgement events. Returns the cursor reached.
 
     The cursor is returned rather than stored so a reconnect resumes from what was
@@ -234,6 +297,16 @@ async def stream_once(url: str, *, cursor: int) -> int:
     skipping one.
 
     Raises `UnfilteredServer` if the peer proves it is not honouring the filter.
+
+    Returns `(cursor, close_code)`. An abrupt close is **not** an error here: a server
+    restart sends 1012 and `websockets` raises `ConnectionClosed`, which derives from
+    `WebSocketException` and therefore matched none of `run`'s handlers — so the loop
+    written specifically to survive a restart never ran, and every deploy permanently killed
+    every relay watching (D-091, diagnosed by the Laptop 1 session).
+
+    That failure is worse than a crash on startup, because it is silent in the one direction
+    that matters: the relay has already proved it works, so its silence afterwards reads as a
+    quiet room rather than as a dead relay. Nobody goes looking.
     """
     import websockets
 
@@ -248,7 +321,7 @@ async def stream_once(url: str, *, cursor: int) -> int:
             cursor, line = handle_frame(frame, cursor=cursor)
             if line is not None:
                 print(line, flush=True)
-    return cursor
+    return cursor, _close_code(socket)
 
 
 async def run(args: argparse.Namespace, token: str) -> int:
@@ -264,12 +337,19 @@ async def run(args: argparse.Namespace, token: str) -> int:
                 since_seq=cursor,
                 connection_id=args.connection_id or "",
             )
-            cursor = await stream_once(url, cursor=cursor)
-            # A clean close with no error is the room ending the stream — a closed room,
-            # or a revoked credential. Reconnecting into that forever is a busy loop
-            # against a door that is shut.
-            log("the room closed the socket")
-            backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
+            cursor, close_code = await stream_once(url, cursor=cursor)
+            if close_code in TRANSIENT_CLOSE_CODES:
+                # A restart, not a refusal. Backoff **resets**: connecting successfully is
+                # not evidence the server is unwell, and escalating here would leave a
+                # healthy relay sitting out half a minute after a few releases.
+                log(f"the room restarted the socket ({close_code}); reconnecting")
+                backoff = 1.0
+            else:
+                # A deliberate close is the room ending the stream — a closed room, or a
+                # revoked credential. Reconnecting into that forever is a busy loop against
+                # a door that is shut, so this one does escalate.
+                log(f"the room closed the socket ({close_code})")
+                backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
         except UnfilteredServer as exc:
             log(str(exc))
             log(
@@ -280,12 +360,21 @@ async def run(args: argparse.Namespace, token: str) -> int:
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 # No amount of retrying fixes a credential the room has refused.
-                log(
-                    f"refused ({exc.code}); the participant token is invalid or revoked"
-                )
+                log(f"refused ({exc.code}); the participant token is invalid or revoked")
                 return 2
             log(f"ticket request failed ({exc.code}); retrying in {backoff:.0f}s")
             backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
+        except _ConnectionClosed as exc:
+            # The bug this file existed to avoid, and the one it had. `ConnectionClosed`
+            # derives from `WebSocketException`, so it fell past every handler below and
+            # ended the process — silently, after the relay had already proved it worked.
+            code = getattr(getattr(exc, "rcvd", None), "code", None)
+            if code in TRANSIENT_CLOSE_CODES or code is None:
+                log(f"the socket dropped ({code}); reconnecting")
+                backoff = 1.0
+            else:
+                log(f"the socket closed ({code}); retrying in {backoff:.0f}s")
+                backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
         except (OSError, RuntimeError) as exc:
             log(f"{type(exc).__name__}: {exc}; retrying in {backoff:.0f}s")
             backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
@@ -297,9 +386,7 @@ async def run(args: argparse.Namespace, token: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--base", default=os.environ.get("AGENT_ROOMS_BASE", DEFAULT_BASE)
-    )
+    parser.add_argument("--base", default=os.environ.get("AGENT_ROOMS_BASE", DEFAULT_BASE))
     parser.add_argument("--room", default=os.environ.get("AGENT_ROOMS_ROOM"))
     parser.add_argument(
         "--from-seq",
