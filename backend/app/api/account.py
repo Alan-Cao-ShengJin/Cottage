@@ -12,7 +12,8 @@ from fastapi import APIRouter, Form, Header, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from ..config import settings
-from ..core import accounts, billing, mailer
+from ..core import accounts, billing, credentials, mailer
+from ..core.errors import NotFound
 from .browser_ui import page as browser_page
 
 router = APIRouter()
@@ -436,6 +437,91 @@ async def _browser_session(request: Request) -> accounts.BrowserSession | None:
     return await accounts.load_session(request.cookies.get(SESSION_COOKIE))
 
 
+def _seat_row(seat: credentials.OwnedSeat, csrf_token: str) -> str:
+    """One seat, with the button that re-credentials it.
+
+    The room name is the label because that is what somebody recognises; the participant id is
+    shown too, since two seats can share a room name and the id is what the form actually posts.
+    """
+    lost = "" if seat.has_credential else ' <span class="muted">(no credential)</span>'
+    return f"""<div class="panel">
+<strong>{html.escape(seat.room_name)}</strong>{lost}<br>
+<span class="muted">{html.escape(seat.display_name)} &middot; {html.escape(seat.role)}
+&middot; {html.escape(seat.participant_id)}</span>
+<form method="post" action="/account/seats/reissue">
+  <input type="hidden" name="csrf_token" value="{html.escape(csrf_token)}">
+  <input type="hidden" name="participant_id" value="{html.escape(seat.participant_id)}">
+  <button class="secondary" type="submit">Issue a new token</button>
+</form>
+</div>"""
+
+
+async def _seats_panel(session: accounts.BrowserSession) -> str:
+    """The rooms this account holds a seat in, and a way back into each.
+
+    Here rather than only in an API, because the situation this serves is *having no room
+    credential at all* — the browser session is the only authority left, so the recovery path
+    cannot be one that needs a participant token to reach.
+    """
+    seats = await credentials.seats_owned_by(session.user.id)
+    if not seats:
+        return ""
+    rows = "".join(_seat_row(seat, session.csrf_token) for seat in seats)
+    return f"""<h2>Your seats</h2>
+<p class="muted">A participant token is shown once and stored hashed, so it cannot be looked up
+again. Issuing a new one keeps the same seat &mdash; its leases, work, and history are
+unchanged &mdash; and <strong>immediately stops the old token working</strong>, which is also how
+you revoke one that leaked.</p>
+{rows}"""
+
+
+@router.post("/account/seats/reissue")
+async def reissue_seat_token(
+    request: Request,
+    csrf_token: Annotated[str, Form()],
+    participant_id: Annotated[str, Form()],
+) -> Response:
+    """Issue a fresh participant token for a seat this account owns, and show it once.
+
+    Rendered into the POST response rather than carried through a redirect: a credential in a
+    query string lands in browser history, and `Referer` on every subsequent request.
+
+    **Not rate limited, deliberately.** Reaching this needs an authenticated session, and a
+    session holder can already list their own seats on `/account` -- so there is nothing to
+    enumerate that they cannot simply read. What is left is an owner rotating their own token
+    repeatedly, which costs them their own runtimes and nobody else anything. Reusing the login
+    throttle would be actively worse: its buckets are keyed for password failures, so mistyping
+    a seat id could lock somebody out of signing in.
+    """
+    session = await _require_session_csrf(request, csrf_token)
+    if session is None:
+        return _redirect("/account/login")
+    try:
+        token = await credentials.reissue_seat_token(
+            user_id=session.user.id, participant_id=participant_id
+        )
+    except NotFound:
+        # Only `NotFound`. The core already answers identically for "no such seat", "not yours",
+        # and "no longer in the room", so that indistinguishability is preserved by catching it
+        # -- while a database error still surfaces as an error instead of being reported as a
+        # missing seat, which would be this page lying about what happened.
+        return _page(
+            "Seat not found",
+            "<h1>Seat not found</h1><p>No such seat, or it is not one you own.</p>"
+            '<div class="row"><a class="button" href="/account">Back to your account</a></div>',
+            status_code=404,
+        )
+    return _page(
+        "New participant token",
+        f"""<h1>New participant token</h1>
+<p><strong>Copy this now.</strong> It is stored hashed and cannot be shown again.</p>
+<div class="panel"><code>{html.escape(token)}</code></div>
+<p class="muted">The previous token for this seat has stopped working. Anything still using
+it &mdash; a companion, a relay, another editor session &mdash; needs this one.</p>
+<div class="row"><a class="button" href="/account">Back to your account</a></div>""",
+    )
+
+
 @router.get("/account")
 async def account_home(request: Request, checkout: str | None = None) -> Response:
     session = await _browser_session(request)
@@ -462,6 +548,7 @@ async def account_home(request: Request, checkout: str | None = None) -> Respons
         if request.cookies.get(OAUTH_FLOW_COOKIE)
         else ""
     )
+    seats = await _seats_panel(session)
     return _page(
         "Your Cottage account",
         f"""
@@ -476,6 +563,7 @@ async def account_home(request: Request, checkout: str | None = None) -> Respons
   <input type="hidden" name="csrf_token" value="{html.escape(session.csrf_token)}">
   <button class="secondary" type="submit">Sign out</button>
 </form>
+{seats}
 """,
     )
 

@@ -765,6 +765,15 @@ dies with it, so detaching alone left a relay that outlives its session and cann
 participant token at rest — a deliberate trade against a chat path that breaks on every restart
 and breaks quietly. It does not survive a reboot; `status` is there so that gap stays visible.
 
+That left one room unrecoverable, which turned out to be a product defect rather than a bad
+evening: a participant token is shown once and hashed, the only way into a room is an invitation,
+and creating an invitation needs the token you lost. An authenticated owner could be locked out of
+their own room **permanently**. Fixed in D-094 — an account may rotate the token for a seat it
+owns, proven through the identity's `owner_user_id`, from the account console. Own seat only,
+`joined` seats only, one indistinguishable answer for every refusal, and the event records the
+fact rather than the credential. A room you can be evicted from by losing one string is not a
+durable coordination surface.
+
 Evidence: 753 backend tests passing with 17 skips, 86 worker with 7 skips, mypy and Ruff
 clean. Live on `app.cottageai.dev`: the socket accepts the new class, and a resident channel
 received a `task.proposed` unprompted — the first time this project's push has reached a

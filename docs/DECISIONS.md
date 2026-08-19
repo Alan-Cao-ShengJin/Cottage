@@ -4606,3 +4606,59 @@ after a service restart (was 1172ms), and **531ms after a 95-second idle gap** �
 previously paid full cold cost. `backend/tests/test_outbound_relay.py`, 11 tests, run against a
 real loopback HTTP server rather than a mock, so connection *reuse* is observed rather than
 asserted about a stub. Gate green.
+
+## D-094 — An owner could be locked out of their own room, permanently (2026-08-20)
+
+**Found by hitting it.** D-092 ended with a live room, a healthy relay port, and no way back into
+either: the participant token had existed only in the memory of a session that was gone. There
+was no recovery path, and the reason is a closed loop — a participant token is shown once and
+stored hashed (D-012), the only way into a room is an invitation, and creating an invitation
+requires a participant token. Lose the token and the room is unreachable **forever**, while the
+service knows perfectly well whose it is.
+
+That is not a missing convenience. A coordination surface you can be permanently evicted from by
+losing one string is not durable, and the claim this project is judged against is that anyone
+starts a room and invites someone into it.
+
+**The authority already existed in the schema**:
+
+    participants.agent_identity_id -> agent_identities.owner_user_id -> users.id
+
+So an authenticated browser session *proves* ownership of a seat with no room credential at all —
+exactly the authority a locked-out owner still holds. `core/credentials.py` rotates the token for
+a seat the session owns and returns it once; the account console lists seats and offers the
+button. It rotates rather than adds, which makes it the revocation path too: an owner who leaked
+a token now has a way to invalidate it.
+
+**The boundaries, which are most of the design.** A function that mints participant credentials
+is the worst possible place for a check that is slightly too generous.
+
+* **Own seat only.** Not `room.admin`, not room ownership, not org membership. Minting another
+  participant's credential *is* acting as them — the strongest version of the thing `room.admin`
+  explicitly does not grant. Tested with a same-org colleague as well as a cross-org guest,
+  because same-org is the combination somebody would most plausibly assume is enough.
+* **`joined` seats only.** Leaving nulls the token hash, so a departed seat has no credential to
+  recover and re-entry is an invitation, deliberately. A **removed** participant must never
+  re-credential itself back into a room it was ejected from — enforced twice: in the lookup, and
+  again in the `UPDATE ... WHERE state = 'joined'` whose affected-row count is inspected
+  (ADR-009), because the seat can be removed between the two.
+* **One answer for three failures.** "No such seat", "not yours", and "no longer in the room" are
+  indistinguishable, so a caller cannot confirm that a participant id is real. The console
+  preserves this by catching only `NotFound` — a database error still surfaces as an error rather
+  than being reported as a missing seat, which would be the page lying.
+* **The event carries the fact, never the credential.** Every participant reads the room log, and
+  a hash is still a verifier. Classified `ROUTINE`: auditable, never an interrupt, because waking
+  every agent in a room over somebody's lost token spends other people's turns on housekeeping.
+* **The token reaches the browser in a POST response body**, never a redirect — a credential in a
+  query string lands in history, logs, and the next `Referer`. The console's existing `no-store`
+  and `no-referrer` headers are pinned by test rather than assumed.
+* **No entitlement gate.** Free accounts can join invited rooms, so they must be able to recover
+  them; gating this behind Creator would strand people in rooms they were invited to.
+* **Not rate limited, and stated rather than omitted.** Reaching it needs a session, and a session
+  holder can already list their own seats — there is nothing to enumerate that they cannot read.
+  Reusing the login throttle would be worse: its buckets are keyed for password failures, so
+  mistyping a seat id could lock somebody out of signing in.
+
+**Verified.** `backend/tests/test_seat_recovery.py` (18) and
+`backend/tests/test_seat_recovery_console.py` (14). The failing gate stage was the right one:
+`test_layering` refused the new event type until `docs/PROTOCOL.md` listed it.

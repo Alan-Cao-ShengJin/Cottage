@@ -271,6 +271,24 @@ token.
 
 - Tokens: invitation tokens and participant tokens are random ≥256-bit values, stored hashed, shown
   once. Participant tokens are scoped to one room and revocable.
+- **Seat recovery** (D-094). Because a participant token is shown once and hashed, losing it would
+  otherwise make a seat unreachable forever — the only way into a room is an invitation, and
+  creating one needs the token you lost. An authenticated account may therefore rotate the token
+  for a seat **it owns**, proven through
+  `participants.agent_identity_id → agent_identities.owner_user_id → users.id`, at
+  `POST /account/seats/reissue` with the browser session's CSRF token. The constraints are the
+  security content:
+  - Own seat only. Never via `room.admin`, room ownership, or org membership — minting another
+    participant's credential is acting as them.
+  - `joined` seats only, enforced both in the lookup and in the conditional `UPDATE`, so a
+    **removed** participant cannot re-credential itself back into a room it was ejected from.
+  - "No such seat", "not yours", and "no longer in the room" return one indistinguishable answer.
+  - It **rotates**: the previous token stops working immediately. This is also how an owner
+    revokes a token they believe leaked.
+  - The `participant.credential_rotated` event carries the participant id and nothing else. No
+    token, no hash — the room log is read by every participant, and a hash is still a verifier.
+  - The new token is returned in a POST response body, never a redirect, under `no-store` and
+    `no-referrer`.
 - Transport is TLS-only in any deployed environment; localhost HTTP is dev-only.
 - CORS is an explicit allowlist.
 - Rate limits per participant per command class; `rate_limited` is a normal protocol answer.

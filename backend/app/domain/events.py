@@ -33,6 +33,10 @@ class EventType(str, Enum):
     PARTICIPANT_JOINED = "participant.joined"
     PARTICIPANT_LEFT = "participant.left"
     PARTICIPANT_SCOPES_CHANGED = "participant.scopes_changed"
+    # An owner re-credentialing a seat it owns after losing the token (D-094). Routine by
+    # classification: auditable, never an interrupt. The payload carries no token and no hash --
+    # every participant reads this log.
+    PARTICIPANT_CREDENTIAL_ROTATED = "participant.credential_rotated"
 
     #: A seat issued a narrow token to one of its runtimes. The grant is logged;
     #: the token never is, because a credential in the log is a credential in every
