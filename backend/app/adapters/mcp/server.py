@@ -95,6 +95,7 @@ from ...domain.directive import DirectiveAction
 from ...domain.disclosure import Audience, Disclosure
 from ...domain.goal import GoalStatus, WorkerDisposition
 from ...domain.job import JobOrigin, JobState
+from ...domain.message import Speaker
 from ...domain.room import (
     Participant,
     PrivacyClass,
@@ -592,6 +593,21 @@ produced them where it belongs, which is not here.
 Do not narrate the plumbing. Sequence numbers, byte counts, which poll returned, the
 fact that a message arrived at all — the room already records those and every reader can
 see them. Report the substance instead.
+
+### When your human is talking to the room, not to you
+Your person types into your interface, and you are the only way their words reach this
+room. So the room cannot tell an instruction to you from a remark meant for the people
+here — and neither can whoever reads the log next month. You can, so say which it is:
+`post_message(speaking_for="human")` when you are relaying them, and the default when you
+are speaking in your own voice.
+
+It matters because an undirected message from a person does not wake other agents, while
+one from an agent does. Get it wrong one way and a room full of agents each pays a model
+turn for "anyone want lunch?"; wrong the other way and an instruction is filed as chatter.
+
+Relaying is not acting. If what they said was work for you, do it — do not repeat it here
+and call that progress. And if you genuinely cannot tell which they meant, **ask them.**
+Neither mistake can be recovered from the message afterwards.
 
 ## Errors are information
 `lease_conflict` means someone else is on it — pick different work or say something.
@@ -2765,6 +2781,7 @@ async def post_message(
     body: str,
     to_participant_id: str | None = None,
     about_ref: str | None = None,
+    speaking_for: str = "agent",
     participant_token: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
@@ -2785,14 +2802,35 @@ async def post_message(
     it for reading along; the message is still delivered and still in the log. If you
     need an agent to act, pass `to_participant_id`, or use `steer_participant` for an
     instruction — those do wake it.
+
+    **`speaking_for` is how that rule reaches a person who is talking through you.** Your
+    human types into your interface, and you are the only way their words get here — so the
+    room cannot tell a prompt from a remark meant for the people in the room, and neither
+    can anyone reading the log afterwards. You can, so say which it is:
+
+    * `"agent"` (the default) — your own words about the work. Other agents may be woken.
+    * `"human"` — you are relaying your person. Everyone still receives it; what changes is
+      that it no longer wakes another agent unless addressed to that agent specifically.
+
+    Use `"human"` when your person is talking **to the people here** — asking something of
+    another human, answering one, or a remark that is not an instruction to you. Use the
+    default when you are reporting, asking or coordinating in your own voice.
+
+    Relaying is not the same as acting: if what they said was an instruction to *you*, do
+    the work instead of repeating it here. **And when you genuinely cannot tell which they
+    meant, ask them** — posting an instruction as chat loses the work, posting chat as
+    coordination wakes everybody, and neither is recoverable from the message alone.
     """
     try:
+        if speaking_for not in {s.value for s in Speaker}:
+            return _bad_enum("speaking_for", Speaker)
         participant = await _participant(ctx, participant_token)
         result = await messages.post(
             participant=participant,
             command=PostMessageCommand(
                 body=body,
                 about_ref=about_ref,
+                speaking_for=Speaker(speaking_for),
                 disclosure=_disclosure(to_participant_id=to_participant_id),
             ),
         )

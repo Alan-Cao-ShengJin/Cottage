@@ -143,6 +143,8 @@ export function useRoom(session: Session | null) {
                     privacy_class: event.privacy_class,
                     to_participant_id:
                       (payload["to_participant_id"] as string | null) ?? null,
+                    speaking_for:
+                      (payload["speaking_for"] as "agent" | "human" | undefined) ?? "agent",
                     created_at: event.ts,
                   },
                 ],

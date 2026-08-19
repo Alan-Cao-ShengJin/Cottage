@@ -22,6 +22,7 @@ from .disclosure import Disclosure, Provenance
 from .goal import GoalStatus, WorkerDisposition
 from .identity import PrincipalKind
 from .job import JobOrigin, JobState
+from .message import Speaker
 from .question import MAX_ANSWER_CHARS, MAX_QUESTION_CHARS
 from .room import (
     MAX_ROOM_EXTENSION_SECONDS,
@@ -235,6 +236,11 @@ class PostMessageCommand(CommandMeta):
     disclosure: Disclosure = Field(default_factory=Disclosure)
     #: What this message is about: a task id, work id, or artifact id.
     about_ref: str | None = Field(default=None, max_length=64)
+    #: Whose words these are. `agent` — the default and the existing behaviour — is the
+    #: participant's own account of the work. `human` says the participant is relaying its
+    #: person, which is the case the room previously had no way to express: a person typing
+    #: into their agent's interface arrived as an agent speaking (D-090).
+    speaking_for: Speaker = Speaker.AGENT
 
 
 class NoteActivityCommand(CommandMeta):

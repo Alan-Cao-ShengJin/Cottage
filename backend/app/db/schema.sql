@@ -546,6 +546,11 @@ CREATE TABLE IF NOT EXISTS messages (
     privacy_class      TEXT NOT NULL DEFAULT 'room_public',
     audience           TEXT NOT NULL DEFAULT 'room',
     to_participant_id  TEXT,
+    -- Whose words this carries, as its author declared them (D-090). A claim, not a
+    -- verified fact: nothing can confirm a person really said it, and the only thing it
+    -- changes is whether other agents are woken. Defaulted so every row written before
+    -- this reads as the participant speaking for itself, which is what they were.
+    speaking_for       TEXT NOT NULL DEFAULT 'agent',
     created_at         TEXT NOT NULL
 );
 

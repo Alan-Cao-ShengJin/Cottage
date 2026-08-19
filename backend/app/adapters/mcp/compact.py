@@ -348,6 +348,11 @@ def capacity(row: dict[str, Any]) -> dict[str, Any]:
 
 def message(row: dict[str, Any]) -> dict[str, Any]:
     out = {"from": row.get("participant_id"), "body": row["body"], "seq": row.get("seq")}
+    # Only when it is not the default. A participant speaking in its own voice is the
+    # ordinary case and needs no field; a relayed person changes how the line should be
+    # read, and changes whether anyone was woken for it (D-090).
+    if row.get("speaking_for") and row["speaking_for"] != "agent":
+        out["speaking_for"] = row["speaking_for"]
     if row.get("to_participant_id"):
         out["direct_to"] = row["to_participant_id"]
     if row.get("about_ref"):
@@ -476,7 +481,16 @@ _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
     "participant.joined": ("participant_id", "display_name", "role"),
     "participant.left": ("participant_id", "reason"),
     "presence.changed": ("participant_id", "liveness"),
-    "message.posted": ("participant_id", "body", "to_participant_id", "about_ref"),
+    "message.posted": (
+        "participant_id",
+        "body",
+        "to_participant_id",
+        "about_ref",
+        # Dropped when it is `agent`, like every other field here that equals its default:
+        # `event()` omits falsy values, and this one is only interesting when it says a
+        # person was relayed.
+        "speaking_for",
+    ),
     "work.declared": ("work_id", "participant_id", "headline", "targets", "status"),
     "work.updated": ("work_id", "headline", "status", "targets"),
     "work.ended": ("work_id", "reason"),

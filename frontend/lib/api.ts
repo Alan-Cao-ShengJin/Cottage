@@ -256,7 +256,11 @@ export const api = {
     request<{ message_id: string }>(`/api/rooms/${roomId}/messages`, {
       method: "POST",
       token: participantToken,
-      body: JSON.stringify(input),
+      // A person typing in this window is a person speaking, so the message says so.
+      // Redundant while the browser joins with a human identity — the wake rule reads the
+      // identity kind too — but it keeps the record honest either way, and the two paths
+      // into this room should not describe the same act differently (D-090).
+      body: JSON.stringify({ speaking_for: "human", ...input }),
     }),
 
   leave: (participantToken: string, roomId: string) =>

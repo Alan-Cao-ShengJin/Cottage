@@ -264,6 +264,11 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
                 "about_ref": row["about_ref"],
                 "privacy_class": row["privacy_class"],
                 "to_participant_id": row["to_participant_id"],
+                # Whose words these are (D-090). One seat's messages carry two different
+                # things — its own account of the work, and its person relayed through it —
+                # and a reader that cannot tell them apart is reading a transcript in which
+                # everybody sounds like an agent.
+                "speaking_for": row["speaking_for"],
                 "created_at": row["created_at"],
             }
         )

@@ -57,6 +57,11 @@ async def post(*, participant: Participant, command: PostMessageCommand) -> dict
                 "body": command.body,
                 "about_ref": command.about_ref,
                 "to_participant_id": decision.to_participant_id,
+                # Whose words these are, as the author declared them. On the event because
+                # that is what `relevance` reads to decide whether other agents are woken,
+                # and because a reader six months from now needs to know that "anyone want
+                # lunch?" was a person talking and not a coordination instruction (D-090).
+                "speaking_for": command.speaking_for.value,
             },
             disclosure=decision,
             causation_id=command.command_id,
@@ -67,8 +72,8 @@ async def post(*, participant: Participant, command: PostMessageCommand) -> dict
             """
             INSERT INTO messages (
                 id, room_id, seq, participant_id, body, about_ref,
-                privacy_class, audience, to_participant_id, created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                privacy_class, audience, to_participant_id, speaking_for, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 message_id,
@@ -80,6 +85,7 @@ async def post(*, participant: Participant, command: PostMessageCommand) -> dict
                 decision.privacy_class.value,
                 decision.audience.value,
                 decision.to_participant_id,
+                command.speaking_for.value,
                 now,
             ),
         )

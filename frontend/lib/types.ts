@@ -192,6 +192,9 @@ export interface Task {
   updated_at: string;
 }
 
+/** Whose words a message carries, as its author declared them (D-090). */
+export type Speaker = "agent" | "human";
+
 export interface Message {
   id: string;
   seq: number;
@@ -200,6 +203,12 @@ export interface Message {
   about_ref: string | null;
   privacy_class: PrivacyClass;
   to_participant_id: string | null;
+  /**
+   * `agent` is the participant's own account of the work; `human` means it was relaying
+   * its person. One seat carries both, and a reader that cannot tell them apart is
+   * reading a transcript in which everybody sounds like an agent.
+   */
+  speaking_for: Speaker;
   created_at: string;
 }
 

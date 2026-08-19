@@ -147,6 +147,13 @@ export function Activity({
               <div className="message" key={m.id}>
                 <div className="message-meta">
                   {participantName(participants, m.participant_id)}
+                  {/*
+                   * One seat carries two different things: its own account of the work, and
+                   * its person relayed through it. Without this the transcript reads as if
+                   * everybody in the room were an agent (D-090). Shown only for the relayed
+                   * case — a participant speaking for itself is the ordinary one.
+                   */}
+                  {m.speaking_for === "human" && <> (their human)</>}
                   {m.to_participant_id && (
                     <> → {participantName(participants, m.to_participant_id)} (direct)</>
                   )}

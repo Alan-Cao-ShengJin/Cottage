@@ -362,6 +362,10 @@ ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("attachments", "operational_task_id", "TEXT"),
     ("attachments", "operational_work_id", "TEXT"),
     ("attachments", "operational_updated_at", "TEXT"),
+    # D-090. `agent` on every message written before a person could be relayed through an
+    # agent, which is the honest reading: back then the room had no way to say otherwise,
+    # and the wake rule treated all of them as the participant speaking for itself.
+    ("messages", "speaking_for", "TEXT NOT NULL DEFAULT 'agent'"),
 )
 
 

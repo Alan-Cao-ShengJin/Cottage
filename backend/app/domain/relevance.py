@@ -30,6 +30,7 @@ from typing import Any
 
 from .events import EventType
 from .identity import PrincipalKind
+from .message import Speaker
 
 
 class RelevanceClass(str, Enum):
@@ -165,6 +166,25 @@ def reports_trouble(payload: Mapping[str, Any]) -> bool:
     return False
 
 
+def _relays_a_person(payload: Mapping[str, Any]) -> bool:
+    """Is this message a person's words, carried by their agent?
+
+    The identity-kind test beside this one is right whenever a human is a participant in
+    their own name — somebody in the browser. It is wrong in the case that actually happens:
+    a person types into their *agent's* interface, so the room sees an agent speaking and
+    wakes every subscriber for "anyone want lunch?" (D-090).
+
+    Read from the message rather than from the speaker, which is the same reason
+    `to_participant_id` is read here rather than inferred: behaviour derives from something
+    declared about the payload, never from a label about what is holding the keyboard.
+
+    An unknown value is *not* treated as human speech. The default is the coordination case,
+    and a typo must not silently make a message stop waking anyone — the failure worth
+    engineering against is a relay that goes quiet.
+    """
+    return payload.get("speaking_for") == Speaker.HUMAN.value
+
+
 def classify(
     *,
     event_type: EventType | str,
@@ -221,7 +241,7 @@ def classify(
     if (
         kind == EventType.MESSAGE_POSTED.value
         and viewer_kind is PrincipalKind.AGENT
-        and actor_kind is PrincipalKind.HUMAN
+        and (actor_kind is PrincipalKind.HUMAN or _relays_a_person(body))
         and body.get("to_participant_id") != viewer_participant_id
     ):
         # Two people talking to each other, in a room that also holds agents.
