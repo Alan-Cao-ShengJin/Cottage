@@ -106,7 +106,7 @@ async def post(*, participant: Participant, command: PostMessageCommand) -> dict
                 now,
             ),
         )
-        return CommandOutcome(result={"message_id": message_id}, events=[event])
+        return CommandOutcome(result={"message_id": message_id, "created_at": now}, events=[event])
 
     outcome = await execute_command(
         command_id=command.command_id,
@@ -121,4 +121,7 @@ async def post(*, participant: Participant, command: PostMessageCommand) -> dict
         "message_id": str(outcome.result.get("message_id", message_id)),
         "seq": outcome.seq,
         "replayed": outcome.replayed,
+        # The row's own timestamp, so a client rendering a receipt shows when the room
+        # recorded this rather than when its adapter happened to look at a clock.
+        "created_at": str(outcome.result.get("created_at", now)),
     }

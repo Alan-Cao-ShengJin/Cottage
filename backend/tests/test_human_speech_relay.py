@@ -371,7 +371,13 @@ async def test_a_relay_comes_back_with_a_receipt_the_agent_is_told_to_print(make
     )
     assert posted["ok"] is True
     receipt = posted["sent"]
-    assert "Sent to Wren" in receipt
+    # Three lines, and no prose explaining itself: the question is "did that go out?".
+    assert len(receipt.splitlines()) == 3
+    # The room's own stamp, not the adapter's clock, and explicitly UTC because the server
+    # does not know the reader's zone.
+    assert receipt.startswith("Sent ")
+    assert posted["created_at"][11:19] + "Z" in receipt
+    assert "Wren" in receipt
     # As it will read to everybody else: the person, and the seat that carried it.
     assert "Alan (via Room Owner)" in receipt
     assert "anyone wanna get lunch?" in receipt
@@ -391,8 +397,7 @@ async def test_the_receipt_says_who_is_actually_watching(make_room, join):
         speaking_as="Alan",
         participant_token=fixture.owner_token,
     )
-    assert "In the room now: Bea's agent" in posted["sent"]
-    assert "Agents were not woken" in posted["sent"]
+    assert "live: Bea's agent" in posted["sent"]
 
     # With nobody live, it says that instead of implying an audience.
     from app.core import presence as presence_svc
@@ -406,7 +411,7 @@ async def test_the_receipt_says_who_is_actually_watching(make_room, join):
         speaking_as="Alan",
         participant_token=fixture.owner_token,
     )
-    assert "none watching live right now" in again["sent"]
+    assert "nobody watching live" in again["sent"]
 
 
 async def test_an_empty_room_says_nobody_has_read_it(make_room):
@@ -417,7 +422,7 @@ async def test_an_empty_room_says_nobody_has_read_it(make_room):
         speaking_as="Alan",
         participant_token=fixture.owner_token,
     )
-    assert "Nobody else is in the room yet" in posted["sent"]
+    assert "room empty" in posted["sent"]
 
 
 async def test_an_agents_own_message_gets_no_receipt(make_room):
@@ -447,3 +452,28 @@ async def test_a_receipt_that_cannot_render_does_not_fail_a_posted_message(make_
     )
     assert posted["ok"] is True
     assert "anyone wanna get lunch?" in posted["sent"]
+
+
+async def test_the_clock_admits_it_cannot_read_a_stamp_rather_than_inventing_one():
+    """Sliced rather than parsed: the value comes from `utcnow_iso` and is already UTC, so
+    reformatting cannot move the instant. A receipt is the wrong place to find out a timezone
+    conversion was wrong — and a malformed stamp says so instead of guessing."""
+    assert compact.clock("2026-08-19T12:47:03.512Z") == "12:47:03Z"
+    assert compact.clock("2026-08-19 12:47:03Z") == "12:47:03Z"
+    assert compact.clock("") == "?"
+    assert compact.clock("not-a-timestamp") == "?"
+
+
+async def test_the_message_service_returns_the_row_stamp_not_the_callers_clock(make_room):
+    """A receipt showing a time the room did not record is a receipt for a different event."""
+    from app.core import messages as messages_svc
+
+    fixture = await make_room()
+    result = await messages_svc.post(
+        participant=fixture.owner,
+        command=PostMessageCommand(body="hello", disclosure=Disclosure()),
+    )
+    row = await db.fetch_one(
+        "SELECT created_at FROM messages WHERE id = ?", (result["message_id"],)
+    )
+    assert result["created_at"] == row["created_at"]

@@ -421,7 +421,9 @@ def _bad_enum(field: str, allowed: Any) -> dict[str, Any]:
     }
 
 
-async def _sent_receipt(participant: Participant, *, body: str, speaking_as: str) -> str:
+async def _sent_receipt(
+    participant: Participant, *, body: str, speaking_as: str, at: str = ""
+) -> str:
     """Render what the sender sees the moment their words leave for the room.
 
     Two targeted reads rather than a snapshot: a relayed remark is a person typing, so this
@@ -448,10 +450,16 @@ async def _sent_receipt(participant: Participant, *, body: str, speaking_as: str
         ]
         own = participant.identity.display_name
         attribution = f"{speaking_as} (via {own})" if speaking_as else own
-        return compact.sent(room_name=room.name, attribution=attribution, body=body, others=others)
+        return compact.sent(
+            room_name=room.name,
+            attribution=attribution,
+            body=body,
+            others=others,
+            at=at,
+        )
     except Exception:  # the message is already posted; say so regardless of the rendering
         log.exception("could not render the sent receipt")
-        return f"Sent to the room: {body.strip()[:200]}"
+        return f"Sent {compact.clock(at)} · {body.strip()[:200]}"
 
 
 def _disclosure(
@@ -2920,7 +2928,12 @@ async def post_message(
             # instruction and went off to do something else" — and the second is what the
             # `>` convention exists to prevent, so the confirmation is part of the fix
             # rather than a nicety (D-090).
-            response["sent"] = await _sent_receipt(participant, body=body, speaking_as=speaking_as)
+            response["sent"] = await _sent_receipt(
+                participant,
+                body=body,
+                speaking_as=speaking_as,
+                at=str(result.get("created_at") or ""),
+            )
             response["next_step"] = "Print `sent` to your person verbatim, then carry on."
         return response
     except RoomError as exc:

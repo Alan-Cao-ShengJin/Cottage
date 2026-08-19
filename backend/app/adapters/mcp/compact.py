@@ -591,10 +591,8 @@ _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
-SENT_TEMPLATE = """Sent to {room_name} — {attribution}
-
-  {body}
-
+SENT_TEMPLATE = """Sent {at} · {attribution} · {room_name}
+{body}
 {audience}"""
 
 
@@ -604,49 +602,53 @@ def sent(
     attribution: str,
     body: str,
     others: list[dict[str, Any]],
+    at: str = "",
 ) -> str:
     """The receipt a person sees the instant their words leave for the room.
 
-    Rendered server-side and printed verbatim, for the reason `welcome` and `joined` are
-    (D-085, D-087): what a person sees at a product moment is behaviour, not a rendering
-    accident, and left to each client one prints a tidy line, another prints the plumbing,
-    and a third prints nothing at all. Nothing is the failure that matters here — a person
-    who typed a message into a chat window and saw no acknowledgement has no way to tell
-    "sent" from "my agent decided that was an instruction and did something else".
+    Three lines, and the brevity is the design. The first version explained the wake
+    suppression in prose and it read as the room justifying itself to somebody who had asked
+    a one-word question — *did that go out?* The answer is a timestamp, the attribution
+    everyone else will see, the words, and who is there. Anything past that is documentation,
+    and `7a157ed` already established that length here spends the reader's attention.
 
-    Deliberately only for a *relay*. An agent posting its own coordination knows it posted;
-    a person who typed does not, and is the one waiting.
+    Rendered server-side for the reason `welcome` and `joined` are (D-085, D-087): what a
+    person sees at a product moment is behaviour rather than a rendering accident, and left to
+    each client one prints a tidy line, another prints the plumbing, and a third prints
+    nothing — and nothing is the failure that matters, because a person who saw no
+    acknowledgement cannot tell "sent" from "my agent treated that as an instruction".
 
-    The audience line is the honest half. A relayed remark does not wake other agents — that
-    is the whole point of declaring it — so saying "sent" alone would let a person believe
-    they had interrupted somebody. It names who is present and states plainly that agents
-    were not woken, because the alternative is discovering it from silence.
+    `at` is the room's own stamp for the message, shortened to `HH:MM:SSZ`. Explicitly UTC,
+    since the server does not know the reader's zone and a bare time would invite the wrong
+    one. `audience` states who is receiving it live and does not argue about why — the
+    suppression is recorded in D-090 for anyone who wants the reasoning.
     """
     reachable = [p for p in others if (p.get("liveness") or "") in _WATCHING_LIVE]
     if not others:
-        audience = "Nobody else is in the room yet, so nobody has read it."
+        audience = "room empty"
     elif reachable:
-        names = _name_list(reachable)
-        # A plain newline, not `LINE_BREAK`: that constant carries the indentation that keeps
-        # the welcome sheet's value column aligned, and this is prose rather than a sheet.
-        audience = (
-            f"In the room now: {names}.\n"
-            "Anyone watching the room live has it. Agents were not woken — this is chat,\n"
-            "not coordination — so an agent shows its person at its next look."
-        )
+        audience = f"live: {_name_list(reachable)}"
     else:
-        people = "person" if len(others) == 1 else "people"
-        audience = (
-            f"{len(others)} other {people} in the room, none watching live right now.\n"
-            "It is in the room and waiting for them; agents were not woken, because\n"
-            "this is chat rather than coordination."
-        )
+        audience = f"nobody watching live · {len(others)} in room"
     return SENT_TEMPLATE.format(
+        at=clock(at),
         room_name=room_name or "the room",
         attribution=attribution,
         body=body.strip()[:400],
         audience=audience,
     )
+
+
+def clock(timestamp: str) -> str:
+    """`HH:MM:SSZ` from an RFC 3339 stamp, or `?` rather than a guess.
+
+    Parsed by slicing rather than by a date library: the value comes from `utcnow_iso` and is
+    already UTC, so reformatting it cannot change the instant — and a receipt is the wrong
+    place to discover that a timezone conversion was wrong.
+    """
+    if len(timestamp) >= 19 and timestamp[10] in "T ":
+        return f"{timestamp[11:19]}Z"
+    return "?"
 
 
 #: Liveness grades that mean somebody is receiving the room as it happens. `attended` is
@@ -660,7 +662,7 @@ def _name_list(rows: list[dict[str, Any]]) -> str:
     shown = names[:_NAMES_SHOWN]
     rest = len(names) - len(shown)
     joined = ", ".join(shown)
-    return f"{joined} and {rest} more" if rest > 0 else joined
+    return f"{joined} +{rest}" if rest > 0 else joined
 
 
 def hierarchy(snapshot: dict[str, Any]) -> dict[str, Any]:
