@@ -2,7 +2,7 @@
 
 Ordered milestones. Update **before** implementing and **after** every meaningful phase.
 
-_Last updated: 2026-08-17._
+_Last updated: 2026-08-19._
 
 ---
 
@@ -632,9 +632,9 @@ written up as §2.2.
 
 ### M3.0 — The coordination hierarchy: orchestrator, supervisor, worker
 
-**Stage 1 done (2026-08-19); stages 2-5 open.** Decision recorded in **D-088**. The alignment
-record — including the verified `/goal` findings and the reasoning behind what was reused — is
-`docs/COTTAGE_RUNTIME_ALIGNMENT.md`.
+**Stages 1 and 2 done (2026-08-19); stages 3-5 open.** Decisions recorded in **D-088** and
+**D-089**. The alignment record — including the verified `/goal` findings and the reasoning
+behind what was reused — is `docs/COTTAGE_RUNTIME_ALIGNMENT.md`.
 
 A room becomes a continuously occupied workspace: humans steer strategically, the creator's AI
 orchestrates, every other human's AI supervises, and supervisors own downstream workers. The
@@ -666,12 +666,67 @@ refused, a backward supersession refused); 565 pre-existing backend tests still 
 role assignment wired into create and join; `test_layering` docs-parity green for all fourteen
 new event types.
 
-**Open:** stage 2 (persistent monitoring hardening, reaction-queue states, the `/goal` Stop-hook
-adapter), stage 3 (worker pool and review gate in the companion), stage 4 (orchestrator
-allocation loop), stage 5 (realtime UI for roles, goals, board and capacity). The companion
-runtime already owns an independent monitor thread, three-tier event relevance, a durable
-reaction queue and bounded context continuity from D-083, so stage 2 extends that rather than
-building it.
+**Stage 2 — the transport surface, and the runtime that consumes it.** Decision recorded in
+**D-089**. Stage 1 proved every invariant and exposed none of them: a grep over `adapters/`,
+`api/` and `projections.py` for the new services returned empty, so from a client's point of
+view that deploy changed nothing.
+
+*The surface.* 20 ARP HTTP routes and 15 MCP tools, deliberately at parity — a companion runs
+on HTTP and an agent runs on MCP, and a service reachable from one and not the other narrows
+universality by a host family. Roles, jobs, goals, capacity and workers now reach clients
+through the snapshot and the per-seat resume payload, read inside the snapshot's own
+transaction with its cursor. The compact coordination view includes each section only when it
+carries information, because five unconditional sections would add a fixed cost to every poll
+in every room; `detail="hierarchy"` is the allocation view, and is a `detail` mode rather than a
+new tool because that is the only route to a connector which cached its tool list (D-040).
+`test_transport_conformance.py` gained five concerns, which also makes the A2A roadmap honest.
+The ChatGPT Action list gained four participant-side operations and no orchestrator ones — an
+Action is a participant, not an administrator.
+
+*Two Stage 1 defects the projection exposed immediately*, both invisible while nothing read
+`room_roles`: a retired role row was indistinguishable from no row, so standing an owner down
+read straight back as orchestrator; and worse, an orchestrator handover **reversed itself in
+the read model** because the outgoing owner re-derived the position and won on seniority, while
+the partial unique index correctly held one live row. Derivation is now subordinate to what is
+stored. This is the argument for writing a projection early rather than late.
+
+*Four doc/code disagreements resolved rather than drifted*, per `CLAUDE.md`: `job.updated` and
+`worker.registered` now emit what `docs/PROTOCOL.md` §2 documented; the doc now lists what
+`supervisor.goal_closed` and `worker.finished` actually carry; and the id prefix line gained
+`goal_`, `job_`, `wrx_`, `dir_`, `ckp_`, `qst_`, `ans_`.
+
+*The runtime.* An explicit reaction lifecycle — `pending` / `running` / `completed` / `failed` /
+`superseded`, with an attempt count and the idempotency key stamped at lease time — replacing a
+lifecycle that was implied by three things that had to agree. Five specific losses followed from
+that and are fixed: `reacted_seqs` never reached disk so a restart re-answered everything;
+persistence was a side effect of the cursor advancing, so a page that enqueued without moving
+the cursor left it unwritten; gap recovery bypassed the monotonic guard; queue overflow
+discarded unanswered reactions silently; and a permanently failing reaction was retried forever.
+Plus a local goal projection the companion writes and clears, a goal acknowledgement so the room
+knows when the supervisor read a version, the goal folded into every turn's context, and
+`worker_disposition=stop` cancelling the executor from the monitor thread.
+
+*The `/goal` adapter.* `worker/cottage_goal_hook.py`. The Stop contract was re-verified rather
+than assumed; it blocks with exit 2 and stderr, at most once per version per session, and it
+**fails open on everything** — nothing in the documented contract guards a Stop hook against an
+infinite loop, so the loop guard is this hook's own record and the block is abandoned if that
+record cannot be written.
+
+Evidence: gate fully green — 671 backend tests passing with 17 skips, 85 worker tests with 7
+skips, mypy clean, Ruff and Ruff format clean on both trees. 44 new adapter-level tests in
+`backend/tests/test_hierarchy_surface.py` and 29 in `worker/tests/test_goal_and_reactions.py`;
+adapter-level on purpose, since the two role defects were found by a projection test and not by
+the 52 core tests already passing. `tsc` skips in this environment (not installed); no frontend
+change was made in this stage.
+
+**Not verified live.** Not deployed, and `CLAUDE.md` is explicit that a green gate is not
+evidence for `adapters/` or `api/`. `docs/INTEROP.md` §3.1 states what may not be claimed yet.
+
+**Open:** stage 3 (worker pool and review gate in the companion, capacity reported from the
+runtime, parallel execution beyond the single `Worker.lease`), stage 4 (the orchestrator
+allocation loop: prioritisation, reallocation, dependency and conflict handling across
+supervisors), stage 5 (realtime UI for roles, goals, board and capacity — the hierarchy is
+currently invisible to a human watching a room in the browser).
 
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,

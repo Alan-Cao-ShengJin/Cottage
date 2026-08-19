@@ -34,7 +34,7 @@ ambiguity.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from ..db import database as db
 from ..domain import ids
@@ -73,6 +73,18 @@ DEFAULT_HISTORY_LIMIT = 20
 def immutable_contract() -> tuple[str, ...]:
     """The obligations no goal may override. Returned verbatim for a runtime to present."""
     return IMMUTABLE_CONTRACT
+
+
+async def _one(sql: str, params: Any, tx: db.Tx | None) -> Any:
+    return await (tx.fetch_one(sql, params) if tx else db.fetch_one(sql, params))
+
+
+async def _all(sql: str, params: Any, tx: db.Tx | None) -> list[Any]:
+    return await (tx.fetch_all(sql, params) if tx else db.fetch_all(sql, params))
+
+
+async def _value(sql: str, params: Any, tx: db.Tx | None) -> Any:
+    return await (tx.fetch_value(sql, params) if tx else db.fetch_value(sql, params))
 
 
 def _to_version(row: Any) -> GoalVersion:
@@ -123,54 +135,103 @@ def _to_goal(row: Any, current: GoalVersion | None = None) -> SupervisorGoal:
     )
 
 
-async def current_for(room_id: str, participant_id: str) -> SupervisorGoal | None:
+async def current_for(
+    room_id: str, participant_id: str, *, tx: db.Tx | None = None
+) -> SupervisorGoal | None:
     """This seat's active goal with its current version loaded, or None.
 
     Scoped by room like every other read here: a global id lookup would answer "does this
     exist" for a room the caller cannot see, which is an existence oracle.
     """
-    row = await db.fetch_one(
+    row = await _one(
         "SELECT * FROM supervisor_goals WHERE room_id = ? AND supervisor_participant_id = ? "
         "AND status = ?",
         (room_id, participant_id, GoalStatus.ACTIVE.value),
+        tx,
     )
     if row is None:
         return None
-    version_row = await db.fetch_one(
+    version_row = await _one(
         "SELECT * FROM supervisor_goal_versions WHERE goal_id = ? AND version = ?",
         (row["id"], int(row["current_version"])),
+        tx,
     )
     return _to_goal(row, _to_version(version_row) if version_row is not None else None)
 
 
-async def goals_for_room(room_id: str) -> list[SupervisorGoal]:
-    """Every active goal in the room, current version loaded, oldest first."""
-    rows = await db.fetch_all(
-        "SELECT * FROM supervisor_goals WHERE room_id = ? AND status = ? ORDER BY created_at ASC",
+async def goals_for_room(room_id: str, *, tx: db.Tx | None = None) -> list[SupervisorGoal]:
+    """Every active goal in the room, current version loaded, oldest first.
+
+    One join rather than a query per goal. The per-goal form is what a projection would
+    reach for and is linear in the number of supervisors, which is exactly the shape that
+    makes a room-state read cost grow with the size of the room.
+    """
+    rows = await _all(
+        """
+        SELECT g.*, v.rowid AS v_rowid, v.objective, v.instructions, v.worker_plan,
+               v.related_job_ids, v.dependencies, v.constraints_json,
+               v.acceptance_criteria, v.reporting_requirements, v.worker_disposition,
+               v.reason, v.priority, v.source, v.privacy_class,
+               v.issued_by_participant_id, v.replaces_version, v.created_seq,
+               v.created_at AS v_created_at, v.superseded_at, v.superseded_by_version,
+               v.acknowledged_at, v.acknowledged_note, v.acknowledged_rejected,
+               v.version AS v_version
+          FROM supervisor_goals g
+          LEFT JOIN supervisor_goal_versions v
+            ON v.goal_id = g.id AND v.version = g.current_version
+         WHERE g.room_id = ? AND g.status = ?
+         ORDER BY g.created_at ASC
+        """,
         (room_id, GoalStatus.ACTIVE.value),
+        tx,
     )
     out: list[SupervisorGoal] = []
     for row in rows:
-        version_row = await db.fetch_one(
-            "SELECT * FROM supervisor_goal_versions WHERE goal_id = ? AND version = ?",
-            (row["id"], int(row["current_version"])),
-        )
-        out.append(_to_goal(row, _to_version(version_row) if version_row is not None else None))
+        # `v_version` is NULL only if the join found no row for `current_version`, which a
+        # foreign key and the allocator together make unreachable. Handled rather than
+        # asserted: a projection that raises on one malformed goal shows the reader
+        # nothing about the other twelve.
+        version = _to_version(_JoinedVersionRow(row)) if row["v_version"] is not None else None
+        out.append(_to_goal(row, version))
     return out
 
 
+class _JoinedVersionRow:
+    """Presents a joined row under the column names `_to_version` expects.
+
+    The alternative was a second query per goal. Aliasing in SQL is not enough on its own
+    because `goal_id`, `version` and `created_at` exist on both sides of the join, so the
+    disambiguated aliases are mapped back here rather than `_to_version` being taught two
+    row shapes.
+    """
+
+    __slots__ = ("_row",)
+
+    _REMAPPED: ClassVar[dict[str, str]] = {"version": "v_version", "created_at": "v_created_at"}
+
+    def __init__(self, row: Any) -> None:
+        self._row = row
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "goal_id":
+            return self._row["id"]
+        return self._row[self._REMAPPED.get(key, key)]
+
+
 async def history_for(
-    room_id: str, goal_id: str, *, limit: int = DEFAULT_HISTORY_LIMIT
+    room_id: str, goal_id: str, *, limit: int = DEFAULT_HISTORY_LIMIT, tx: db.Tx | None = None
 ) -> tuple[list[GoalVersion], int]:
     """Every version this goal has had, newest first, with the untruncated total."""
-    total = await db.fetch_value(
+    total = await _value(
         "SELECT COUNT(*) FROM supervisor_goal_versions WHERE goal_id = ? AND room_id = ?",
         (goal_id, room_id),
+        tx,
     )
-    rows = await db.fetch_all(
+    rows = await _all(
         "SELECT * FROM supervisor_goal_versions WHERE goal_id = ? AND room_id = ? "
         "ORDER BY version DESC LIMIT ?",
         (goal_id, room_id, max(1, limit)),
+        tx,
     )
     return [_to_version(row) for row in rows], int(total or 0)
 

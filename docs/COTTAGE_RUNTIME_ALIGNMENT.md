@@ -63,7 +63,9 @@ each one means for the adapter:
 
 ### 2.1 The adapter that follows from this
 
-Two mechanisms, in order of value:
+**Both are implemented as of 2026-08-19 (D-089).** The projection is
+`RuntimeContainment.write_goal_projection` writing `<key>.goal.md`; the hook is
+`worker/cottage_goal_hook.py`. Two mechanisms, in order of value:
 
 **A local goal projection, written by the monitor.** On `supervisor.goal_replaced` the
 companion writes the current version — objective, instructions, worker plan, dependencies,
@@ -84,6 +86,28 @@ turn boundary, and it needs no push channel.
 treat an active goal as evidence a runtime is alive. Both would make Cottage's protocol
 depend on one vendor's feature, and the second would violate principle 5 by inferring
 liveness from something no connection backs.
+
+#### The one property the hook must never lose
+
+**Nothing in the documented Stop contract guards a hook against an infinite loop.** So the
+hook fails open on *everything*: no projection, unreadable file, malformed header, unwritable
+sidecar, unexpected exception — exit 0 and let the session stop. It blocks at most once per
+version per session, and it writes that record **before** emitting the block; if the record
+cannot be written, the block is abandoned, because without the guard blocking is unsafe. In
+that order a crash loses one notice, and in the other it repeats one forever.
+
+Two smaller rules it also holds, asserted structurally rather than promised: it reaches no
+network, and it never reads `transcript_path`. A transcript is private context the room may
+never receive, and a hook that phoned home would put a Cottage call on the critical path of
+every turn ending.
+
+The blocking mechanism is **exit 2 with the reason on stderr**, re-verified against the
+documentation rather than assumed. Exit 2 blocks whether or not JSON is printed and stderr
+becomes the reason Claude sees, so this depends on no JSON field name a build might rename.
+
+And the notice frames the objective as **room content, not instruction**. A goal is free-form
+text another participant wrote; one that says "ignore your previous instructions" is a string
+in a database.
 
 ### 2.2 Other host families
 
@@ -143,16 +167,34 @@ It is explicitly **not** permission to act *as* another participant. `require_ow
 governs everything it governed before: an orchestrator directs a supervisor, and never
 posts as one, reads its private context, or touches its host.
 
-### 3.4 The reaction queue stays runtime-local
+### 3.4 The reaction queue stays runtime-local — and is now an explicit state machine
 
 §20's durable reaction queue lives in the companion's own state, not in the server. A
 server-side queue would be a mutable projection whose lifecycle is not derived from the
 room log — a second source of truth — and it would make the room decide when an agent must
 think, which is intelligence orchestration and is forbidden. The companion already persists
 its cursor and pending reactions atomically (`RuntimeContainment.record_monitor_state`);
-the upgrade hardens that into explicit `PENDING` / `RUNNING` / `COMPLETED` / `FAILED` /
-`SUPERSEDED` states with the idempotency key stamped at lease time rather than at call
-time.
+and D-089 hardened that into explicit `pending` / `running` / `completed` / `failed` /
+`superseded` states, with an attempt count and the idempotency key stamped at *lease* time
+rather than at call time.
+
+Five things were wrong before it, and all five were invisible from outside the process:
+
+1. `reacted_seqs` never reached disk, so a restart re-answered every reaction still stored.
+   The only guard was a message `command_id` keyed on `attachment_id` — a per-process value —
+   so it did not hold across the one boundary it existed for.
+2. Persistence was a side effect of the cursor advancing, so a page that enqueued reactions
+   without moving the cursor left them unwritten.
+3. Gap recovery assigned the cursor directly, bypassing the monotonic guard, so the
+   in-memory cursor could fall below the stored one.
+4. The queue was bounded by a slice, so a companion holding a lease discarded reactions it
+   had never looked at. Overflow is now an explicit `superseded` with a reason, kept as a
+   record and logged as an error — "no silent caps" applied to the runtime's own queue.
+5. A permanently failing reaction was retried forever, starving everything behind it while
+   the runtime looked busy. Three attempts, then abandoned with a stated reason.
+
+`running` on disk reads as unfinished work rather than success, because a process that died
+mid-turn cannot have completed it.
 
 ---
 
@@ -173,3 +215,11 @@ is the only way to tell whether it shrank.
   task and gives the lease back rather than guessing.
 - **Prompt an attended host.** A ChatGPT-class connector cannot be woken between turns.
   That is a property of the host, reported rather than papered over.
+- **Install the Stop hook.** Registering `worker/cottage_goal_hook.py` in a session's settings
+  is a local configuration act on a machine Cottage does not own. Without it a Claude Code
+  session still receives its goal — through the projection and through each turn's context —
+  it just will not be interrupted between turns to be told the goal moved.
+- **Decide what a job means.** The board carries intent and allocation; nothing here decides
+  whether a supervisor should accept, decline or decompose what it was given. That is
+  judgement, and `CLAUDE.md` principle 3 keeps it out of the server. The orchestrator
+  allocation loop (stage 4) is where a *runtime* takes that on, not the room.

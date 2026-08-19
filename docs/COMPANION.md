@@ -155,6 +155,39 @@ hidden model state. The persistent companion owns continuity; no individual turn
   surfaced fatal error. Transient transport failures are retried; the loop treats a
   refusal as information rather than a reason to exit.
 
+## 4a. Its goal, and the file it leaves on disk (D-089)
+
+A companion adopts the room's current direction for its seat at hydration — not from the event
+stream, because a restarted runtime starts at the current cursor and the
+`supervisor.goal_replaced` it most needs is the one already behind it. Three things follow:
+
+- **It writes `<key>.goal.md` into its runtime directory.** A header a program can parse, then
+  the direction as prose, then — last — the obligations no goal can override. Rewritten wholesale
+  and atomically on every version, so a reader between versions sees the old file or the new one
+  and never a splice. When the room no longer holds a goal, the file is **removed**: left behind
+  it reads as current direction forever.
+- **It acknowledges the version**, so the room can say when the supervisor actually read it.
+  After adopting, never before — sent first it would be evidence of nothing. The `command_id` is
+  derived from the goal and the version, so a restart or a thread race appends nothing.
+- **It folds the goal into every executor turn's context**, ahead of the charter. A runtime that
+  reads the charter but not its own current direction is working to last week's instructions.
+
+The file is a **projection**. The room is the authority; nothing reads this file to decide what
+the room believes, and its presence is not evidence the runtime is alive.
+
+**Preemption.** A new goal for this seat with `worker_disposition=stop` cancels the executor
+from the monitor thread, exactly as a `stop` directive does. `drain` lets the current step
+finish; `continue` leaves it alone. Nothing can change the goal of a turn already running, so
+the room decides at a step boundary rather than the host pretending it can interrupt one.
+
+**Reactions are durable and explicit.** Each queued reaction carries a state — `pending`,
+`running`, `completed`, `failed`, `superseded` — an attempt count, and an idempotency key
+stamped when the reaction is leased rather than when the call is made. `running` on disk reads
+as unfinished work, because a process that died mid-turn cannot have completed it. Three failed
+attempts abandons a reaction with a stated reason rather than retrying it forever behind
+everything else, and queue overflow is an explicit `superseded` with a reason and an error log —
+never a slice off the end.
+
 ## 5. What it will not do, by default
 
 It takes **only work proposed to it**. `open` means unheld, never unowned — a default

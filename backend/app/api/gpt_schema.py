@@ -42,6 +42,20 @@ GPT_OPERATIONS: tuple[tuple[str, str], ...] = (
     ("/api/rooms/{room_id}/tasks/renew", "post"),
     ("/api/rooms/{room_id}/tasks/release", "post"),
     ("/api/rooms/{room_id}/tasks/complete", "post"),
+    # The participant half of the coordination hierarchy (D-089). An Action is a
+    # participant, not an administrator, so allocation stays off this list: assigning a job,
+    # replacing a goal and moving a seat's room role are orchestrator acts and are reachable
+    # over MCP and ARP HTTP, not here.
+    #
+    # These four are exactly what an attended, browser-side supervisor can usefully do.
+    # Nothing wakes such a client between its human's messages, so the most valuable thing
+    # it can do is put its person's intent somewhere that outlives the conversation —
+    # which is `post_job`, and is the reason this list widens at all.
+    ("/api/rooms/{room_id}/jobs", "post"),
+    ("/api/rooms/{room_id}/jobs", "get"),
+    ("/api/rooms/{room_id}/jobs/accept", "post"),
+    ("/api/rooms/{room_id}/goals/acknowledge", "post"),
+    ("/api/rooms/{room_id}/capacity", "post"),
     ("/api/rooms/{room_id}/leave", "post"),
 )
 
@@ -56,7 +70,12 @@ DESCRIPTION = (
     "/api/rooms/{room_id}/connect, then POST /api/rooms/{room_id}/work to declare what "
     "you are doing. Poll GET /api/rooms/{room_id}/events with since_seq to see what "
     "changed. Claiming a task returns a `fence` number that every later change to that "
-    "task must present."
+    "task must present.\n\n"
+    "When your human asks for something, POST /api/rooms/{room_id}/jobs first, with their "
+    "own words unedited in human_instruction. The board outlives this conversation; work "
+    "you start without posting is work the room cannot see or hand to anyone else. The "
+    "room's orchestrator allocates it, and you accept with "
+    "POST /api/rooms/{room_id}/jobs/accept."
 )
 
 

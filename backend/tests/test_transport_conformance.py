@@ -49,6 +49,26 @@ SEMANTIC_ROWS = (
     SemanticRow("conflicts", "get_snapshot", "get_room_state", "conflicts"),
     SemanticRow("cursor_and_resume", "websocket_stream", "await_room_events", "cursor_and_resume"),
     SemanticRow("leave_and_peer_loss", "leave_room", "leave_room", "leave_and_peer_loss"),
+    # The coordination hierarchy (D-088/D-089). Five more concerns a transport cannot omit
+    # and still be called implemented. Adding them here also extends the A2A roadmap above,
+    # deliberately: an adapter that can carry a task but not a job, or a lease but not a
+    # goal, cannot host the room this product describes, and a matrix that stayed silent
+    # about that would be the drift `docs/INTEROP.md` exists to catch.
+    SemanticRow(
+        "coordination_hierarchy",
+        "assign_room_role",
+        "assign_room_role",
+        "coordination_hierarchy",
+    ),
+    SemanticRow("job_board", "post_job", "post_job", "job_board"),
+    SemanticRow(
+        "supervisor_goals",
+        "replace_supervisor_goal",
+        "replace_supervisor_goal",
+        "supervisor_goals",
+    ),
+    SemanticRow("supervisor_capacity", "report_capacity", "report_capacity", "supervisor_capacity"),
+    SemanticRow("declared_workers", "register_worker", "register_worker", "declared_workers"),
 )
 
 

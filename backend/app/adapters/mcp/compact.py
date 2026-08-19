@@ -29,6 +29,15 @@ DEFAULT_MAX_EVENTS = 40
 #: the full backlog.
 DEFAULT_MAX_MESSAGES = 5
 
+#: Job states that are over. Kept out of the coordination view: a closed job is history, and
+#: a board that shows fifty finished ones buries the three that need allocating. The
+#: `detail="hierarchy"` view returns them, and the count of what was dropped travels with
+#: the compact list so a truncated board never reads as a complete one.
+CLOSED_JOB_STATES: frozenset[str] = frozenset({"completed", "cancelled", "superseded", "rejected"})
+
+#: Worker states that no longer occupy a slot. Same rule as above, one level down.
+FINISHED_WORKER_STATES: frozenset[str] = frozenset({"completed", "failed", "stopped"})
+
 
 def _runtimes(presence: dict[str, Any]) -> list[dict[str, Any]]:
     """Which runtimes of this seat are live, and what each says it is.
@@ -83,6 +92,13 @@ def participant(row: dict[str, Any]) -> dict[str, Any]:
             out["cannot_claim_because"] = runtime["claim_denied_reason"]
     if row.get("role") == "owner":
         out["role"] = "owner"
+    # Two different questions, and the names deliberately keep them apart: `role` is what
+    # this seat may *do* (owner, contributor, observer, and the scopes behind them) and
+    # `room_role` is where it sits in the coordination hierarchy. `unassigned` is omitted
+    # because it is the absence of a position, and a reader deciding who to send a job to
+    # gains nothing from a card that says "nowhere".
+    if row.get("room_role") and row["room_role"] != "unassigned":
+        out["room_role"] = row["room_role"]
     if (row.get("trust") or "member") != "member":
         out["trust"] = row["trust"]
     # Only when it changes how the name should be read. A coordinating agent deciding
@@ -179,6 +195,157 @@ def conflict(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def job(row: dict[str, Any]) -> dict[str, Any]:
+    """A board entry: what somebody wants done, and who owns it now.
+
+    `human_instruction` is kept whole when it differs from `title`. It is the one field on
+    the board that cannot be reconstructed - a paraphrase cannot be un-paraphrased once the
+    intent is disputed, which is the reason the board exists at all - so trimming it to
+    save context would remove exactly what makes the record worth keeping.
+    """
+    out: dict[str, Any] = {
+        "job_id": row["id"],
+        "title": row["title"],
+        "state": row["state"],
+    }
+    if row.get("priority"):
+        out["priority"] = row["priority"]
+    if row.get("assigned_to_participant_id"):
+        out["owner"] = row["assigned_to_participant_id"]
+        # Assigned but not accepted is the state an orchestrator most needs to see: the
+        # allocation landed and the supervisor has not yet picked it up.
+        if not row.get("accepted_at"):
+            out["accepted"] = False
+    elif row["state"] == "posted":
+        # Said positively rather than left to be inferred from a missing key. An
+        # unallocated job is the one thing on this board an orchestrator must act on.
+        out["unallocated"] = True
+    if row.get("desired_outcome"):
+        out["desired_outcome"] = row["desired_outcome"]
+    instruction = row.get("human_instruction") or ""
+    if instruction and instruction != row["title"]:
+        out["human_instruction"] = instruction
+    if row.get("targets"):
+        out["targets"] = row["targets"]
+    if row.get("acceptance_criteria"):
+        out["acceptance_criteria"] = row["acceptance_criteria"]
+    if row.get("task_id"):
+        out["task_id"] = row["task_id"]
+    if row.get("terminal_reason"):
+        out["closed_because"] = row["terminal_reason"]
+    if row.get("superseded_by_job_id"):
+        out["superseded_by"] = row["superseded_by_job_id"]
+    return out
+
+
+def goal(row: dict[str, Any]) -> dict[str, Any]:
+    """One supervisor's active direction, at its current version.
+
+    The version number is not decoration: it is the fence a replacement must present, and
+    a supervisor acting on a version it cannot name is acting on a guess. So it is always
+    here, even when everything else has been trimmed.
+    """
+    current = row.get("current") or {}
+    out: dict[str, Any] = {
+        "goal_id": row["id"],
+        "supervisor": row["supervisor_participant_id"],
+        "version": row.get("current_version"),
+        "objective": current.get("objective", ""),
+    }
+    if current.get("priority"):
+        out["priority"] = current["priority"]
+    if current.get("instructions"):
+        out["instructions"] = current["instructions"]
+    if current.get("worker_plan"):
+        out["worker_plan"] = current["worker_plan"]
+    if current.get("dependencies"):
+        out["dependencies"] = current["dependencies"]
+    if current.get("constraints"):
+        out["constraints"] = current["constraints"]
+    if current.get("acceptance_criteria"):
+        out["acceptance_criteria"] = current["acceptance_criteria"]
+    if current.get("reporting_requirements"):
+        out["reporting_requirements"] = current["reporting_requirements"]
+    if current.get("related_job_ids"):
+        out["jobs"] = current["related_job_ids"]
+    # What happens to work started under the version this one replaced. An orchestrator
+    # that replaced a goal without saying reads as `stop`, which is the safe default and
+    # the one the command already enforces.
+    if current.get("worker_disposition") and current["worker_disposition"] != "stop":
+        out["worker_disposition"] = current["worker_disposition"]
+    # Only when it is *not* acknowledged, or acknowledged with a refusal. A quietly
+    # acknowledged goal is the normal case and needs no field; the two exceptions each
+    # change what a reader should expect of the supervisor.
+    if not current.get("acknowledged_at"):
+        out["acknowledged"] = False
+    elif current.get("acknowledged_rejected"):
+        out["acknowledged_but_rejected"] = True
+        if current.get("acknowledged_note"):
+            out["rejection_note"] = current["acknowledged_note"]
+    return out
+
+
+def worker(row: dict[str, Any]) -> dict[str, Any]:
+    """One declared downstream executor.
+
+    **`declared_state` is its supervisor's last claim, never an observation.** A worker
+    that died silently still reads `working` here, so `last_claimed_at` travels with it and
+    the supervisor's own presence stays on its participant card. Nothing in this dict is
+    liveness, and the field is named `declared_state` rather than `state` so that a reader
+    skimming for a status cannot mistake it for one the room verified.
+    """
+    out: dict[str, Any] = {
+        "worker_id": row["id"],
+        "label": row["label"],
+        "supervisor": row["supervisor_participant_id"],
+        "declared_state": row["state"],
+    }
+    if row.get("assignment"):
+        out["assignment"] = row["assignment"]
+    if row.get("summary"):
+        out["summary"] = row["summary"]
+    if row.get("waiting_reason"):
+        out["waiting_reason"] = row["waiting_reason"]
+    if row.get("related_job_id"):
+        out["job_id"] = row["related_job_id"]
+    if row.get("created_by_goal_version"):
+        out["under_goal_version"] = row["created_by_goal_version"]
+    if row.get("result_reference"):
+        out["result"] = row["result_reference"]
+    if row.get("attempts"):
+        out["attempts"] = row["attempts"]
+    # The honest counterweight to `declared_state`. Kept even when the state looks healthy,
+    # because a stale timestamp beside `working` is the only thing that tells a reader the
+    # claim may no longer be true.
+    if row.get("last_activity_at"):
+        out["last_claimed_at"] = row["last_activity_at"]
+    return out
+
+
+def capacity(row: dict[str, Any]) -> dict[str, Any]:
+    """What one supervisor can take on: what it said, and what the room counted.
+
+    `effective` is the number to allocate against and `declared` is what the seat claimed.
+    They are both here whenever they disagree, because that is exactly when it matters - a
+    seat that stopped beating still says `available`, and the room says `offline` over the
+    top of it.
+    """
+    out: dict[str, Any] = {
+        "supervisor": row["supervisor_participant_id"],
+        "effective": row["effective"],
+        "free_slots": max(0, int(row["max_concurrent_workers"]) - int(row["active_workers"])),
+        "active_workers": row["active_workers"],
+        "owned_jobs": row["owned_jobs"],
+    }
+    if row["declared"] != row["effective"]:
+        out["declared"] = row["declared"]
+    if row.get("blocked_workers"):
+        out["blocked_workers"] = row["blocked_workers"]
+    if row.get("note"):
+        out["note"] = row["note"]
+    return out
+
+
 def message(row: dict[str, Any]) -> dict[str, Any]:
     out = {"from": row.get("participant_id"), "body": row["body"], "seq": row.get("seq")}
     if row.get("to_participant_id"):
@@ -237,6 +404,63 @@ def room_state(
     if open_conflicts:
         state["open_conflicts"] = [conflict(c) for c in open_conflicts]
 
+    # THE COORDINATION HIERARCHY, GATED ON CARRYING INFORMATION (D-089).
+    #
+    # Every section here is conditional, and that is the whole design. This module's
+    # argument is that a response is spent context; five unconditional sections would add
+    # a fixed cost to every poll in every room, including the many rooms where nobody has
+    # posted a job or declared a worker. So each appears exactly when a reader could act on
+    # it, which is the same rule `open_questions` and `open_conflicts` already follow.
+    goals = snapshot.get("goals") or []
+    if goals:
+        state["goals"] = [goal(g) for g in goals]
+
+    all_jobs = snapshot.get("jobs") or []
+    live_jobs = [j for j in all_jobs if j.get("state") not in CLOSED_JOB_STATES]
+    if live_jobs:
+        state["jobs"] = [job(j) for j in live_jobs]
+        # Two numbers, because they answer different questions. `closed_jobs` is what this
+        # view deliberately dropped; `jobs_total` is what the *snapshot* truncated, counted
+        # by the database. Reporting only the first would let a caller believe it had seen
+        # the whole board when the page was capped upstream.
+        closed = len(all_jobs) - len(live_jobs)
+        if closed:
+            state["closed_jobs"] = closed
+        total = snapshot.get("jobs_total")
+        if isinstance(total, int) and total > len(all_jobs):
+            state["jobs_total"] = total
+            state["jobs_omitted"] = total - len(all_jobs)
+
+    live_workers = [
+        w for w in snapshot.get("workers") or [] if w.get("state") not in FINISHED_WORKER_STATES
+    ]
+    if live_workers:
+        state["workers"] = [worker(w) for w in live_workers]
+
+    # Only where the numbers are not the trivial default. A room where nobody has declared
+    # anything and nobody owns anything would otherwise get one identical
+    # `available / 1 slot / 0 workers` card per seat: a fixed cost that says nothing, and
+    # noise gets skimmed past, which is how the informative cards get missed too.
+    #
+    # Gated on the *declaration* and the counts, deliberately not on `effective`. A seat with
+    # no open connection reads `effective: offline`, which would have put a capacity card
+    # beside every disconnected seat in every room — and said nothing new, because that
+    # seat's `liveness` is already on its participant card two lines above. The section
+    # earns its place when the seat has told the room something, or when the room counted
+    # something.
+    informative_capacity = [
+        c
+        for c in snapshot.get("capacity") or []
+        if c.get("declared") != "available"
+        or int(c.get("max_concurrent_workers") or 1) != 1
+        or c.get("active_workers")
+        or c.get("owned_jobs")
+        or c.get("blocked_workers")
+        or c.get("note")
+    ]
+    if informative_capacity:
+        state["capacity"] = [capacity(c) for c in informative_capacity]
+
     if messages:
         recent = messages[-max_messages:]
         state["recent_messages"] = [message(m) for m in recent]
@@ -273,7 +497,161 @@ _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
     "conflict.detected": ("conflict_id", "kind", "detail"),
     "conflict.resolved": ("conflict_id", "resolution"),
     "room.closed": ("reason",),
+    # The coordination hierarchy (D-089). Without these rows every job, goal and worker
+    # event falls through to `kept = payload` and the full envelope lands in every poll —
+    # so the compact view would silently become verbose rather than break, which is the
+    # failure mode that goes unnoticed.
+    "participant.room_role_assigned": (
+        "participant_id",
+        "room_role",
+        "previous_role",
+        "reason",
+    ),
+    # `human_instruction` is kept: it is the person's own words, and the one field on the
+    # board a reader cannot reconstruct from anything else.
+    "job.posted": (
+        "job_id",
+        "title",
+        "human_instruction",
+        "desired_outcome",
+        "targets",
+        "acceptance_criteria",
+        "requested_urgency",
+    ),
+    "job.updated": ("job_id", "changed", "priority"),
+    "job.assigned": (
+        "job_id",
+        "assigned_to_participant_id",
+        "previous_assignee_participant_id",
+        "reason",
+    ),
+    "job.accepted": ("job_id", "participant_id"),
+    "job.state_changed": ("job_id", "state", "previous_state", "reason", "task_id"),
+    "job.closed": ("job_id", "state", "reason", "superseded_by_job_id"),
+    # A goal replacement is the highest-value event in this family: it is the one that
+    # changes what a supervisor is responsible for, so the objective travels with it rather
+    # than costing the reader a second call. The long-form fields do not.
+    "supervisor.goal_replaced": (
+        "goal_id",
+        "target_supervisor_participant_id",
+        "new_version",
+        "previous_version",
+        "objective",
+        "worker_disposition",
+        "reason",
+    ),
+    "supervisor.goal_acknowledged": ("goal_id", "version", "participant_id", "rejected"),
+    "supervisor.goal_closed": ("goal_id", "version", "status", "reason"),
+    "supervisor.capacity_changed": (
+        "participant_id",
+        "effective",
+        "active_workers",
+        "owned_jobs",
+    ),
+    "worker.registered": (
+        "worker_id",
+        "supervisor_participant_id",
+        "label",
+        "assignment",
+        "related_job_id",
+        "created_by_goal_version",
+    ),
+    "worker.state_changed": ("worker_id", "state", "previous_state", "waiting_reason"),
+    "worker.finished": (
+        "worker_id",
+        "state",
+        "summary",
+        "result_reference",
+        "related_job_id",
+        "awaiting_supervisor_review",
+    ),
 }
+
+
+def hierarchy(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """The allocation view: who coordinates whom, what each is directed to do, and where
+    every unit of intent went.
+
+    A separate mode rather than more fields on the coordination view, for two reasons. The
+    coordination view answers "what should I do next" and is read on every poll; this
+    answers "how should work be distributed" and is read only when somebody is about to
+    distribute it. And `detail` is an unconstrained string precisely so a new mode can reach
+    a connector that cached its tool list (D-040) - a closed enum there would make this
+    unreachable for exactly the clients that cannot pick up a new tool.
+
+    Unlike the coordination view this keeps closed jobs and finished workers. An
+    orchestrator deciding where to put work needs to know what has already been tried;
+    allocation history that silently stops at the present tense invites the same job being
+    posted twice.
+    """
+    room = snapshot.get("room") or {}
+    seats = [p for p in snapshot.get("participants") or [] if p.get("state") == "joined"]
+    capacity_by_seat = {c["supervisor_participant_id"]: c for c in snapshot.get("capacity") or []}
+    goals_by_seat = {g["supervisor_participant_id"]: g for g in snapshot.get("goals") or []}
+    workers_by_seat: dict[str, list[dict[str, Any]]] = {}
+    for row in snapshot.get("workers") or []:
+        workers_by_seat.setdefault(row["supervisor_participant_id"], []).append(row)
+
+    # One card per seat, with its position, its direction and its pool together. The
+    # alternative was four parallel lists the reader joins by id itself, which is how an
+    # orchestrator ends up allocating against a supervisor whose goal it did not notice.
+    hierarchy_seats: list[dict[str, Any]] = []
+    for seat in seats:
+        seat_id = seat["id"]
+        card: dict[str, Any] = {
+            "participant_id": seat_id,
+            "name": (seat.get("identity") or {}).get("display_name"),
+            "room_role": seat.get("room_role") or "unassigned",
+            "liveness": (seat.get("presence") or {}).get("liveness", "disconnected"),
+        }
+        report = capacity_by_seat.get(seat_id)
+        if report:
+            card["capacity"] = capacity(report)
+        directed = goals_by_seat.get(seat_id)
+        if directed:
+            card["goal"] = goal(directed)
+        pool = workers_by_seat.get(seat_id) or []
+        if pool:
+            card["workers"] = [worker(w) for w in pool]
+        hierarchy_seats.append(card)
+
+    all_jobs = snapshot.get("jobs") or []
+    out: dict[str, Any] = {
+        "directives_for_you": snapshot.get("directives_for_you") or [],
+        "room": {
+            "room_id": room.get("id"),
+            "name": room.get("name"),
+            "charter": room.get("charter"),
+            "status": room.get("status"),
+        },
+        "you": snapshot.get("you", {}).get("participant_id"),
+        "cursor": snapshot.get("snapshot_seq"),
+        "hierarchy": hierarchy_seats,
+        # Every job, including the closed ones, highest priority first as the snapshot
+        # ordered them.
+        "board": [job(j) for j in all_jobs],
+    }
+    # Stated whenever the snapshot itself truncated, from the database's own count rather
+    # than from the length of what arrived (D-043).
+    total = snapshot.get("jobs_total")
+    if isinstance(total, int) and total > len(all_jobs):
+        out["board_total"] = total
+        out["board_omitted"] = total - len(all_jobs)
+    # The one seat whose absence changes what everyone else should do. Said explicitly
+    # because "no orchestrator" is a state a room can genuinely be in - it is not automatic
+    # failover, and a reader must be able to tell it apart from a card it failed to parse.
+    coordinator = next(
+        (c["participant_id"] for c in hierarchy_seats if c["room_role"] == "orchestrator"),
+        None,
+    )
+    out["orchestrator"] = coordinator
+    if coordinator is None:
+        out["note"] = (
+            "This room has no orchestrator. Existing supervisors continue their current "
+            "goals; nothing allocates new work until a room admin takes coordination with "
+            "assign_room_role, which is an explicit authorized act rather than failover."
+        )
+    return out
 
 
 def event(envelope: dict[str, Any]) -> dict[str, Any]:

@@ -39,7 +39,9 @@ def _worker() -> Worker:
 def test_page_is_durably_enqueued_before_cursor_advances():
     worker = _worker()
     persisted: list[tuple[int, list[int]]] = []
-    worker.monitor_state_sink = lambda cursor, pending: persisted.append(
+    # Three arguments since D-089: the reacted set is persisted too, because it was in
+    # memory only and a restart therefore answered the same thing twice.
+    worker.monitor_state_sink = lambda cursor, pending, reacted=None: persisted.append(
         (cursor, [int(event["seq"]) for event in pending])
     )
 
@@ -157,7 +159,9 @@ def test_resume_gap_rebases_from_projection_without_dropping_pending_reactions()
     pending = _event(8, "message.posted", payload={"body": "Please follow up"})
     worker.reaction_queue = [{**pending, "_tier": "ambient"}]
     persisted = []
-    worker.monitor_state_sink = lambda cursor, events: persisted.append((cursor, events))
+    worker.monitor_state_sink = lambda cursor, events, reacted=None: persisted.append(
+        (cursor, events)
+    )
     worker.call = lambda method, path, payload=None: {  # type: ignore[method-assign]
         "cursor": 45,
         "room": {"charter": "Coordinate durably"},

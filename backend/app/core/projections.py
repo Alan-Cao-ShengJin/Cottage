@@ -20,14 +20,18 @@ from typing import Any
 
 from ..db import database as db
 from ..domain.identity import IdentityProvenance
-from ..domain.room import Participant, PrivacyClass, Room, Scope
+from ..domain.room import MembershipState, Participant, PrivacyClass, Room, Scope
 from ..domain.task import TERMINAL_TASK_STATUSES, ConflictStatus, Steering, TaskStatus
 from ..util import from_iso, utcnow
 from . import authz, eventlog, presence, privacy, store
 from . import checkpoints as checkpoints_svc
 from . import directives as directives_svc
+from . import goals as goals_svc
+from . import jobs as jobs_svc
 from . import questions as questions_svc
+from . import roles as roles_svc
 from . import work as work_svc
+from . import workers as workers_svc
 from .errors import ResumeGap
 
 log = logging.getLogger(__name__)
@@ -39,6 +43,15 @@ MAX_HYDRATION_MESSAGES = 25
 
 #: Enough for a worker to choose from; not the board.
 MAX_CLAIMABLE = 25
+
+#: The job board is intent, and intent accumulates: a long-lived room can hold hundreds of
+#: closed jobs. The snapshot returns the highest-priority page and states the true total
+#: beside it, the same shape `goals.history_for` uses — a truncated list presented without
+#: its count reads as a complete one.
+MAX_SNAPSHOT_JOBS = 60
+#: Worker records are the supervisor's own account of its pool. Capped for the same reason,
+#: and separately, because one supervisor may declare many.
+MAX_SNAPSHOT_WORKERS = 100
 MAX_CONTEXT_EVENTS = 40
 
 # Useful durable context for a future model turn. Transport churn, activity
@@ -63,6 +76,21 @@ _CONTEXT_EVENT_TYPES = {
     "work.declared",
     "work.updated",
     "work.ended",
+    # The coordination hierarchy (D-088). Allocation and direction are exactly the kind of
+    # thing a resuming runtime must not have to reconstruct from the board. Deliberately
+    # absent: `worker.state_changed` and `supervisor.capacity_changed`, which churn like
+    # presence and describe the wire rather than the work.
+    "participant.room_role_assigned",
+    "job.posted",
+    "job.assigned",
+    "job.accepted",
+    "job.state_changed",
+    "job.closed",
+    "supervisor.goal_replaced",
+    "supervisor.goal_acknowledged",
+    "supervisor.goal_closed",
+    "worker.registered",
+    "worker.finished",
 }
 
 
@@ -162,6 +190,20 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
             types={"activity.noted"},
             tx=tx,
         )
+        # The coordination hierarchy, read in the same transaction as the cursor (D-089).
+        # `presence.presence_for_room` below is deliberately outside it because presence is
+        # derived rather than stored; these five are durable projections, so a board read
+        # after the transaction closed could show a job the caller's cursor has not reached
+        # and make an idempotent client look wrong.
+        role_map = await roles_svc.room_roles(room_id, tx=tx)
+        active_goals = await goals_svc.goals_for_room(room_id, tx=tx)
+        job_page, job_total = await jobs_svc.board_for_room(room_id, limit=MAX_SNAPSHOT_JOBS, tx=tx)
+        worker_records = await workers_svc.workers_for(room_id, tx=tx)
+        capacity_reports = await workers_svc.capacity_for_room(
+            room_id,
+            participant_ids=tuple(p.id for p in participants if p.state is MembershipState.JOINED),
+            tx=tx,
+        )
 
     presences = await presence.presence_for_room(room)
     now = utcnow()
@@ -248,6 +290,66 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
         if ref:
             latest_activity_by_ref[ref] = event.model_dump(mode="json")
 
+    # THE COORDINATION HIERARCHY (D-089). Filtered by the same helper as every other
+    # record here rather than by a private copy of the rule, which is how the fourth
+    # table is the one that leaks.
+    visible_jobs = [
+        job.model_dump(mode="json")
+        for job in job_page
+        if _visible_record(
+            recipient=recipient,
+            room=room,
+            privacy_class=job.privacy_class,
+            owner_participant_id=job.posted_by_participant_id,
+        )
+    ]
+
+    visible_goals: list[dict[str, Any]] = []
+    for goal in active_goals:
+        version = goal.current
+        if version is None:
+            # The join found no row for `current_version`. Unreachable through the
+            # allocator, and skipped rather than raised: a goal whose content cannot be
+            # read is not a goal a reader can act on, and failing the whole projection
+            # would hide the other supervisors' direction too.
+            continue
+        # Two seats have a standing claim on a private goal — the supervisor it directs
+        # and the orchestrator that wrote it — and `owner_participant_id` names only one.
+        # Passed only when the class actually restricts, because `restricted_to` is
+        # enforced regardless of class and would otherwise hide a room-public goal.
+        restricted = (
+            sorted({goal.supervisor_participant_id, version.issued_by_participant_id})
+            if version.privacy_class is PrivacyClass.PARTICIPANT_PRIVATE
+            else None
+        )
+        if not _visible_record(
+            recipient=recipient,
+            room=room,
+            privacy_class=version.privacy_class,
+            owner_participant_id=goal.supervisor_participant_id,
+            restricted_to=restricted,
+        ):
+            continue
+        visible_goals.append(goal.model_dump(mode="json"))
+
+    # Capacity is loaded without liveness above, because presence is only known after the
+    # snapshot transaction closes. The clamp is asked of the rule that owns it rather than
+    # rebuilt here — the same delegation `work_svc.heartbeat_cutoff_for` gets above (D-061).
+    capacity: list[dict[str, Any]] = []
+    for participant_id, report in capacity_reports.items():
+        owner_presence = presences.get(participant_id)
+        clamped = report.model_copy(
+            update={
+                "effective": workers_svc.effective_capacity(
+                    report.declared,
+                    max_concurrent_workers=report.max_concurrent_workers,
+                    active_workers=report.active_workers,
+                    liveness=owner_presence.liveness if owner_presence else None,
+                )
+            }
+        )
+        capacity.append(clamped.model_dump(mode="json"))
+
     return {
         # FIRST, and literally first rather than merely early: a directive is an
         # instruction to this participant, and everything else here is context. A
@@ -274,6 +376,12 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
                 "presence": (
                     presences[p.id].model_dump(mode="json") if p.id in presences else None
                 ),
+                # Where this seat sits in the hierarchy, beside `role`, which is what it
+                # may *do*. Two axes on purpose (ADR-013): merging them is how a
+                # coordination label starts minting scopes. `None` for a seat that has
+                # left or not yet joined — `room_roles` answers only for members, and a
+                # position for a non-member would be a claim about nobody.
+                "room_role": (role_map[p.id].value if p.id in role_map else None),
             }
             for p in participants
         ],
@@ -285,6 +393,19 @@ async def snapshot(*, room_id: str, recipient: Participant) -> dict[str, Any]:
             store.to_question(r).model_dump(mode="json") for r in open_question_rows
         ],
         "conflicts": [c.model_dump(mode="json") for c in conflicts],
+        # Appended rather than interleaved: `directives_for_you` must stay first, and a
+        # client reading positionally must not have its existing sections moved.
+        "jobs": visible_jobs,
+        # The untruncated count, from the database rather than from `len()` of the page
+        # above. A truncated board presented without it reads as a complete one, and a
+        # count derived from the page would be an exact-looking wrong number (D-043).
+        "jobs_total": job_total,
+        "goals": visible_goals,
+        # Declared, never observed, and never presence. A worker that died silently still
+        # reads `working` here until its supervisor says otherwise, which is why the
+        # supervisor's own `presence` sits on its participant card beside this.
+        "workers": [w.model_dump(mode="json") for w in worker_records[:MAX_SNAPSHOT_WORKERS]],
+        "capacity": capacity,
     }
 
 
@@ -394,6 +515,17 @@ async def hydrate(
             ]
             for task_id in held_ids
         }
+        # THE HIERARCHY, NARROWED TO THIS SEAT (D-089). Hydration answers "what am I
+        # responsible for"; after the upgrade the honest answer starts with the caller's
+        # own goal, not with the task board. Read in the cursor's transaction for the same
+        # reason everything else here is.
+        your_room_role = await roles_svc.role_for(recipient, tx=tx)
+        your_goal = await goals_svc.current_for(room_id, recipient.id, tx=tx)
+        your_jobs = await jobs_svc.jobs_for_participant(room_id, recipient.id, tx=tx)
+        your_workers = await workers_svc.workers_for(
+            room_id, supervisor_participant_id=recipient.id, tx=tx
+        )
+        your_capacity = await workers_svc.capacity_for(room_id, recipient.id, tx=tx)
 
     recent_context = [
         event.model_dump(mode="json")
@@ -543,6 +675,23 @@ async def hydrate(
         "history_truncated": truncated,
         "retained_from_seq": room.retained_from_seq if truncated else None,
         "blocking_you": involving_me,
+        # WHERE YOU SIT, AND WHAT YOU WERE TOLD (D-089). Before the task board, because a
+        # supervisor that reads the board first can start something its current goal no
+        # longer asks for. `your_goal` is null when nobody has directed this seat, which is
+        # the honest answer and not the same as an empty objective.
+        "your_room_role": your_room_role.value,
+        "your_goal": your_goal.model_dump(mode="json") if your_goal else None,
+        # The obligations no goal may rewrite, carried beside the goal rather than left in
+        # a document. A superseded or hostile objective cannot cancel these, and a runtime
+        # that only ever reads its goal would otherwise never see them.
+        "runtime_contract": list(goals_svc.immutable_contract()) if your_goal else [],
+        # Jobs this seat is accountable for. Distinct from `your_leases`: a job is intent
+        # and outlives any task; a lease is exclusivity on the task serving it.
+        "your_jobs": [j.model_dump(mode="json") for j in your_jobs],
+        # This seat's own declared pool, and what it last told the room it could take. Both
+        # are declarations — nothing here is observed, and nothing here is presence.
+        "your_workers": [w.model_dump(mode="json") for w in your_workers],
+        "your_capacity": your_capacity.model_dump(mode="json"),
         # Bounded durable continuity for successive model turns. This is not replay
         # and never advances the caller's cursor; it is the recent work-shaped path
         # to the projection above, privacy-filtered for this participant.

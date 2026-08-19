@@ -36,6 +36,14 @@ from .dispatch import CommandOutcome, execute_command
 from .errors import InvalidCommand, NotFound
 
 
+async def _one(sql: str, params: tuple, tx: db.Tx | None) -> Any:
+    return await (tx.fetch_one(sql, params) if tx else db.fetch_one(sql, params))
+
+
+async def _all(sql: str, params: tuple, tx: db.Tx | None) -> list[Any]:
+    return await (tx.fetch_all(sql, params) if tx else db.fetch_all(sql, params))
+
+
 def derived_role(role: ParticipantRole) -> RoomRole:
     """What a seat with no stored role reads as.
 
@@ -114,14 +122,24 @@ async def retire_tx(tx: db.Tx, *, participant_id: str) -> None:
     )
 
 
-async def role_for(participant: Participant) -> RoomRole:
-    """This seat's position, stored or derived. Never raises."""
-    row = await db.fetch_one(
-        "SELECT room_role FROM participant_roles WHERE participant_id = ? AND retired_at IS NULL",
+async def role_for(participant: Participant, *, tx: db.Tx | None = None) -> RoomRole:
+    """This seat's position, stored or derived. Never raises.
+
+    **A retired row is an explicit statement and beats the legacy default.** The row is
+    selected without filtering on `retired_at` for exactly that reason: filtering it out made
+    a stood-down seat indistinguishable from one that never had a row, so an owner read
+    straight back as the orchestrator it had just been relieved of. Derivation exists for
+    rooms that predate this table — not to overrule a decision somebody made (D-089).
+    """
+    row = await _one(
+        "SELECT room_role, retired_at FROM participant_roles WHERE participant_id = ?",
         (participant.id,),
+        tx,
     )
     if row is None:
         return derived_role(participant.role)
+    if row["retired_at"] is not None:
+        return RoomRole.UNASSIGNED
     try:
         return RoomRole(row["room_role"])
     except ValueError:
@@ -131,50 +149,70 @@ async def role_for(participant: Participant) -> RoomRole:
         return RoomRole.UNASSIGNED
 
 
-async def room_roles(room_id: str) -> dict[str, RoomRole]:
+async def room_roles(room_id: str, *, tx: db.Tx | None = None) -> dict[str, RoomRole]:
     """Every joined seat's position, with legacy ambiguity resolved by seniority.
 
     Returns a mapping rather than rows because every caller wants "what is this seat"
     for a set of seats it already loaded, and a second query per participant is how a
     projection turns into an N+1.
     """
-    rows = await db.fetch_all(
+    rows = await _all(
         """
-        SELECT p.id, p.role, p.joined_at, r.room_role
+        SELECT p.id, p.role, p.joined_at, r.room_role, r.retired_at
           FROM participants p
-          LEFT JOIN participant_roles r
-            ON r.participant_id = p.id AND r.retired_at IS NULL
+          LEFT JOIN participant_roles r ON r.participant_id = p.id
          WHERE p.room_id = ? AND p.state = ?
          ORDER BY p.joined_at ASC, p.id ASC
         """,
         (room_id, MembershipState.JOINED.value),
+        tx,
     )
+
+    # TWO PASSES, AND THE ORDER IS THE POINT. Stored rows are resolved first and claim the
+    # orchestrator slot; derivation fills in only what is left. One pass in join order got
+    # this backwards: after a handover the outgoing owner's row is retired, so it fell through
+    # to derivation, derived `orchestrator` from being an owner, and — joining first — took
+    # the slot away from the seat that had just been given it. The handover reversed itself in
+    # the read model while the storage engine held exactly one live orchestrator row (D-089).
+    #
+    # A retired row is likewise an explicit stand-down rather than an absence, so it reads as
+    # `unassigned` and is never re-derived.
     out: dict[str, RoomRole] = {}
+    derive_for: list[Any] = []
     orchestrator_taken = False
     for row in rows:
-        stored = row["room_role"]
-        if stored:
-            try:
-                role = RoomRole(stored)
-            except ValueError:
-                role = RoomRole.UNASSIGNED
-        else:
-            role = derived_role(ParticipantRole(row["role"]))
+        if row["room_role"] is None:
+            derive_for.append(row)
+            continue
+        if row["retired_at"] is not None:
+            out[row["id"]] = RoomRole.UNASSIGNED
+            continue
+        try:
+            role = RoomRole(row["room_role"])
+        except ValueError:
+            role = RoomRole.UNASSIGNED
         if role is RoomRole.ORCHESTRATOR:
-            # Seniority breaks a legacy tie. A stored row cannot collide here — the
-            # partial unique index already refused a second one — so this only ever
-            # demotes a *derived* duplicate, and it demotes the later joiner.
-            if orchestrator_taken:
-                role = RoomRole.SUPERVISOR
-            else:
-                orchestrator_taken = True
+            # The partial unique index already refused a second live one, so this cannot
+            # collide with another stored row.
+            orchestrator_taken = True
+        out[row["id"]] = role
+
+    for row in derive_for:
+        role = derived_role(ParticipantRole(row["role"]))
+        if role is RoomRole.ORCHESTRATOR and orchestrator_taken:
+            # Either a stored orchestrator already holds the chair, or an earlier-joining
+            # owner derived into it. Seniority breaks the second case; the rows arrive in
+            # `joined_at` order, so the later joiner is the one demoted.
+            role = RoomRole.SUPERVISOR
+        elif role is RoomRole.ORCHESTRATOR:
+            orchestrator_taken = True
         out[row["id"]] = role
     return out
 
 
-async def orchestrator_of(room_id: str) -> str | None:
+async def orchestrator_of(room_id: str, *, tx: db.Tx | None = None) -> str | None:
     """The participant id currently coordinating this room, if there is one."""
-    for participant_id, role in (await room_roles(room_id)).items():
+    for participant_id, role in (await room_roles(room_id, tx=tx)).items():
         if role is RoomRole.ORCHESTRATOR:
             return participant_id
     return None

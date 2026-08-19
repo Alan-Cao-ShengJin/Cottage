@@ -3,7 +3,11 @@
 `arp/1`. The canonical internal contract. MCP and A2A adapters translate into this; they never
 extend it. All timestamps are RFC 3339 UTC (`...Z`). All ids are prefixed ULID-ish strings
 (`org_`, `usr_`, `aid_`, `room_`, `inv_`, `par_`, `con_`, `wrk_`, `tsk_`, `prp_`, `clm_`, `art_`,
-`cft_`).
+`cft_`, `dir_`, `ckp_`, `qst_`, `ans_`, `goal_`, `job_`, `wrx_`).
+
+`wrx_` is a worker record and `wrk_` is a work declaration. The near-collision is deliberate
+rather than tidy: `wrk_` was already in production when workers arrived, and renaming a live
+prefix would invalidate every id already written down.
 
 ## 1. Envelopes
 
@@ -128,11 +132,11 @@ table and `domain/events.py` agree, so the docs cannot drift from the code.
 | `job.closed` | job_id, state (`completed` \| `cancelled` \| `superseded` \| `rejected`), reason (**always attributable**), terminated_by_participant_id, superseded_by_job_id |
 | `supervisor.goal_replaced` | goal_id, target_supervisor_participant_id, new_version, previous_version, replaces_version, objective, instructions, worker_plan, related_job_ids, dependencies, constraints, acceptance_criteria, reporting_requirements, worker_disposition (`stop` \| `drain` \| `continue`), priority, reason, issued_by_participant_id, source |
 | `supervisor.goal_acknowledged` | goal_id, version, participant_id, note, rejected, issued_at_seq — evidence the supervisor observed it, never permission for the effect |
-| `supervisor.goal_closed` | goal_id, version, status (`achieved` \| `abandoned`), reason |
+| `supervisor.goal_closed` | goal_id, version, status (`achieved` \| `abandoned`), reason, participant_id — the seat whose goal ended |
 | `supervisor.capacity_changed` | participant_id, declared, effective (`available` \| `partially_allocated` \| `fully_allocated` \| `blocked` \| `offline`), max_concurrent_workers, active_workers, owned_jobs, blocked_workers, note — `offline` is derived from liveness and can never be declared |
 | `worker.registered` | worker_id, supervisor_participant_id, supervisor_attachment_id, label, display_name, provenance (`room_attachment` \| `declared`), attachment_id, assignment, related_job_id, related_task_id, created_by_goal_version, declared_runtime, declared_model — recorded, never verified; a worker is not a participant (D-077) |
 | `worker.state_changed` | worker_id, state (`starting` \| `working` \| `waiting` \| `stopping`), previous_state, summary, waiting_reason — the supervisor's claim, never presence |
-| `worker.finished` | worker_id, state (`completed` \| `failed` \| `stopped`), summary, result_reference, attempts, created_by_goal_version — completion here is not completion of the job; its supervisor still reviews it |
+| `worker.finished` | worker_id, state (`completed` \| `failed` \| `stopped`), summary, result_reference, attempts, created_by_goal_version, related_job_id, awaiting_supervisor_review — completion here is not completion of the job; its supervisor still reviews it |
 
 Clients **must** ignore unknown event types and preserve `seq` continuity. Forward compatibility is
 required, not optional.
@@ -518,6 +522,46 @@ and re-reading fixes nothing.
 - **MCP long-poll:** `await_events(since_seq, timeout_s ≤ 25)` blocks until `seq > since_seq` exists
   or the timeout elapses, then returns `{ events, cursor, timed_out }`. Semantically identical to
   SSE resume; only the delivery differs.
+
+## 5b. Projections of the coordination hierarchy
+
+The room snapshot and the per-seat resume payload are the only read surfaces for roles, jobs,
+goals, capacity and workers. Added in D-089; before it, all five existed in storage and none
+was reachable by any client.
+
+**Read in the snapshot's transaction, with the cursor.** `presence` is derived and is
+deliberately computed after the transaction closes; these five are durable projections, so a
+board read afterwards could show a job the caller's cursor has not reached. Same guarantee as
+every other section: no event missed, replay possible, consumers idempotent on `seq`.
+
+`snapshot` gains:
+
+| Field | Meaning |
+|---|---|
+| `participants[].room_role` | `orchestrator` \| `supervisor` \| `observer` \| `unassigned`, or `null` for a seat that has left or not yet joined. Beside `role`, which is authority. Two axes (ADR-013) |
+| `jobs` | The board, highest priority first, privacy-filtered per recipient |
+| `jobs_total` | The untruncated count, from the database. The page is capped; this is not derived from its length (D-043) |
+| `goals` | Every active goal with its current version loaded |
+| `workers` | Declared worker records. Every `state` is its supervisor's last claim, never presence |
+| `capacity` | One report per joined seat: `declared`, the room's own counts, and `effective` |
+
+`effective` capacity is `declared` clamped twice — to `offline` when the seat's presence says
+its runtime has stopped beating, and to `fully_allocated` when it has no free slots. Both are
+downgrades only: nothing can make a supervisor read as more available than it declared. An
+orchestrator allocates against `effective`; `declared` stays beside it so a reader can see the
+two disagree.
+
+`hydrate` (the resume payload) gains `your_room_role`, `your_goal`, `runtime_contract`,
+`your_jobs`, `your_workers` and `your_capacity`. The contract travels with the goal rather
+than living only in a document, because a runtime that reads nothing but its objective would
+otherwise never see the obligations that outrank it.
+
+**Adapter compaction.** The MCP coordination view includes each of the five sections only when
+it carries information — a room with no jobs pays nothing for the job board, and a seat that
+has declared nothing gets no capacity card. `detail="hierarchy"` returns the allocation view:
+one card per seat with its role, capacity, goal and workers, plus the whole board including
+closed entries. It is a new `detail` *mode* rather than a new tool because `detail` is an
+unconstrained string, which is the only route to a connector that cached its tool list (D-040).
 
 ## 6. Shared state semantics
 

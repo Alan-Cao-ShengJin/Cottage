@@ -203,6 +203,26 @@ scripts/         check.py gate, dev utilities
   derived from liveness and can never be declared. Deliberately **not** an input to
   `derive_runtime_policy`, which stays a pure function of capabilities (ADR-010).
 
+**Read surfaces (D-089).** All five reach clients through `core/projections.py` and nowhere
+else. The snapshot loads them **inside its own transaction**, with the cursor: `presence` is
+derived and is deliberately read after that transaction closes, but a job board read afterwards
+could show an entry the caller's cursor has not reached. Three loader properties this depends
+on, each of which was an N+1 in the first draft: `goals_for_room` is one join rather than a
+version query per goal, `capacity_for_room` is three grouped queries rather than four per seat,
+and `room_roles` is one left join returning a dict keyed by participant id.
+
+`effective` capacity is computed by `workers.effective_capacity`, asked of the rule rather than
+rebuilt in the projection — the same delegation `work.heartbeat_cutoff_for` already gets
+(D-061). The projection loads the declared rows before it knows presence, so it calls the rule
+twice rather than keeping a copy of the clamp.
+
+**A retired role row is a statement, not an absence.** Derivation exists for rooms predating
+this table; it must never overrule a decision somebody made. `room_roles` therefore resolves
+stored rows in a first pass — they claim the orchestrator chair — and derives only for seats
+with no row at all, with seniority breaking ties among *derived* orchestrators only. One pass
+in join order got this backwards and made a handover reverse itself in the read model while the
+storage engine correctly held one live orchestrator row (D-089).
+
 ### Shared state & artifacts
 - **StateEntry** — `(room_id, key)` → JSON value, with `revision` (monotonic per key),
   `privacy_class`, and **Provenance**: asserting participant, timestamp, `source` label,
@@ -253,6 +273,14 @@ own **no** business rules and hold **no** state that the core needs.
   finished one's participant token and act as it, with correct-looking provenance on every event
   (D-024). No session id now yields no key at all rather than a shared bucket, so the caller must
   present its own token.
+
+  Two conventions the hierarchy tools made load-bearing (D-089). **An enum-valued string
+  argument is checked before it is constructed**, because `ValueError` is not a `RoomError` and
+  escapes the single handler every tool has — the call then fails as a raw transport exception
+  the model cannot read. And **`detail` stays an unconstrained string**: a connector that cached
+  its tool list cannot pick up a new tool but can pass a new value to one it already has, so a
+  new `detail` mode is the only route to those clients (D-040) and a test asserts the published
+  schema keeps it open.
 - **A2A adapter — external autonomous-agent adapter.** Publishes an agent card, accepts inbound task
   and message deliveries, and pushes room events outbound to the remote agent's endpoint. Inbound A2A
   identities are `untrusted` by default (see `docs/SECURITY.md §5`).

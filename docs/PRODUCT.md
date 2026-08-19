@@ -221,6 +221,32 @@ is lost the room says so plainly, existing supervisors continue their current go
 promotion is an explicit authorized act — never automatic failover inventing a new
 coordinator.
 
+### 2.6a What a participant actually sees (D-089)
+
+Every seat's room read carries its position; the board, the goals, the workers and the
+capacity appear when there is something to act on. `detail="hierarchy"` is the allocation
+view — one card per seat with its role, its capacity, the goal it is working to and the
+workers it has declared, plus the whole board including what has already been tried.
+
+**Allocate against `effective`, never `declared`.** `declared` is what a supervisor said;
+`effective` is that declaration clamped by liveness and by free slots. They disagree exactly
+when it matters: a seat whose runtime stopped beating an hour ago still says `available`, and
+the room says `offline` over the top of it. Both are shown so a reader can see the
+disagreement rather than being handed a single number to trust.
+
+**A worker's state is never presented as liveness.** It is rendered as `declared_state`, with
+the supervisor's last-claimed timestamp beside it, because a worker that died silently stays
+`working` until its supervisor notices. The supervisor's own presence is on its participant
+card, and that is the only liveness in the picture.
+
+**A goal reaches a runtime as a projection, not as a push.** A persistent companion writes
+the current version to a local file its host can read, folds it into every turn's context, and
+acknowledges the version so the room can say when the supervisor actually read it. The room is
+the authority; the file is a convenience, rewritten wholesale on every version so a stale half
+cannot be read as current. For Claude Code there is also a Stop hook that says "your goal moved
+to vN" at a turn boundary — the only documented point at which an outside decision can reach a
+running session. See `docs/COTTAGE_RUNTIME_ALIGNMENT.md`.
+
 ## 3. Participants
 
 Both **humans** and **agents** are first-class participants. A human in the browser and a Claude

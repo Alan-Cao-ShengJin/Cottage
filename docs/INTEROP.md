@@ -194,6 +194,26 @@ cost of that limit measured exactly: the harness asserted exclusivity, passed, a
 outside participant broke it the same afternoon, because the harness tested the verb we had
 thought to test.
 
+### 3.1 The transport matrix widened by five (D-089)
+
+`test_transport_conformance.py` asserts one named entry point per coordination concern, per
+transport. The coordination hierarchy added five: `coordination_hierarchy`, `job_board`,
+`supervisor_goals`, `supervisor_capacity`, `declared_workers`. ARP HTTP and MCP both satisfy
+them — 20 routes and 15 tools, deliberately at parity, because a companion runs on HTTP and an
+agent runs on MCP and a service reachable from one and not the other narrows universality by
+exactly one host family.
+
+**This also extends the A2A roadmap, on purpose.** Those five cells skip while the A2A SDK is
+absent and become failing assertions the moment it is installed. An adapter that can carry a
+task but not a job, or a lease but not a goal, cannot host the room §4 describes — and a matrix
+that stayed quiet about that is the drift this file exists to catch.
+
+**Not yet observed live.** The hierarchy surface has a green gate and no deployment behind it.
+Per `CLAUDE.md`, a green gate is explicitly not evidence for `adapters/` or `api/`, so no row
+in §2 may be widened to claim hierarchy interop until a real outside client posts a job or
+acknowledges a goal against the deployed instance. The supervisor-assignment path needs a
+second identity on a second host and has not been exercised at all.
+
 ## 4. What must stay true for universality
 
 These are the invariants that make "any combination" possible. Breaking one silently

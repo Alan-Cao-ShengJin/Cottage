@@ -22,28 +22,38 @@ from ..core import (
     checkpoints,
     directives,
     eventlog,
+    goals,
+    jobs,
     messages,
     presence,
     privacy,
     projections,
     questions,
+    roles,
     rooms,
     runtime_state,
     store,
     stream_tickets,
     tasks,
     work,
+    workers,
 )
 from ..core.bus import bus
-from ..core.errors import Forbidden, ResumeGap, RoomClosed, RoomError
+from ..core.errors import Forbidden, InvalidCommand, ResumeGap, RoomClosed, RoomError
 from ..domain.capabilities import SUGGESTED_CAPABILITIES, Capability
 from ..domain.commands import (
+    AcceptJobCommand,
     AcknowledgeDirectiveCommand,
+    AcknowledgeGoalCommand,
     AnswerQuestionCommand,
     AppendCheckpointCommand,
     AskQuestionCommand,
+    AssignJobCommand,
+    AssignRoomRoleCommand,
     CancelTaskCommand,
     ClaimTaskCommand,
+    CloseGoalCommand,
+    CloseJobCommand,
     CompleteTaskCommand,
     ConnectCommand,
     CreateInvitationCommand,
@@ -53,25 +63,34 @@ from ..domain.commands import (
     DrainRuntimeCommand,
     EndWorkCommand,
     ExtendRoomCommand,
+    FinishWorkerCommand,
     HeartbeatCommand,
     IssueDirectiveCommand,
     JoinRoomCommand,
     LeaveRoomCommand,
     MintCredentialCommand,
     NoteActivityCommand,
+    PostJobCommand,
     PostMessageCommand,
+    RegisterWorkerCommand,
     ReleaseClaimCommand,
     RenewClaimCommand,
+    ReplaceGoalCommand,
+    ReportCapacityCommand,
     ResumeRuntimeCommand,
     RevokeCredentialCommand,
+    SetJobStateCommand,
     SetParticipantRoleCommand,
     SetRuntimeStateCommand,
     TakeOverExecutionCommand,
+    UpdateJobCommand,
     UpdateRoomCharterCommand,
     UpdateTaskCommand,
     UpdateWorkCommand,
+    UpdateWorkerCommand,
 )
 from ..domain.events import ControlFrame
+from ..domain.job import JobState
 from ..domain.room import Scope
 from .auth import (
     JoinCredentialDep,
@@ -908,6 +927,341 @@ async def cancel_task(
     _assert_room(participant, room_id)
     task = await tasks.cancel(participant=participant, command=command)
     return {"ok": True, "task": task.model_dump(mode="json")}
+
+
+# ---------------------------------------------------------------------------
+# The coordination hierarchy: room roles, jobs, goals, capacity, workers (D-088/D-089)
+# ---------------------------------------------------------------------------
+#
+# Every one of these takes the command model straight from the body and hands it to the
+# same core service the MCP adapter calls. The shapes deliberately mirror their task-board
+# siblings — `POST /<collection>` to create, `POST /<collection>/<verb>` to act,
+# `GET /<collection>` to read — because routes.py has already paid for the alternative
+# once: `update_task` was PATCH-only, a worker followed the pattern its neighbours set and
+# got a 405 while trying to say it had started, and the conclusion recorded above is that
+# an API whose shape you cannot infer from its own siblings is a defect.
+
+
+@router.post("/rooms/{room_id}/participants/room-role")
+async def assign_room_role(
+    room_id: str, participant: ParticipantDep, command: AssignRoomRoleCommand
+) -> dict[str, Any]:
+    """Place a seat in the coordination hierarchy, or stand it down.
+
+    Deliberately a different route from `/participants/role`, which rewrites a scope list.
+    Position and authority are separate axes (ADR-013) and merging them is how a
+    coordination label starts minting privileges.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await roles.assign(participant=participant, command=command)}
+
+
+@router.post("/rooms/{room_id}/jobs", status_code=201)
+async def post_job(
+    room_id: str, participant: ParticipantDep, command: PostJobCommand
+) -> dict[str, Any]:
+    """Put durable human intent on the board.
+
+    This is what a supervisor does with a request from its human — not start working. The
+    orchestrator allocates against room priorities and declared capacity, and the poster may
+    not be the seat that ends up owning it.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await jobs.post(participant=participant, command=command)}
+
+
+@router.post("/rooms/{room_id}/jobs/update")
+async def update_job(
+    room_id: str, participant: ParticipantDep, command: UpdateJobCommand
+) -> dict[str, Any]:
+    """Revise what a job asks for, or where it ranks. Omitted fields are untouched."""
+    _assert_room(participant, room_id)
+    return {"ok": True, **await jobs.update(participant=participant, command=command)}
+
+
+@router.post("/rooms/{room_id}/jobs/assign")
+async def assign_job(
+    room_id: str, participant: ParticipantDep, command: AssignJobCommand
+) -> dict[str, Any]:
+    """Allocate or reallocate a job. Orchestrator only, and a reason is required for both.
+
+    Reallocation is legal and is the same operation as a first allocation, so the response
+    names the previous assignee: two orchestrator turns racing must not silently lose one
+    another's decision.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await jobs.assign(participant=participant, command=command)}
+
+
+@router.post("/rooms/{room_id}/jobs/accept")
+async def accept_job(
+    room_id: str, participant: ParticipantDep, command: AcceptJobCommand
+) -> dict[str, Any]:
+    """Take responsibility for a job allocated to you.
+
+    Accepting twice is not an error — the second call reports `already_accepted` and appends
+    nothing, so a retry after a lost response is safe. That response omits `seq`.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await jobs.accept(participant=participant, command=command)}
+
+
+@router.post("/rooms/{room_id}/jobs/state")
+async def set_job_state(
+    room_id: str, participant: ParticipantDep, command: SetJobStateCommand
+) -> dict[str, Any]:
+    """A non-terminal move: `active`, `paused`, `blocked`. Terminal moves use `/jobs/close`.
+
+    Supply `task_id` when moving to `active`: the job records which task serves it, and the
+    task keeps the fence and the lease, so the room never has two answers to who holds this.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await jobs.set_state(participant=participant, command=command)}
+
+
+@router.post("/rooms/{room_id}/jobs/close")
+async def close_job(
+    room_id: str, participant: ParticipantDep, command: CloseJobCommand
+) -> dict[str, Any]:
+    """End a job with an attributable reason. Nothing deletes one.
+
+    `superseded` requires `superseded_by_job_id`: a supersession that does not name its
+    replacement is a cancellation wearing the wrong label.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await jobs.close(participant=participant, command=command)}
+
+
+@router.get("/rooms/{room_id}/jobs")
+async def get_job_board(
+    room_id: str,
+    participant: ParticipantDep,
+    states: str | None = Query(
+        None, description="Comma-separated job states to include. Default: every state."
+    ),
+    assignee: str | None = Query(None, description="Only jobs allocated to this participant."),
+    limit: int = Query(60, ge=1, le=500),
+) -> dict[str, Any]:
+    """The board, highest priority first, with the untruncated total beside it."""
+    _assert_room(participant, room_id)
+    wanted: tuple[JobState, ...] = ()
+    if states:
+        names = [s.strip() for s in states.split(",") if s.strip()]
+        legal = {s.value for s in JobState}
+        unknown = [n for n in names if n not in legal]
+        if unknown:
+            raise InvalidCommand(
+                f"Unknown job state(s): {', '.join(sorted(unknown))}.",
+                legal_states=sorted(legal),
+            )
+        wanted = tuple(JobState(n) for n in names)
+    board, total = await jobs.board_for_room(
+        room_id, states=wanted or None, assignee_participant_id=assignee, limit=limit
+    )
+    return {
+        "ok": True,
+        "jobs": [j.model_dump(mode="json") for j in board],
+        # From the database, not from `len()` of the page above (D-043).
+        "total": total,
+    }
+
+
+@router.get("/rooms/{room_id}/jobs/{job_id}")
+async def get_job(room_id: str, job_id: str, participant: ParticipantDep) -> dict[str, Any]:
+    """One job with its full transition history: how this intent got where it is.
+
+    Declared after the verb routes above, deliberately. A path parameter registered first
+    would swallow `/jobs/assign` and every sibling — the trap `GET /tasks/{task_id}` already
+    avoids the same way.
+    """
+    _assert_room(participant, room_id)
+    job = await jobs.get(room_id, job_id)
+    return {"ok": True, "job": job.model_dump(mode="json")}
+
+
+@router.post("/rooms/{room_id}/goals")
+async def replace_supervisor_goal(
+    room_id: str, participant: ParticipantDep, command: ReplaceGoalCommand
+) -> dict[str, Any]:
+    """Set or wholly replace a supervisor's active goal. Orchestrator only.
+
+    `expected_version` is a fence, not a hint. `null` means "there is no goal yet" and is
+    *refused* against an existing goal — it does not mean "latest". A `revision_conflict`
+    means a newer version landed first, and stale is not retry: re-read the goal and decide
+    again against what is now current.
+
+    `worker_disposition` says what happens to workers spawned under the version being
+    replaced. Silence is how a superseded goal keeps executing, so the command requires it
+    and defaults to `stop`.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await goals.replace(participant=participant, command=command)}
+
+
+@router.post("/rooms/{room_id}/goals/acknowledge")
+async def acknowledge_goal(
+    room_id: str, participant: ParticipantDep, command: AcknowledgeGoalCommand
+) -> dict[str, Any]:
+    """Record that you observed a goal version. Never permission for its effect.
+
+    The goal took effect when it was written. `rejected=true` is available because an agent
+    may decline — the room's job is to make the refusal visible, not to argue with it.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await goals.acknowledge(participant=participant, command=command)}
+
+
+@router.post("/rooms/{room_id}/goals/close")
+async def close_goal(
+    room_id: str, participant: ParticipantDep, command: CloseGoalCommand
+) -> dict[str, Any]:
+    """End a goal as `achieved` or `abandoned`, with a reason."""
+    _assert_room(participant, room_id)
+    return {"ok": True, **await goals.close(participant=participant, command=command)}
+
+
+@router.get("/rooms/{room_id}/goals")
+async def list_supervisor_goals(room_id: str, participant: ParticipantDep) -> dict[str, Any]:
+    """Every active goal in the room, at its current version.
+
+    Also returns the immutable runtime contract: the obligations no goal may rewrite. They
+    travel with the goals rather than living only in a document, because a runtime that
+    reads nothing but its objective would otherwise never see them.
+    """
+    _assert_room(participant, room_id)
+    active = await goals.goals_for_room(room_id)
+    return {
+        "ok": True,
+        "goals": [g.model_dump(mode="json") for g in active],
+        "runtime_contract": list(goals.immutable_contract()),
+    }
+
+
+@router.get("/rooms/{room_id}/goals/{goal_id}/history")
+async def get_goal_history(
+    room_id: str,
+    goal_id: str,
+    participant: ParticipantDep,
+    limit: int = Query(20, ge=1, le=200),
+) -> dict[str, Any]:
+    """Every version this goal has had, newest first. Append-only: nothing here is rewritten.
+
+    This is how "what was the objective when that job was posted" stays answerable after ten
+    revisions, which is the reason versions are kept rather than overwritten.
+    """
+    _assert_room(participant, room_id)
+    versions, total = await goals.history_for(room_id, goal_id, limit=limit)
+    return {
+        "ok": True,
+        "versions": [v.model_dump(mode="json") for v in versions],
+        "total": total,
+    }
+
+
+@router.post("/rooms/{room_id}/capacity")
+async def report_capacity(
+    room_id: str, participant: ParticipantDep, command: ReportCapacityCommand
+) -> dict[str, Any]:
+    """Declare how much more you can take on.
+
+    A judgement, not a count: "two workers running" says nothing about whether a third would
+    help. The room counts your rows itself and publishes both. `offline` is refused — it is
+    derived from your connections, because a runtime that has stopped beating cannot be
+    trusted to report that it is gone.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await workers.report_capacity(participant=participant, command=command)}
+
+
+@router.get("/rooms/{room_id}/capacity")
+async def get_room_capacity(room_id: str, participant: ParticipantDep) -> dict[str, Any]:
+    """Every seat's capacity: what it declared, and what the room counted.
+
+    `effective` is the value to allocate against. It is the declaration clamped by liveness
+    and by free slots, so a seat that stopped beating reads `offline` however available it
+    said it was — and `declared` stays beside it so a reader can see the two disagree.
+    """
+    _assert_room(participant, room_id)
+    room = await store.load_room(room_id)
+    seats = await store.list_participants(room_id)
+    presences = await presence.presence_for_room(room)
+    reports = await workers.capacity_for_room(
+        room_id,
+        participant_ids=tuple(p.id for p in seats if p.state.value == "joined"),
+        liveness_by_participant={pid: view.liveness for pid, view in presences.items()},
+    )
+    return {
+        "ok": True,
+        "capacity": [r.model_dump(mode="json") for r in reports.values()],
+    }
+
+
+@router.post("/rooms/{room_id}/workers", status_code=201)
+async def register_worker(
+    room_id: str, participant: ParticipantDep, command: RegisterWorkerCommand
+) -> dict[str, Any]:
+    """Declare a downstream worker you own and answer for.
+
+    Recorded, never verified, and never a participant (D-077): membership has exactly one
+    entry path, and a supervisor that could mint participants would be minting membership.
+    Re-registering the same `label` updates that worker rather than minting a second one, so
+    a restarted supervisor re-declaring its pool does not double the room's idea of its
+    capacity.
+
+    A worker record is room-visible coordination state and cannot carry a narrower privacy
+    class — the board has nowhere to store one. Keep private detail out of `assignment`.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await workers.register(participant=participant, command=command)}
+
+
+@router.post("/rooms/{room_id}/workers/state")
+async def update_worker(
+    room_id: str, participant: ParticipantDep, command: UpdateWorkerCommand
+) -> dict[str, Any]:
+    """Report a worker's non-terminal state. Your claim about it, never presence.
+
+    `waiting` requires `waiting_reason`, for the same reason a runtime's `waiting` posture
+    does: an unexplained wait is indistinguishable from a hang. Terminal states use
+    `/workers/finish`, which is the path that stamps a completion time and a result.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await workers.update_state(participant=participant, command=command)}
+
+
+@router.post("/rooms/{room_id}/workers/finish")
+async def finish_worker(
+    room_id: str, participant: ParticipantDep, command: FinishWorkerCommand
+) -> dict[str, Any]:
+    """End a worker as `completed`, `failed` or `stopped`.
+
+    **Completion here is not completion of the job.** You still review the output and decide
+    whether it is acceptable; the board moves when you say so, not when a worker exits.
+    """
+    _assert_room(participant, room_id)
+    return {"ok": True, **await workers.finish(participant=participant, command=command)}
+
+
+@router.get("/rooms/{room_id}/workers")
+async def list_workers(
+    room_id: str,
+    participant: ParticipantDep,
+    supervisor: str | None = Query(None, description="Only workers owned by this seat."),
+    include_retired: bool = Query(False),
+) -> dict[str, Any]:
+    """Declared worker records. Every `state` here is its supervisor's last claim.
+
+    A worker that died silently still reads `working` until its supervisor notices, so read
+    `last_activity_at` beside it and read the supervisor's own presence on its participant
+    card. Nothing in this response is liveness.
+    """
+    _assert_room(participant, room_id)
+    pool = await workers.workers_for(
+        room_id,
+        supervisor_participant_id=supervisor,
+        include_retired=include_retired,
+    )
+    return {"ok": True, "workers": [w.model_dump(mode="json") for w in pool]}
 
 
 def _assert_room(participant, room_id: str) -> None:

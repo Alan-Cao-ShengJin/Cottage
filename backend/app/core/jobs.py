@@ -56,6 +56,18 @@ DEFAULT_BOARD_LIMIT = 50
 LIVE_STATES: frozenset[JobState] = frozenset({JobState.ACTIVE, JobState.PAUSED, JobState.BLOCKED})
 
 
+async def _one(sql: str, params: Any, tx: db.Tx | None) -> Any:
+    return await (tx.fetch_one(sql, params) if tx else db.fetch_one(sql, params))
+
+
+async def _all(sql: str, params: Any, tx: db.Tx | None) -> list[Any]:
+    return await (tx.fetch_all(sql, params) if tx else db.fetch_all(sql, params))
+
+
+async def _value(sql: str, params: Any, tx: db.Tx | None) -> Any:
+    return await (tx.fetch_value(sql, params) if tx else db.fetch_value(sql, params))
+
+
 def _to_job(row: Any, history: tuple[JobEvent, ...] = ()) -> Job:
     return Job(
         id=row["id"],
@@ -153,15 +165,17 @@ async def _record_transition_tx(
     return ordinal
 
 
-async def get(room_id: str, job_id: str, *, with_history: bool = True) -> Job:
+async def get(
+    room_id: str, job_id: str, *, with_history: bool = True, tx: db.Tx | None = None
+) -> Job:
     """Load one job, scoped to its room so an id from elsewhere is simply absent."""
-    row = await db.fetch_one("SELECT * FROM jobs WHERE id = ? AND room_id = ?", (job_id, room_id))
+    row = await _one("SELECT * FROM jobs WHERE id = ? AND room_id = ?", (job_id, room_id), tx)
     if row is None:
         raise NotFound("No such job in this room.", job_id=job_id)
     history: tuple[JobEvent, ...] = ()
     if with_history:
-        rows = await db.fetch_all(
-            "SELECT * FROM job_events WHERE job_id = ? ORDER BY ordinal ASC", (job_id,)
+        rows = await _all(
+            "SELECT * FROM job_events WHERE job_id = ? ORDER BY ordinal ASC", (job_id,), tx
         )
         history = tuple(_to_job_event(r) for r in rows)
     return _to_job(row, history)
@@ -173,6 +187,7 @@ async def board_for_room(
     states: tuple[JobState, ...] | None = None,
     assignee_participant_id: str | None = None,
     limit: int = DEFAULT_BOARD_LIMIT,
+    tx: db.Tx | None = None,
 ) -> tuple[list[Job], int]:
     """The board, highest priority first, with the untruncated total beside it."""
     clauses = ["room_id = ?"]
@@ -184,21 +199,25 @@ async def board_for_room(
         clauses.append("assigned_to_participant_id = ?")
         params.append(assignee_participant_id)
     where = " AND ".join(clauses)
-    total = int(await db.fetch_value(f"SELECT COUNT(*) FROM jobs WHERE {where}", params) or 0)
-    rows = await db.fetch_all(
+    total = int(await _value(f"SELECT COUNT(*) FROM jobs WHERE {where}", params, tx) or 0)
+    rows = await _all(
         f"SELECT * FROM jobs WHERE {where} ORDER BY priority DESC, created_at ASC LIMIT ?",
         [*params, max(1, limit)],
+        tx,
     )
     return [_to_job(r) for r in rows], total
 
 
-async def jobs_for_participant(room_id: str, participant_id: str) -> list[Job]:
+async def jobs_for_participant(
+    room_id: str, participant_id: str, *, tx: db.Tx | None = None
+) -> list[Job]:
     """Jobs this seat is currently accountable for."""
-    rows = await db.fetch_all(
+    rows = await _all(
         "SELECT * FROM jobs WHERE room_id = ? AND assigned_to_participant_id = ? "
         "AND state IN (" + ",".join("?" for _ in OWNED_JOB_STATES) + ") "
         "ORDER BY priority DESC, created_at ASC",
         [room_id, participant_id, *(s.value for s in OWNED_JOB_STATES)],
+        tx,
     )
     return [_to_job(r) for r in rows]
 
@@ -425,6 +444,18 @@ async def update(*, participant: Participant, command: UpdateJobCommand) -> dict
                 "priority": command.priority,
                 "desired_outcome": command.desired_outcome,
                 "targets": list(command.targets) if command.targets is not None else None,
+                # The other two revisable lists, echoed for the same reason the three
+                # above are. `changed` already names what moved; omitting these two values
+                # while echoing the rest was arbitrary rather than principled, and
+                # docs/PROTOCOL.md 2 documented all five (resolved in D-089).
+                "constraints": (
+                    list(command.constraints) if command.constraints is not None else None
+                ),
+                "acceptance_criteria": (
+                    list(command.acceptance_criteria)
+                    if command.acceptance_criteria is not None
+                    else None
+                ),
             },
             disclosure=decision,
             causation_id=command.command_id,

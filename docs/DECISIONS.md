@@ -4012,3 +4012,224 @@ believe the job was unowned.
 Stages 2-5 (persistent monitoring hardening, the worker pool and review loop in the companion,
 the orchestrator allocation loop, and the realtime UI) are open; `docs/ROADMAP.md` M3.0 records
 what remains.
+
+---
+
+## D-089 — Making the coordination hierarchy reachable, and hardening the runtime that consumes it (2026-08-19)
+
+Stage 2 of the M3.0 upgrade. Stage 1 (D-088) built the domain, the storage invariants and four
+core services and proved all of them — while **no transport exposed any of it.** From a
+client's point of view that deploy changed nothing: `grep -rn` over `adapters/`, `api/` and
+`projections.py` for the new services returned empty. Stage 2 is the transport surface plus the
+runtime changes that let a persistent companion act on what it now receives.
+
+### The surface
+
+**Both transports, or neither.** 20 ARP HTTP routes and 15 MCP tools, one per command plus one
+read the board cannot answer (goal version history). A companion runs on HTTP and an agent runs
+on MCP; the product claim is that neither is privileged, so a service reachable from one and not
+the other is a service that narrows universality. `test_transport_conformance.py` gained five
+rows — `coordination_hierarchy`, `job_board`, `supervisor_goals`, `supervisor_capacity`,
+`declared_workers` — which also extends the A2A roadmap, deliberately: an adapter that can carry
+a task but not a job cannot host the room this product describes.
+
+**One tool per command, not one `coordinate(action=...)`.** The mega-tool would have kept the
+advertised surface small, but a model reads a tool list to work out what is possible, and an
+argument-switched verb hides thirteen capabilities behind one. The cost lands in docstrings,
+where this adapter already puts its long-form guidance.
+
+**Enum arguments are checked before they are constructed.** `ValueError` is not a `RoomError`,
+so it escapes the single handler every tool has and the call fails as a raw transport exception
+the model cannot read or correct. Nine tools take an enum-valued string; a parametrised test
+covers all nine.
+
+**`detail="hierarchy"` rather than five more sections on the coordination view.**
+`compact.py`'s argument is that a response is spent context, measured at ~3,400 tokens for one
+room read; five unconditional sections would add a fixed cost to every poll in every room,
+including the majority with no jobs at all. So the coordination view gates each section on
+carrying information, and the allocation view is a separate `detail` mode. A mode rather than a
+tool because `detail` is an unconstrained string, which is the only route to a connector that
+cached its tool list (D-040) — and a test asserts the published schema keeps it open.
+
+**Capacity appears when a seat has said something, not when `effective` is interesting.** The
+first gate used `effective != available`, which put a capacity card beside every *disconnected*
+seat in every room — and said nothing new, because that seat's `liveness` is already on its
+participant card. Gated on the declaration and the counts instead.
+
+**The ChatGPT Action list widened by four, and only four.** `post_job`, the board read,
+`accept_job`, `acknowledge_goal`, `report_capacity`. An Action is a participant, not an
+administrator, so allocation stays off it. The reasoning that put `post_job` there: nothing wakes
+a browser-side connector between its human's messages, so the most valuable thing it can do is
+put its person's intent somewhere that outlives the conversation.
+
+### Two defects the projection exposed immediately
+
+Both were in Stage 1, both were invisible while nothing read `room_roles`, and both are the
+reason a projection is worth writing early.
+
+**A retired role row was indistinguishable from no row at all.** `role_for` filtered on
+`retired_at IS NULL`, so a stood-down seat fell through to legacy derivation — and an owner
+derives to `orchestrator`. Standing an owner down was therefore impossible: it read straight
+back as the orchestrator it had just been relieved of.
+
+**Worse: a handover reversed itself in the read model.** `room_roles` resolved rows in
+`joined_at` order and broke an orchestrator tie by seniority. After a handover the outgoing
+owner's row is retired, so it derived `orchestrator` and — having joined first — took the chair
+back from the seat that had just been given it, while the storage engine correctly held exactly
+one live orchestrator row. The partial unique index was doing its job and the reader was
+undoing it.
+
+Fixed by making derivation subordinate to what is stored: a retired row is an explicit
+stand-down and reads `unassigned`; stored rows are resolved in a first pass and claim the chair;
+derivation fills in only what is left, and seniority breaks ties only among *derived*
+orchestrators. Legacy behaviour is unchanged.
+
+### Doc/code disagreements, resolved rather than drifted
+
+`CLAUDE.md` requires these to be settled explicitly. All four were found by transcribing
+`docs/PROTOCOL.md` §2 against the emitted payloads.
+
+- `job.updated` documented `constraints` and `acceptance_criteria` and emitted neither, while
+  echoing the other three revisable fields. **Code follows the doc** — the omission was
+  arbitrary rather than principled.
+- `worker.registered` documented `supervisor_attachment_id` and did not carry it, although the
+  value was already derived and stored. **Code follows the doc.**
+- `supervisor.goal_closed` emits `participant_id` and `worker.finished` emits `related_job_id`
+  and `awaiting_supervisor_review`; none was documented. **The doc follows the code** — all
+  three are useful and removing them would be a loss.
+- The id prefix list omitted `goal_`, `job_` and `wrx_` (and `dir_`, `ckp_`, `qst_`, `ans_`).
+  Added, with the `wrx_`/`wrk_` near-collision explained rather than tidied: `wrk_` was live
+  before workers existed and renaming a prefix invalidates ids already written down.
+
+### A worker record refuses a class it cannot store
+
+`workers` has no `privacy_class` column, deliberately — a worker record is coordination state,
+and a room that cannot see it cannot allocate around it. But the disclosure decision is stamped
+on the *event* while the projection reads the *row*, so accepting `participant_private` would
+have filed a filtered event beside a room-visible row and disclosed exactly what the caller
+asked to hold back. Registration now **refuses** a narrower class. Not a downgrade: a downgrade
+performs the disclosure it was meant to prevent, and a silent scrub of a supervisor's assignment
+text would be worse still.
+
+(`report_capacity` was checked for the same shape and is fine: it has no `disclosure` field, its
+`note` goes through `privacy.inspect_content`, and `eventlog.append` stamps `room_public`
+explicitly when no decision is supplied.)
+
+### The runtime half
+
+**An explicit reaction lifecycle.** `pending` → `running` → `completed` | `failed` |
+`superseded`, with an attempt count and an idempotency key. Previously a reaction's lifecycle
+was implied by three things that had to agree — membership in `reaction_queue`, membership in
+`reacted_seqs`, and the `ambient_due_at` clock — and five specific failures followed from that:
+
+1. **`reacted_seqs` was never persisted.** A restart re-answered every reaction still on disk.
+   The only guard was the message `command_id`, and it was keyed on `attachment_id` — a
+   per-process value — so it did not hold across the one boundary it existed for. The key is now
+   derived from the participant and the room sequence, and stamped at *lease* time so a retry
+   presents the same key.
+2. **Persistence was a side effect of the cursor advancing.** `_advance_cursor` returns early
+   when the cursor did not move, so a page that enqueued reactions without moving the cursor
+   left them unwritten and a restart lost them.
+3. **`_recover_event_gap` assigned `self.cursor` directly**, bypassing the monotonic guard, so
+   the in-memory cursor could fall below the stored one and the runtime would re-read events it
+   had already accepted.
+4. **The queue was bounded by `[-MAX_CONTEXT_EVENTS:]`.** A companion holding a lease
+   accumulates reactions and drains none, so entries were discarded without ever being looked
+   at and without appearing anywhere. The bound still holds; overflow is now an explicit
+   `superseded` with a reason, kept as a record and logged as an error. "No silent caps",
+   applied to the runtime's own queue.
+5. **A permanently failing reaction was retried forever**, occupying a capped queue and
+   starving everything behind it while the runtime looked busy. Three attempts, then abandoned
+   with a stated reason.
+
+A write failure in `record_monitor_state` is still not fatal — a runtime that exits because a
+temp file was busy is worse than one carrying unpersisted progress — but it is no longer
+invisible: consecutive failures are counted and escalate to an error, so "my worker redid
+everything after a restart" leaves a trace.
+
+**A local goal projection, and the acknowledgement that closes the loop.** On adopting a version
+the companion writes it wholesale and atomically to `<key>.goal.md` — a header a program can
+parse, then the direction as prose, and *last* the immutable runtime contract, which is the part
+that still applies when an objective tries to talk the runtime out of it. It then calls
+`POST /goals/acknowledge` with a `command_id` derived from the goal and version, so the room can
+say when the supervisor actually read it. Acknowledgement is after adoption, never before: sent
+first it would be evidence of nothing.
+
+The goal also enters every executor turn's bounded context, ahead of the charter. A runtime that
+reads the charter but not its own current direction is working to last week's instructions.
+
+**A goal that has gone clears the file.** Left behind it reads as current direction forever, and
+a Stop hook reading it would loop on a goal nobody holds.
+
+**Addressed events are graded from the payload, not the type.** `supervisor.goal_replaced`,
+`supervisor.goal_closed` and `job.assigned` are `immediate` when they name this seat and
+`ambient` otherwise — the rule `message.posted` already followed, for the same reason: waking
+for every room-wide allocation spends one participant's context narrating another's.
+`supervisor.capacity_changed` and `worker.state_changed` stay routine because they churn like
+presence.
+
+**Only `message.posted` earns a cognition turn.** A reaction turn produces a message, which is
+the right answer to being spoken to and the wrong answer to a goal replacement (answered by
+acknowledging and re-planning) or a job allocation (answered by accepting or declining, which is
+Stage 3/4 policy). Both still wake the loop.
+
+**Preemption stays with the room.** A new goal for this seat with `worker_disposition=stop`
+cancels the executor from the monitor thread, exactly as `directive.issued` already does;
+`drain` and `continue` let the step finish. Nothing can change the goal of a turn already
+running, so a turn boundary is the only place an external decision can land.
+
+### The `/goal` Stop-hook adapter
+
+`worker/cottage_goal_hook.py`. The Claude Code Stop contract was re-verified before writing it,
+not assumed: exit 2 blocks whether or not JSON is printed, and stderr becomes the blocking
+reason Claude sees. Chosen over the JSON form because it does not depend on which field name a
+given build expects.
+
+Three properties, in order:
+
+1. **It fails open.** Missing file, unreadable file, malformed header, unwritable sidecar, any
+   unexpected exception: exit 0. **Nothing in the documented contract guards a Stop hook against
+   an infinite loop**, so a hook that blocked on its own error would trap a session forever.
+2. **It blocks at most once per version per session**, and the record is written *before* the
+   block. In that order a crash loses a notice; in the other it repeats one forever. If the
+   record cannot be written the block is abandoned — without the guard, blocking is unsafe.
+3. **The goal is framed as data.** The notice marks the objective as room content, because a
+   goal saying "ignore your previous instructions" is a string in a database.
+
+It reaches no network, opens nothing but the projection and its own sidecar, never touches
+`transcript_path`, and reports no liveness. All four are asserted structurally.
+
+### Rejected
+
+Adding `command_id` to the 14 new MCP tools: `create_task` creates a durable object without one,
+so the house convention is no `command_id` except on the two tools that already had it, and
+idempotency for callers that need it lives on the HTTP surface where a durable companion runs.
+A JSON Stop-hook response: two fetches of the same doc produced two different field names for
+the blocking decision, and exit 2 is unambiguous. Dataclasses for reaction records: they are
+persisted as JSON and read back by a later build, the file already annotates events with
+`_tier`, and typing the container would have broken six passing tests to buy nothing the state
+machine does not already give.
+
+### Evidence
+
+Gate fully green: **671 backend tests passing with 17 skips, 85 worker tests with 7 skips**,
+mypy clean, Ruff and Ruff format clean on both trees. (`tsc` skips — not installed in this
+environment; no frontend change was made in this stage.)
+
+44 new adapter-level tests in `backend/tests/test_hierarchy_surface.py` and 29 in
+`worker/tests/test_goal_and_reactions.py`. Adapter-level on purpose: `CLAUDE.md` is explicit
+that a green core gate is not evidence for `adapters/`, and the two role defects above were
+found by a projection test, not by the 52 core tests that were already passing.
+
+What the new suites hold, beyond the defects already described: a private job and a private goal
+are invisible to a bystander through the compact view; a private goal reaches both its
+supervisor and its author, which needed `restricted_to` because `owner_participant_id` names only
+one of them; a cross-org room still rejects `org_internal` on the new path; a room with no jobs
+pays nothing for the board; a stale seat reads `offline` however available it declared itself;
+`jobs_total` comes from the database rather than the page; the verb routes are registered before
+the `{job_id}` path that would swallow them; and the hook's fail-open behaviour on every
+malformed input.
+
+**Not verified live.** This has not been deployed, and `CLAUDE.md` is explicit that a green gate
+is not sufficient for `adapters/` or `api/`. The supervisor-assignment path in particular needs
+a second identity and a second host. Stages 3-5 remain open — see `docs/ROADMAP.md` M3.0.
