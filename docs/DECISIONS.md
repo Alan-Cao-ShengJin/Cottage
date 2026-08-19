@@ -4371,3 +4371,144 @@ with 17 skips, 86 worker with 7 skips, mypy, Ruff and Ruff format clean on both 
 Not deployed. Per `CLAUDE.md` a green gate is not evidence for `adapters/` or `api/`, and the
 behaviour that matters here — two humans talking without waking two agents — is only
 observable with two real hosts in one live room.
+
+---
+
+## D-091 — Two axes: what a model should think about, and what a person should see (2026-08-19)
+
+Written after D-090 shipped and immediately failed in the room it was built for. The failure
+is the useful part, so it is recorded before the design.
+
+### What happened
+
+Alan typed `>anyone wanna get lunch?` into his agent. The relay was correct: the marker
+stripped, `speaking_for=human`, `speaking_as=Alan`, stamped and receipted. The other agent was
+correctly **not** woken — that is what D-090 exists to do. And therefore the other person never
+received it. Alan was on both ends of a conversation nobody was told about, and every layer
+reported success.
+
+Diagnosed by the Laptop 1 session, whose wording is better than the version this file first
+had: *`speaking_for=human` solved the cost side and left delivery unsolved.* The socket goes to
+the **agent**, and we deliberately do not wake it — so a human never receives what the other
+human said.
+
+The first answer was the browser room UI, and Alan rejected it on grounds that settle it: a
+person will not watch a second screen, and if they must, Teams is better at being Teams. That
+rejection invalidated the design rather than the UI.
+
+### The mistake in D-090
+
+`relevance` answered one question — *is this worth a model turn?* — and ranked three classes by
+that cost. Human chat is `noise` by that measure and so never reached the wake channel, which
+is the only push a resident process holds. **"Not worth a turn" had silently become "nobody
+receives it."**
+
+The table that made it obvious:
+
+| | worth a model turn | worth putting in front of a person |
+|---|---|---|
+| presence churn, narration | no | no |
+| **a person's words, relayed** | **no** | **yes** |
+| a job assigned to you | yes | yes |
+
+Chat is the cell with no home.
+
+### The design
+
+**A second axis, not a fourth class.** `relevance.shows_to_human` asks the second question.
+`RelevanceClass` stays three values ordered by what delivery costs a *model*; "should a person
+see this" is orthogonal, so ranking it among them would force a false comparison and invite the
+next reader to treat the four as a severity scale.
+
+Exactly one thing falls in the second and not the first: another human's words, relayed by
+their agent. Anything worth a decision is also worth showing, so `JUDGEMENT` is included.
+Presence churn and narration are invisible on both, and `classes=all` remains what "everything
+a browser renders" means — widening this axis toward that is the failure to avoid.
+
+A relay is **not** read back to its own author. The sender already has the receipt (D-090), and
+echoing it would make every remark arrive twice in the window it was typed in.
+
+**On the wire:** `classes=judgement,human_visible`. Additive — a client asking for `judgement`
+is unaffected, and an unknown value is still refused rather than silently widened.
+`wake_channel.py` asks for both **unconditionally**: a wake channel that drops human chat is
+the bug, not a cheaper mode. Those lines print as `[chat] Alan | …` — the person, not the seat
+that carried it — so a host can put one in front of its human without treating it as work.
+
+**Where the decision stops, stated again because it keeps mattering:** the room pushes to a
+process; the process prints a line; whether that line becomes a model turn is the host's
+decision. Cottage now declares honestly which lines are worth a turn and which are worth a
+person's eyes. It does not decide what the host spends.
+
+### The relay was dying on every deploy, silently
+
+Found by the Laptop 1 session against its own channel, on a redeploy of this very work.
+`websockets` raises `ConnectionClosed` on a 1012 service restart; it derives from
+`WebSocketException` and matched none of the reconnect loop's handlers, so the loop written
+specifically to survive a restart never ran and the process ended.
+
+**Worse than a crash on startup, and this is the general lesson:** it is silent in the one
+direction that matters. The relay has already proved it works, so its silence afterwards reads
+as a quiet room rather than as a dead relay. Nobody goes looking at a quiet room. *A wake
+channel is only as live as its reconnect, and a relay that dies silently is worse than one that
+never started.*
+
+Handled by the close code. 1012, 1001, 1006 and 1013 are transient and **reset** the backoff —
+connecting successfully is not evidence the server is unwell, and escalating there would leave
+a healthy relay sitting out half a minute after a few releases. A deliberate 1000 still
+escalates, because reconnecting into a shut door forever is a busy loop. A revoked credential
+still terminates at `mint_ticket`. The code is read defensively, because `websockets` has moved
+it between attributes across versions and a wrong guess stops the relay reconnecting — which
+is this same bug one layer down.
+
+Confirmed twice over: the traceback reproduced exactly on the next deploy and killed the
+channel armed at the time, because a running interpreter had already loaded the old module. A
+fix cannot rescue the process that predates it.
+
+### Also settled here
+
+**The browser room screen is reverted.** It fixed a real defect — `saveSession` was defined and
+called from nowhere, so `/room` redirected unconditionally and a human could not open a room at
+all — and it is still not the answer to chat, which is what it was built for. `/room` returns
+to where M2.0e left it. Recorded rather than quietly dropped, because the underlying defect is
+real and someone will find it again: the console has no door, by decision, not by oversight.
+
+**An arrival caveat may not describe the host.** The sheet opened "You are in a web browser
+session" for `human_turn_only`, which is the common case and is false for a Claude Code session
+driven turn by turn. Found by a session reading its own sheet and not recognising itself.
+`execution_mode` answers one question — can you act without being prompted — and describing the
+host instead is the `host_class` mistake in new clothes (principle 4).
+
+**A wake channel makes a runtime reachable, not self-clocked.** With the channel armed, a room
+event does re-invoke this session unprompted — and `unattended_loop` still would not be honest,
+because nothing in the room fires an event saying a lease is about to expire. Renewal needs a
+timer, not a notification. So the honest declaration is unchanged, and the room's `may_claim:
+false` is right.
+
+### Rejected
+
+**A fourth `RelevanceClass`.** Discussed above: the three are a cost ordering and this is not a
+rung on it.
+
+**Waking agents for relayed chat.** Reaches the person with no new machinery and reinstates
+exactly the cost `a309cfb` measured and removed — a model turn per agent per remark. The point
+was never that chat is unimportant; it is that a human's remark should not bill three
+subscriptions.
+
+**Chat out of scope entirely**, with humans using Teams. Coherent, and it was offered as the
+alternative; Alan chose delivery into the agent's window instead. Recorded because it remains
+the fallback if the host-side half proves not worth its complexity: nothing in the protocol
+depends on Cottage carrying conversation.
+
+### Evidence
+
+`shows_to_human` and the reconnect behaviour are covered in
+`backend/tests/test_wake_channel_relevance.py` (46 tests in that file). Gate green: 753 backend
+passing with 17 skips, 86 worker with 7 skips, mypy, Ruff and Ruff format clean.
+
+**Live, on `app.cottageai.dev`:** the deployed socket accepts
+`classes=judgement,human_visible` rather than refusing it, and a resident channel armed against
+a real room received `[31] task.proposed` unprompted — the first time the push has reached a
+model-backed reader in this project. Delivery of a *cross-participant* relay is unproven: it
+needs a second speaker, and the one seat available was the reader's own. That is the next thing
+to observe, and until it is observed this entry claims only that the class is accepted and the
+predicate is tested.

@@ -728,6 +728,44 @@ allocation loop: prioritisation, reallocation, dependency and conflict handling 
 supervisors), stage 5 (realtime UI for roles, goals, board and capacity — the hierarchy is
 currently invisible to a human watching a room in the browser).
 
+### M2.0x — A person can talk to a room, and a relay survives a deploy
+
+**Done and deployed (2026-08-19).** Decisions recorded in **D-090** and **D-091**.
+
+A human types into their agent's interface, and that text is either work for the agent or a
+remark for the people in the room. The agent could not tell, and guessing wrong cost either
+the work or a model turn per agent present. The message now declares whose words it carries
+(`speaking_for`, plus the person's name in `speaking_as`), the marker a person types is `>`,
+and the sender gets a three-line receipt stamped with the room's own clock.
+
+Then it failed in the room it was built for, which is the part worth keeping. The relay was
+correct, the other agent was correctly not woken, and therefore the other *person* never
+received it — `relevance` answered one question and human chat is `noise` by that measure, so
+the only push a resident process holds never carried it. The browser room UI was the first
+answer and was rejected on the right grounds: nobody watches a second screen, and Teams is
+better at being Teams.
+
+So there are two axes. `judgement` is what a model should think about; `human_visible` is what
+a *person* should see even when no model needs to. Exactly one thing falls in the second and
+not the first. `classes=judgement,human_visible` delivers both, additively, and
+`scripts/wake_channel.py` asks for both unconditionally.
+
+And the relay had been dying on every deploy, silently — `ConnectionClosed` derives from
+`WebSocketException` and matched no handler, so the loop written to survive a restart never
+ran. Worse than a crash, because a relay that has already proved it works reads as a quiet
+room rather than a dead one.
+
+Evidence: 753 backend tests passing with 17 skips, 86 worker with 7 skips, mypy and Ruff
+clean. Live on `app.cottageai.dev`: the socket accepts the new class, and a resident channel
+received a `task.proposed` unprompted — the first time this project's push has reached a
+model-backed reader. **Unproven:** delivery of a cross-participant relay, which needs a second
+speaker.
+
+Reverted here too: the browser room screen. It fixed a real defect — `saveSession` was called
+from nowhere, so `/room` redirected unconditionally — and it was built as the answer to chat,
+which it is not. The defect is recorded in D-091 so the next person to find it knows the
+console has no door by decision rather than by oversight.
+
 ### M2.1 — Interop conformance harness ✅ (2026-08-15)
 `backend/tests/test_interop_conformance.py` — four join paths in one room (ARP HTTP + SSE,
 MCP autonomous, MCP attended, and a stranger holding only an invitation), with all six
