@@ -60,6 +60,18 @@ from typing import Any
 
 DEFAULT_BASE = "https://agent-rooms.fly.dev"
 
+#: How long the relay waits on the room, and on the hook. Short on purpose: a person is
+#: watching a cursor, and a relay that hangs is worse for them than one that says it failed.
+REQUEST_TIMEOUT_SECONDS = 6.0
+
+#: Cap on one relayed line. The room enforces its own limit; this stops a pasted file from
+#: being read as a chat message before it ever leaves the machine.
+MAX_RELAY_BYTES = 64 * 1024
+
+#: Default localhost port for the outbound relay. Localhost only — it holds the participant
+#: token, so anything that can reach it can post as this seat.
+DEFAULT_RELAY_PORT = 8787
+
 
 def _connection_closed_type() -> type[BaseException]:
     """`websockets.exceptions.ConnectionClosed`, or a type that can never be raised.
@@ -122,6 +134,146 @@ def log(message: str) -> None:
     nothing.
     """
     print(f"wake_channel: {message}", file=sys.stderr, flush=True)
+
+
+class OutboundRelay:
+    """A warm connection to the room, and a localhost door onto it.
+
+    Posting a chat line from a fresh process costs ~750ms, measured against the hosted
+    instance: 185ms to open TCP, another 210ms for TLS, and only then a request. Roughly half
+    the wall clock of typing `>what's up?` was spent establishing a connection that was then
+    thrown away (D-091).
+
+    So the connection is held. This runs inside the wake channel rather than as a second
+    daemon, deliberately: the channel is already resident for this room, already supervised,
+    and already reports its own failures as visible lines. A separate relay would be one more
+    process that can die quietly — which is the exact bug this file just had.
+
+    The socket carries events *in*; this carries words *out*. One resident process per room,
+    doing both, is the honest shape of "a local presence for this seat".
+
+    **Localhost only, and that is a security boundary rather than a convenience.** The
+    listener binds 127.0.0.1 and holds the participant token, so anything that can reach it
+    can post as this seat. Binding any other interface would hand that to the network.
+    """
+
+    def __init__(self, base: str, room: str, token: str) -> None:
+        self._base = base.rstrip("/")
+        self._room = room
+        self._token = token
+        self._connection: Any = None
+        self._host = self._base.split("://", 1)[-1].rstrip("/")
+        self._https = self._base.startswith("https")
+
+    def _client(self) -> Any:
+        import http.client
+
+        if self._connection is None:
+            factory = http.client.HTTPSConnection if self._https else http.client.HTTPConnection
+            # `http.client` rather than `urllib.request`: it keeps the connection, which is the
+            # entire point, and it imports in a fraction of the time.
+            self._connection = factory(self._host, timeout=REQUEST_TIMEOUT_SECONDS)
+        return self._connection
+
+    def _drop(self) -> None:
+        with contextlib.suppress(Exception):
+            if self._connection is not None:
+                self._connection.close()
+        self._connection = None
+
+    def post_message(self, body: str, speaking_as: str) -> dict[str, Any]:
+        """Relay one line. Retries once on a dropped keep-alive, then gives up.
+
+        A kept-alive connection is closed by the peer eventually — a deploy, an idle timeout —
+        and the first request after that fails on a connection that looked fine. Exactly one
+        retry: the second failure is the room, not the socket, and a retry loop here would
+        make a person wait while it happened.
+        """
+        payload = json.dumps(
+            {"body": body, "speaking_for": "human", "speaking_as": speaking_as}
+        ).encode()
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+        path = f"/api/rooms/{urllib.parse.quote(self._room)}/messages"
+        for attempt in (1, 2):
+            try:
+                client = self._client()
+                client.request("POST", path, body=payload, headers=headers)
+                response = client.getresponse()
+                raw = response.read()
+                if response.status >= 400:
+                    self._drop()
+                    return {"ok": False, "error": f"the room refused it ({response.status})"}
+                return dict(json.loads(raw))
+            except Exception as exc:
+                self._drop()
+                if attempt == 2:
+                    return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": False, "error": "unreachable"}
+
+    def serve(self, port: int, speaking_as: str) -> None:
+        """Accept one line of JSON per connection, relay it, answer with the result.
+
+        Blocking, on its own thread. One line in, one line out, connection closed — a protocol
+        small enough that the hook calling it needs nothing but `socket` and `json`, which is
+        what keeps *its* startup cost near the floor.
+        """
+        import socket as socket_module
+        import threading
+
+        def handle(conn: Any) -> None:
+            with conn:
+                try:
+                    conn.settimeout(REQUEST_TIMEOUT_SECONDS)
+                    chunks: list[bytes] = []
+                    while b"\n" not in b"".join(chunks):
+                        piece = conn.recv(4096)
+                        if not piece:
+                            break
+                        chunks.append(piece)
+                        if sum(len(c) for c in chunks) > MAX_RELAY_BYTES:
+                            break
+                    request = json.loads(b"".join(chunks).split(b"\n", 1)[0] or b"{}")
+                    body = str(request.get("body") or "").strip()
+                    if not body:
+                        conn.sendall(b'{"ok": false, "error": "empty body"}\n')
+                        return
+                    attribution = str(request.get("speaking_as") or speaking_as)
+                    result = self.post_message(body, attribution)
+                    # Echoed back so the caller's receipt names what was actually posted. The
+                    # hook may have supplied no name and taken this process's default; a
+                    # receipt naming somebody else would be a lie in the one line the sender
+                    # reads.
+                    result.setdefault("speaking_as", attribution)
+                    if not result.get("ok"):
+                        # Visible, because a chat line that never reached the room is the one
+                        # thing a person must not have to infer from silence.
+                        log(f"relay failed: {result.get('error')}")
+                    conn.sendall(json.dumps(result).encode() + b"\n")
+                except Exception as exc:
+                    log(f"relay error: {type(exc).__name__}: {exc}")
+                    with contextlib.suppress(Exception):
+                        conn.sendall(b'{"ok": false, "error": "relay error"}\n')
+
+        listener = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
+        listener.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
+        try:
+            listener.bind(("127.0.0.1", port))
+        except OSError as exc:
+            # Never fatal: the channel's job is receiving, and the hook falls back to its own
+            # request when nothing answers here.
+            log(f"outbound relay not listening on {port}: {exc}")
+            return
+        listener.listen(8)
+        log(f"outbound relay ready on 127.0.0.1:{port}")
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=handle, args=(conn,), daemon=True).start()
 
 
 def mint_ticket(base: str, room: str, token: str) -> str:
@@ -324,7 +476,29 @@ async def stream_once(url: str, *, cursor: int) -> tuple[int, int | None]:
     return cursor, _close_code(socket)
 
 
+def start_outbound_relay(args: argparse.Namespace, token: str) -> None:
+    """Hold a warm connection for outbound chat, on a daemon thread.
+
+    Started before the socket, so a person typing in the first second is not waiting on a
+    WebSocket handshake to finish. Never fatal: if the port is taken or the thread dies, the
+    chat hook falls back to opening its own connection, which is the behaviour that already
+    worked — just slower.
+    """
+    if args.relay_port <= 0:
+        return
+    import threading
+
+    relay = OutboundRelay(args.base, args.room, token)
+    threading.Thread(
+        target=relay.serve,
+        args=(args.relay_port, args.human_name),
+        name="cottage-outbound-relay",
+        daemon=True,
+    ).start()
+
+
 async def run(args: argparse.Namespace, token: str) -> int:
+    start_outbound_relay(args, token)
     cursor = args.from_seq if args.from_seq is not None else 0
     backoff = 1.0
     while True:
@@ -388,6 +562,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default=os.environ.get("AGENT_ROOMS_BASE", DEFAULT_BASE))
     parser.add_argument("--room", default=os.environ.get("AGENT_ROOMS_ROOM"))
+    parser.add_argument(
+        "--relay-port",
+        type=int,
+        default=int(os.environ.get("COTTAGE_RELAY_PORT", DEFAULT_RELAY_PORT)),
+        help=(
+            "localhost port for the outbound chat relay, so a `>` line does not pay for a "
+            "fresh TLS handshake. 0 disables it. Localhost only: it holds the participant "
+            "token."
+        ),
+    )
+    parser.add_argument(
+        "--human-name",
+        default=os.environ.get("COTTAGE_HUMAN_NAME", ""),
+        help=(
+            "default name relayed chat is attributed to, when the caller does not supply one. "
+            "The seat is the agent, so an unnamed relay reads as the agent talking."
+        ),
+    )
     parser.add_argument(
         "--from-seq",
         type=int,
