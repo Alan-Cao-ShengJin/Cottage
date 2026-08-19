@@ -1150,6 +1150,30 @@ Deepen M2.4: richer digests, pasteable turn output, lease tuning for `attended` 
 
 ## Known blockers / open questions
 
+- **A seat with a live resident process reads `offline`, and the fix reverses a deliberate
+  choice — so it needs a decision.** Flagged vaguely three times; now measured. On
+  `room_01M0DGWSXDA360CT6YJ85W`, with `scripts/wake_channel.py` connected for 45 minutes and its
+  relay posting messages at ~530ms, `GET /api/rooms/{id}/capacity` returned
+  `effective: "offline"` for that seat. It is not a presence-grading bug: `grade_connection` is
+  careful, and heartbeat age correctly dominates mechanism. The cause is that the wake channel is
+  a **pure observer** — it touches no presence unless handed `--connection-id` — so the very
+  process that makes the seat reachable is not represented as a connection. The cost is concrete:
+  `effective` is what an orchestrator allocates against, so a seat with a live resident process is
+  invisible to allocation.
+
+  What is actually true of a bare channel-plus-relay: events *are* delivered, chat *is* sent, a
+  model is *not* guaranteed to act, and a human acts at human pace. That is the definition of
+  `attended` — `requires_human_presence` caps the grade there. So declaring the channel as a
+  push-capable attended connection would be honest, and the lease risk is already handled
+  elsewhere: `allow_attended_claims` is a room policy, with exactly the right reasoning attached
+  ("nobody could renew its lease if its human stepped away mid-task").
+
+  Left undone deliberately. The observer choice was made on purpose — a channel running with no
+  session attached must not claim a liveness the *agent* does not have — and reversing it is a
+  judgement about which of two wrong readings is worse, not a bug fix. Under-claiming hides a
+  reachable seat; over-claiming sends work to one nobody is reading. The evidence above is what
+  that decision should be made against.
+
 - **No second-vendor client has ever joined a room.** Every "verified" row in
   `docs/INTEROP.md` was verified by our own software. Until that changes, cross-platform is a
   design property, not an observed one. **This is now the most important open item**, and the
