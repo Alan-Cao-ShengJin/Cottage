@@ -4569,3 +4569,40 @@ a convenience script. `status` exists so the gap is visible rather than assumed 
 stub to the channel launch alone: patching `subprocess.Popen` wholesale also captured the
 `icacls` call, so the permission test would have passed by never narrowing anything. A stub broad
 enough to swallow the security-relevant call proves nothing.
+
+## D-093 — A held connection is only warm while it is used (2026-08-20)
+
+**Context.** D-091 held the relay's HTTP connection open because a cold post spends most of its
+wall clock on a handshake it then discards: 185ms of TCP, 210ms of TLS. That took `>` from ~895ms
+to ~534ms.
+
+Measured again after D-092 made the relay a service, the first line after startup cost **1172ms**
+against **448ms** once warm. `http.client` connects lazily, so constructing the connection is
+free and the first *request* pays for it. Worse, the same cost returns after any idle gap, because
+a load balancer reaps a connection nobody is using. Chat is bursty, so "the first line after a
+gap" is not an edge case — it is most lines, and it lands on precisely the message somebody reads
+as broken.
+
+**Decision.** Warm it eagerly and keep it warm: a daemon thread pokes `/healthz` every 50 seconds,
+under a minute because the usual idle timeout is 60 and a connection reaped at 60.1s is one the
+next `>` discovers the slow way. `/healthz` is unauthenticated, so a poke spends no credential.
+The response body is read and discarded — an unread body leaves an HTTP/1.1 connection unusable
+for the next request, which would make the keep-alive cause the exact stall it removes, and it
+would look warm right up until somebody typed.
+
+**Two defects this exposed, both pre-existing.**
+
+* `serve` hands every accepted socket to its own thread, and `post_message` touched the single
+  held connection with no lock. Two lines typed close together could interleave two requests on
+  one HTTP/1.1 connection and read each other's responses. Rare while a person types — routine
+  once a keep-alive can fire mid-request. The connection is now guarded.
+* `_drop` ran outside that lock, so a failing request could close the connection object a
+  concurrent request was mid-flight on. It now takes the lock, and the lock is an `RLock`,
+  because `warm` drops while already holding it — with a plain `Lock` the first keep-alive
+  failure would deadlock the thread meant to prevent stalls.
+
+**Verified live** against `app.cottageai.dev`, through the real hook: 528ms for the first line
+after a service restart (was 1172ms), and **531ms after a 95-second idle gap** — the case that
+previously paid full cold cost. `backend/tests/test_outbound_relay.py`, 11 tests, run against a
+real loopback HTTP server rather than a mock, so connection *reuse* is observed rather than
+asserted about a stub. Gate green.
