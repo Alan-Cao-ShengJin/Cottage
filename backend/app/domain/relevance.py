@@ -29,6 +29,7 @@ from enum import Enum
 from typing import Any
 
 from .events import EventType
+from .identity import PrincipalKind
 
 
 class RelevanceClass(str, Enum):
@@ -130,6 +131,8 @@ def classify(
     payload: Mapping[str, Any] | None = None,
     actor_participant_id: str | None = None,
     viewer_participant_id: str | None = None,
+    actor_kind: PrincipalKind | None = None,
+    viewer_kind: PrincipalKind | None = None,
 ) -> RelevanceClass:
     """Decide what one event costs its reader.
 
@@ -175,6 +178,28 @@ def classify(
         # news to the supervisor even though the room attributes both to one
         # participant.
         return RelevanceClass.NOISE
+    if (
+        kind == EventType.MESSAGE_POSTED.value
+        and viewer_kind is PrincipalKind.AGENT
+        and actor_kind is PrincipalKind.HUMAN
+        and body.get("to_participant_id") != viewer_participant_id
+    ):
+        # Two people talking to each other, in a room that also holds agents.
+        #
+        # Humans want chat: instant, cheap, as many messages as they like. Agents
+        # subscribed to a wake channel must not pay a model turn for each one, or a
+        # short conversation between two people quietly bills every agent in the room
+        # for reading it. The room delivers the message either way — a human on an
+        # unfiltered socket still sees it immediately, and any reader can pull it from
+        # the log. What this suppresses is the *wake*, not the delivery.
+        #
+        # Narrow on purpose, because the expensive mistake here is silencing an
+        # instruction. A message a person directs at this seat still wakes it, and so do
+        # `directive.issued` and `question.asked`, which are the channels a human uses
+        # when it needs an agent to act. Only an undirected human remark is quiet, which
+        # matches what the briefing already says a message is: a minor annotation
+        # channel, not the surface work happens on.
+        return RelevanceClass.NOISE
 
     if kind in {t.value for t in JUDGEMENT_TYPES}:
         return RelevanceClass.JUDGEMENT
@@ -193,6 +218,8 @@ def wakes(
     payload: Mapping[str, Any] | None = None,
     actor_participant_id: str | None = None,
     viewer_participant_id: str | None = None,
+    actor_kind: PrincipalKind | None = None,
+    viewer_kind: PrincipalKind | None = None,
 ) -> bool:
     """Is this event worth spending a reader's turn on?"""
     return (
@@ -201,6 +228,8 @@ def wakes(
             payload=payload,
             actor_participant_id=actor_participant_id,
             viewer_participant_id=viewer_participant_id,
+            actor_kind=actor_kind,
+            viewer_kind=viewer_kind,
         )
         is RelevanceClass.JUDGEMENT
     )

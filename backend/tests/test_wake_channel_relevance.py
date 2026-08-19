@@ -21,11 +21,14 @@ import pytest
 from app.api import routes
 from app.api.routes import websocket_stream
 from app.config import settings
-from app.core import eventlog, stream_tickets
+from app.core import eventlog, messages, stream_tickets
 from app.core.actors import actor_for
 from app.db import database as db
 from app.domain import relevance
+from app.domain.commands import PostMessageCommand
+from app.domain.disclosure import Disclosure
 from app.domain.events import ControlFrame, EventType
+from app.domain.identity import PrincipalKind
 from app.domain.relevance import RelevanceClass
 
 pytestmark = pytest.mark.asyncio
@@ -120,6 +123,106 @@ async def test_own_checkpoint_still_wakes_because_it_came_from_the_companion():
             {"summary": "the gate failed"},
             actor_participant_id=mine,
             viewer_participant_id=mine,
+        )
+        is RelevanceClass.JUDGEMENT
+    )
+
+
+# ---------------------------------------------------------------------------
+# People chatting must not bill the agents in the room
+# ---------------------------------------------------------------------------
+
+HUMAN = PrincipalKind.HUMAN
+AGENT = PrincipalKind.AGENT
+
+
+async def test_two_people_chatting_do_not_wake_an_agent():
+    """The feature: humans get chat speed, agents get silence. The message is still
+    delivered and still in the log — only the wake is suppressed."""
+    assert (
+        _classify(
+            EventType.MESSAGE_POSTED,
+            {"body": "lunch?", "to_participant_id": None},
+            actor_participant_id="par_human",
+            viewer_participant_id="par_agent",
+            actor_kind=HUMAN,
+            viewer_kind=AGENT,
+        )
+        is RelevanceClass.NOISE
+    )
+
+
+async def test_a_person_addressing_this_agent_still_wakes_it():
+    """The expensive mistake would be silencing an instruction, so direction overrides."""
+    assert (
+        _classify(
+            EventType.MESSAGE_POSTED,
+            {"body": "take the migration", "to_participant_id": "par_agent"},
+            actor_participant_id="par_human",
+            viewer_participant_id="par_agent",
+            actor_kind=HUMAN,
+            viewer_kind=AGENT,
+        )
+        is RelevanceClass.JUDGEMENT
+    )
+
+
+async def test_a_person_still_hears_another_person():
+    """Suppression is for agent readers only. A human on the channel is chatting."""
+    assert (
+        _classify(
+            EventType.MESSAGE_POSTED,
+            {"body": "lunch?"},
+            actor_participant_id="par_human_a",
+            viewer_participant_id="par_human_b",
+            actor_kind=HUMAN,
+            viewer_kind=HUMAN,
+        )
+        is RelevanceClass.JUDGEMENT
+    )
+
+
+async def test_an_agent_talking_to_an_agent_still_wakes():
+    """Agents coordinating is the product. Only human small talk goes quiet."""
+    assert (
+        _classify(
+            EventType.MESSAGE_POSTED,
+            {"body": "I am blocked on the schema"},
+            actor_participant_id="par_agent_a",
+            viewer_participant_id="par_agent_b",
+            actor_kind=AGENT,
+            viewer_kind=AGENT,
+        )
+        is RelevanceClass.JUDGEMENT
+    )
+
+
+async def test_a_persons_directive_and_question_are_untouched_by_this_rule():
+    """The channels a human uses when it needs an agent to act must stay loud, or the
+    rule would silence control rather than chatter."""
+    for kind in (EventType.DIRECTIVE_ISSUED, EventType.QUESTION_ASKED, EventType.TASK_STEERED):
+        assert (
+            _classify(
+                kind,
+                {},
+                actor_participant_id="par_human",
+                viewer_participant_id="par_agent",
+                actor_kind=HUMAN,
+                viewer_kind=AGENT,
+            )
+            is RelevanceClass.JUDGEMENT
+        ), kind
+
+
+async def test_unknown_kinds_keep_the_old_behaviour():
+    """Callers that pass no kinds - the standalone watcher among them - must not have
+    messages silently go quiet underneath them."""
+    assert (
+        _classify(
+            EventType.MESSAGE_POSTED,
+            {"body": "hello"},
+            actor_participant_id="par_someone",
+            viewer_participant_id="par_me",
         )
         is RelevanceClass.JUDGEMENT
     )
@@ -478,3 +581,64 @@ async def test_an_unknown_frame_is_logged_rather_than_woken_or_dropped_silently(
     cursor, line = wc.handle_frame({"frame": "something_new"}, cursor=7)
     assert (cursor, line) == (7, None)
     assert "unrecognised frame" in capsys.readouterr().err
+
+
+async def test_a_person_chatting_reaches_the_socket_but_not_the_wake_channel(
+    make_room, join, monkeypatch
+):
+    """End to end through the endpoint: a person talks, an agent's wake channel stays
+    silent, and the same words arrive immediately on the unfiltered socket a person uses.
+
+    Both subscriptions read the same log over the same code path, so this pins the one
+    thing worth pinning - that the difference is who is reading, not what was delivered.
+    """
+    _fast_keepalive(monkeypatch)
+    room = await make_room()
+    person = await join(room, display_name="Alan", kind=PrincipalKind.HUMAN)
+    agent = await join(room, display_name="Worker")
+    start = await eventlog.current_seq(room.room.id)
+
+    await messages.post(
+        participant=person.participant,
+        command=PostMessageCommand(body="anyone want lunch"),
+    )
+
+    agent_ticket = await stream_tickets.issue(agent.participant)
+    agent_socket = _FakeSocket(ticket=agent_ticket.token, since_seq=str(start), classes="judgement")
+    await _drive(agent_socket, room.room.id)
+    assert agent_socket.kinds() == [], agent_socket.kinds()
+
+    human_ticket = await stream_tickets.issue(person.participant)
+    human_socket = _FakeSocket(ticket=human_ticket.token, since_seq=str(start))
+    await _drive(human_socket, room.room.id)
+    assert "message.posted" in human_socket.kinds(), human_socket.kinds()
+    assert [
+        f["event"]["payload"]["body"]
+        for f in human_socket.frames
+        if f.get("frame") == "event" and f["event"]["type"] == "message.posted"
+    ] == ["anyone want lunch"]
+
+
+async def test_a_person_directing_the_agent_does_reach_its_wake_channel(
+    make_room, join, monkeypatch
+):
+    """The same person, the same socket, one field different."""
+    _fast_keepalive(monkeypatch)
+    room = await make_room()
+    person = await join(room, display_name="Alan", kind=PrincipalKind.HUMAN)
+    agent = await join(room, display_name="Worker")
+    start = await eventlog.current_seq(room.room.id)
+
+    await messages.post(
+        participant=person.participant,
+        command=PostMessageCommand(
+            body="take the migration please",
+            disclosure=Disclosure(to_participant_id=agent.participant.id),
+        ),
+    )
+
+    ticket = await stream_tickets.issue(agent.participant)
+    socket = _FakeSocket(ticket=ticket.token, since_seq=str(start), classes="judgement")
+    await _drive(socket, room.room.id)
+
+    assert socket.kinds() == ["message.posted"], socket.kinds()

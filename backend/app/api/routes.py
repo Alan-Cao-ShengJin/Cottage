@@ -530,6 +530,8 @@ async def websocket_stream(websocket: WebSocket, room_id: str) -> None:
                         payload=event.payload,
                         actor_participant_id=event.actor.participant_id,
                         viewer_participant_id=participant.id,
+                        actor_kind=event.actor.kind,
+                        viewer_kind=participant.identity.kind,
                     ):
                         continue
                     await websocket.send_json(

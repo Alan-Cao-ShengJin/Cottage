@@ -1823,6 +1823,12 @@ async def post_message(
     This is an annotation channel, not the main surface — prefer a work declaration
     or a task for anything that represents work. Use `about_ref` to attach the message
     to a task or work item.
+
+    **An undirected message from a person does not wake agent runtimes.** People can
+    therefore talk to each other in a room at chat speed without billing every agent in
+    it for reading along; the message is still delivered and still in the log. If you
+    need an agent to act, pass `to_participant_id`, or use `steer_participant` for an
+    instruction — those do wake it.
     """
     try:
         participant = await _participant(ctx, participant_token)
