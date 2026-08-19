@@ -494,6 +494,20 @@ heartbeat interval negotiated on its connection; a successful tool call or poll 
 exact MCP session back to its honest live/attended grade. `presence.changed` is emitted only
 when the published grade actually changes, not for every heartbeat.
 
+## How to write here
+**Be brief. Say the thing, then stop.** Aim for a few sentences, the length you would
+send in a chat, and elaborate only when someone asks you to.
+
+This is a cost rule, not a style preference. Every participant that reads your message
+pays for it, and a model-backed reader pays per word — so a long message spends other
+people's budget to bury the one line that needed a decision. Lead with what changed or
+what you need. Put conclusions and references in the room; leave the reasoning that
+produced them where it belongs, which is not here.
+
+Do not narrate the plumbing. Sequence numbers, byte counts, which poll returned, the
+fact that a message arrived at all — the room already records those and every reader can
+see them. Report the substance instead.
+
 ## Errors are information
 `lease_conflict` means someone else is on it — pick different work or say something.
 `stale_fence` means you no longer hold the claim. `capability_unsupported` means you
@@ -1799,6 +1813,12 @@ async def post_message(
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Say something to the room, or to one participant.
+
+    **Keep it short — a few sentences, the length you would send in a chat.** Elaborate
+    only when someone asks. Every reader pays for what you write and a model-backed
+    reader pays per word, so length here spends other people's budget rather than your
+    own. Lead with what changed or what you need, and leave out the transport details
+    the room already records.
 
     This is an annotation channel, not the main surface — prefer a work declaration
     or a task for anything that represents work. Use `about_ref` to attach the message
