@@ -349,3 +349,101 @@ async def test_the_briefing_and_the_tool_both_tell_an_agent_to_pass_the_name():
     # And the convention itself, where a person will be told to type it.
     assert "anyone want lunch?" in briefing
     assert "> " in briefing
+
+
+# ---------------------------------------------------------------------------
+# The sender's receipt
+# ---------------------------------------------------------------------------
+
+
+async def test_a_relay_comes_back_with_a_receipt_the_agent_is_told_to_print(make_room, join):
+    """A person who typed into a chat window and saw nothing cannot tell "sent" from "my agent
+    read that as an instruction and went off to do something else" — and the second is exactly
+    what the `>` convention exists to prevent, so the confirmation is part of the fix."""
+    fixture = await make_room(name="Wren")
+    await join(fixture, display_name="Bea's agent")
+
+    posted = await mcp_tools.post_message(
+        body="anyone wanna get lunch?",
+        speaking_for="human",
+        speaking_as="Alan",
+        participant_token=fixture.owner_token,
+    )
+    assert posted["ok"] is True
+    receipt = posted["sent"]
+    assert "Sent to Wren" in receipt
+    # As it will read to everybody else: the person, and the seat that carried it.
+    assert "Alan (via Room Owner)" in receipt
+    assert "anyone wanna get lunch?" in receipt
+    # And the agent is told to show it rather than left to decide.
+    assert "verbatim" in posted["next_step"]
+
+
+async def test_the_receipt_says_who_is_actually_watching(make_room, join):
+    """ "Sent" on its own would let somebody believe they had interrupted a colleague who is
+    not there. The suppression is the point, so the receipt owns it."""
+    fixture = await make_room(name="Wren")
+    watching = await join(fixture, display_name="Bea's agent")
+
+    posted = await mcp_tools.post_message(
+        body="anyone wanna get lunch?",
+        speaking_for="human",
+        speaking_as="Alan",
+        participant_token=fixture.owner_token,
+    )
+    assert "In the room now: Bea's agent" in posted["sent"]
+    assert "Agents were not woken" in posted["sent"]
+
+    # With nobody live, it says that instead of implying an audience.
+    from app.core import presence as presence_svc
+
+    await presence_svc.disconnect(
+        connection_id=watching.connection_id, participant=watching.participant
+    )
+    again = await mcp_tools.post_message(
+        body="still hungry",
+        speaking_for="human",
+        speaking_as="Alan",
+        participant_token=fixture.owner_token,
+    )
+    assert "none watching live right now" in again["sent"]
+
+
+async def test_an_empty_room_says_nobody_has_read_it(make_room):
+    fixture = await make_room(name="Wren")
+    posted = await mcp_tools.post_message(
+        body="hello?",
+        speaking_for="human",
+        speaking_as="Alan",
+        participant_token=fixture.owner_token,
+    )
+    assert "Nobody else is in the room yet" in posted["sent"]
+
+
+async def test_an_agents_own_message_gets_no_receipt(make_room):
+    """Only a relay earns one. An agent posting its own coordination knows it posted; a person
+    who typed does not, and is the one waiting."""
+    fixture = await make_room()
+    posted = await mcp_tools.post_message(
+        body="ported the reducers", participant_token=fixture.owner_token
+    )
+    assert posted["ok"] is True
+    assert "sent" not in posted
+
+
+async def test_a_receipt_that_cannot_render_does_not_fail_a_posted_message(make_room, monkeypatch):
+    """The worst possible answer to "did that go out?" is an error for a message that did."""
+    fixture = await make_room()
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("presence unavailable")
+
+    monkeypatch.setattr(mcp_tools.presence, "presence_for_room", explode)
+    posted = await mcp_tools.post_message(
+        body="anyone wanna get lunch?",
+        speaking_for="human",
+        speaking_as="Alan",
+        participant_token=fixture.owner_token,
+    )
+    assert posted["ok"] is True
+    assert "anyone wanna get lunch?" in posted["sent"]

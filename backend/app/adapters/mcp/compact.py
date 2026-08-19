@@ -591,6 +591,78 @@ _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
+SENT_TEMPLATE = """Sent to {room_name} — {attribution}
+
+  {body}
+
+{audience}"""
+
+
+def sent(
+    *,
+    room_name: str,
+    attribution: str,
+    body: str,
+    others: list[dict[str, Any]],
+) -> str:
+    """The receipt a person sees the instant their words leave for the room.
+
+    Rendered server-side and printed verbatim, for the reason `welcome` and `joined` are
+    (D-085, D-087): what a person sees at a product moment is behaviour, not a rendering
+    accident, and left to each client one prints a tidy line, another prints the plumbing,
+    and a third prints nothing at all. Nothing is the failure that matters here — a person
+    who typed a message into a chat window and saw no acknowledgement has no way to tell
+    "sent" from "my agent decided that was an instruction and did something else".
+
+    Deliberately only for a *relay*. An agent posting its own coordination knows it posted;
+    a person who typed does not, and is the one waiting.
+
+    The audience line is the honest half. A relayed remark does not wake other agents — that
+    is the whole point of declaring it — so saying "sent" alone would let a person believe
+    they had interrupted somebody. It names who is present and states plainly that agents
+    were not woken, because the alternative is discovering it from silence.
+    """
+    reachable = [p for p in others if (p.get("liveness") or "") in _WATCHING_LIVE]
+    if not others:
+        audience = "Nobody else is in the room yet, so nobody has read it."
+    elif reachable:
+        names = _name_list(reachable)
+        # A plain newline, not `LINE_BREAK`: that constant carries the indentation that keeps
+        # the welcome sheet's value column aligned, and this is prose rather than a sheet.
+        audience = (
+            f"In the room now: {names}.\n"
+            "Anyone watching the room live has it. Agents were not woken — this is chat,\n"
+            "not coordination — so an agent shows its person at its next look."
+        )
+    else:
+        people = "person" if len(others) == 1 else "people"
+        audience = (
+            f"{len(others)} other {people} in the room, none watching live right now.\n"
+            "It is in the room and waiting for them; agents were not woken, because\n"
+            "this is chat rather than coordination."
+        )
+    return SENT_TEMPLATE.format(
+        room_name=room_name or "the room",
+        attribution=attribution,
+        body=body.strip()[:400],
+        audience=audience,
+    )
+
+
+#: Liveness grades that mean somebody is receiving the room as it happens. `attended` is
+#: excluded on purpose: it means healthy but reachable only while a human is engaged, which
+#: is exactly the case that will *not* see a suppressed message promptly.
+_WATCHING_LIVE: frozenset[str] = frozenset({"live_push", "live_poll"})
+
+
+def _name_list(rows: list[dict[str, Any]]) -> str:
+    names = [str(r.get("name") or r.get("participant_id") or "someone") for r in rows]
+    shown = names[:_NAMES_SHOWN]
+    rest = len(names) - len(shown)
+    joined = ", ".join(shown)
+    return f"{joined} and {rest} more" if rest > 0 else joined
+
+
 def hierarchy(snapshot: dict[str, Any]) -> dict[str, Any]:
     """The allocation view: who coordinates whom, what each is directed to do, and where
     every unit of intent went.

@@ -97,6 +97,7 @@ from ...domain.goal import GoalStatus, WorkerDisposition
 from ...domain.job import JobOrigin, JobState
 from ...domain.message import Speaker
 from ...domain.room import (
+    MembershipState,
     Participant,
     PrivacyClass,
     RoomRole,
@@ -418,6 +419,39 @@ def _bad_enum(field: str, allowed: Any) -> dict[str, Any]:
         "error": "invalid_command",
         "message": f"{field} must be one of {sorted(m.value for m in allowed)}.",
     }
+
+
+async def _sent_receipt(participant: Participant, *, body: str, speaking_as: str) -> str:
+    """Render what the sender sees the moment their words leave for the room.
+
+    Two targeted reads rather than a snapshot: a relayed remark is a person typing, so this
+    runs at human speed and does not need the board — but it does need the room's name and
+    who is actually watching, because "sent" on its own would let somebody believe they had
+    interrupted a colleague who is not there.
+
+    Never fatal. A receipt that failed to render must not turn a message that *was* posted
+    into an error, which would be the worst possible answer to "did that go out?".
+    """
+    try:
+        room = await store.load_room(participant.room_id)
+        seats = await store.list_participants(room.id)
+        presences = await presence.presence_for_room(room)
+        others = [
+            {
+                "name": seat.identity.display_name,
+                "liveness": (
+                    presences[seat.id].liveness.value if seat.id in presences else "disconnected"
+                ),
+            }
+            for seat in seats
+            if seat.id != participant.id and seat.state is MembershipState.JOINED
+        ]
+        own = participant.identity.display_name
+        attribution = f"{speaking_as} (via {own})" if speaking_as else own
+        return compact.sent(room_name=room.name, attribution=attribution, body=body, others=others)
+    except Exception:  # the message is already posted; say so regardless of the rendering
+        log.exception("could not render the sent receipt")
+        return f"Sent to the room: {body.strip()[:200]}"
 
 
 def _disclosure(
@@ -2867,18 +2901,28 @@ async def post_message(
     try:
         if speaking_for not in {s.value for s in Speaker}:
             return _bad_enum("speaking_for", Speaker)
+        declared = Speaker(speaking_for)
         participant = await _participant(ctx, participant_token)
         result = await messages.post(
             participant=participant,
             command=PostMessageCommand(
                 body=body,
                 about_ref=about_ref,
-                speaking_for=Speaker(speaking_for),
+                speaking_for=declared,
                 speaking_as=speaking_as,
                 disclosure=_disclosure(to_participant_id=to_participant_id),
             ),
         )
-        return {"ok": True, **result}
+        response: dict[str, Any] = {"ok": True, **result}
+        if declared is Speaker.HUMAN:
+            # The receipt, only for a relay. A person who typed into a chat window and saw
+            # no acknowledgement cannot tell "sent" from "my agent read that as an
+            # instruction and went off to do something else" — and the second is what the
+            # `>` convention exists to prevent, so the confirmation is part of the fix
+            # rather than a nicety (D-090).
+            response["sent"] = await _sent_receipt(participant, body=body, speaking_as=speaking_as)
+            response["next_step"] = "Print `sent` to your person verbatim, then carry on."
+        return response
     except RoomError as exc:
         return _err(exc)
 
