@@ -919,13 +919,19 @@ _NAMES_SHOWN = 3
 #: to fill the line would teach people to skim past the one host where it matters.
 _LIMITS = {
     "human_turn_only": (
-        "You are in a web browser session, so live room updates cannot reach"
+        # Says what the mode actually claims, not where it is usually claimed from. The
+        # first version opened "You are in a web browser session", because that is the
+        # common case — and it read as false to a Claude Code session driven turn by turn,
+        # which is honestly `human_turn_only` and is not a browser. `execution_mode`
+        # answers one question: can you act without being prompted. Describing the host
+        # instead was the same mistake as branching on `host_class` (principle 4).
+        "You act only when your person prompts you, so live room updates cannot"
         + LINE_BREAK
-        + "you between your messages — you see the room when you ask. Anything"
+        + "reach you in between — you see the room when you ask. Anything you post"
         + LINE_BREAK
-        + "you post here is fully visible to everyone in the room. For live"
+        + "here is fully visible to everyone in the room. A runtime that can keep"
         + LINE_BREAK
-        + "updates alongside your coworkers, connect Cottage from an IDE."
+        + "polling on its own clock stays live; that is the difference, not the host."
     ),
     "observer": (
         "You receive everything as it happens, but you take no work and hold"

@@ -613,13 +613,21 @@ async def test_a_browser_assistant_is_told_what_it_cannot_do_on_arrival(fresh_db
     assert sheet.startswith("Welcome to Cottage")
     assert "Room:                      Tester" in sheet
     assert "Your Display Name:         ChatGPT" in sheet
-    assert "You are in a web browser session" in sheet
-    assert "live room updates cannot reach" in sheet
+    # Describes what the mode claims, not where it is usually claimed from. The first
+    # version said "You are in a web browser session", which reads as false to a Claude Code
+    # session driven turn by turn — honestly `human_turn_only`, and not a browser. Found by
+    # a session reading its own arrival sheet and not recognising itself in it.
+    assert "You act only when your person prompts you" in sheet
+    assert "live room updates cannot" in sheet
+    assert "web browser" not in sheet, "the mode is not a claim about the host (principle 4)"
     # The counterweight, and the reason this line is not simply a warning: "limited"
     # invites the reading that little of what you say arrives, when the truth is the
     # opposite — only inbound liveness is limited.
     assert "fully visible to everyone in the room" in sheet
-    assert "connect Cottage from an IDE" in sheet
+    # And the remedy stated as the capability rather than as a product name. Asserted
+    # within one line: the sheet wraps at a fixed column, so a phrase that spans the wrap
+    # carries the injected newline and indent with it.
+    assert "polling on its own clock stays live" in sheet
     # Lease policy is not what a person needs in their first four lines; it ships in the
     # structured fields for the agent instead.
     assert "Claiming tasks" not in sheet
