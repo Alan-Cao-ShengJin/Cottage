@@ -179,10 +179,14 @@ hides a reachable seat, over-claiming sends work to a seat nobody is reading.
 
 - **SQLite on one volume, in-process event bus.** Vertical scaling only. PostgreSQL
   compatibility is *argued* — every invariant is engine-neutral — but not *demonstrated*.
-- **The `>` chat relay does not survive a reboot.** It is a detached service with a `status`
-  that connects to the port rather than trusting a pid, so it survives editor-session restarts;
-  making it survive a reboot means a participant token at rest, which is a deliberate opt-in
-  rather than a default.
+- **The `>` chat relay is supervised only halfway.** It is a detached service whose `status`
+  connects to the port rather than trusting a pid, and it does survive editor-session restarts
+  and redeploys — observed across three. But it records **no exit**: one run vanished after
+  ~18 hours with nothing in its log, and since every deliberate exit path logs first, it was
+  killed externally rather than giving up. So "is it up now" is answerable and "when and why did
+  it stop" is not, which is half of what the supervisor was written for. Nothing restarts it
+  either, so `>` silently reverts to the slow path. Surviving a reboot additionally means a
+  participant token at rest — a deliberate opt-in, never a default.
 - **The dev venv is Python 3.10; production is 3.12.** This skew already produced one bug a
   fully green gate could not see.
 

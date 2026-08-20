@@ -1155,6 +1155,27 @@ Deepen M2.4: richer digests, pasteable turn output, lease tuning for `attended` 
 
 ## Known blockers / open questions
 
+- **The relay supervisor records no exit, and nothing restarts it (D-092 is half a fix).**
+  Observed 2026-08-20. The service started 2026-08-19 17:25Z, survived three deploys and their
+  1012 reconnects — the session-lifetime bug it was written for is genuinely fixed — and then
+  was gone by 12:02Z the next day. **The log says nothing.** All three of `run`'s deliberate exit
+  paths log before returning (`UnfilteredServer`, a 401/403 refusal, `--once`) and none of those
+  lines is present, so it did not exit through its own logic; it was killed externally, most
+  likely by the machine suspending overnight.
+
+  Two gaps, and the first is the embarrassing one because D-092 exists to close exactly it:
+  `status` answers "is it up *now*" and nothing answers "when and why did it stop". A silent
+  death is still indistinguishable from a quiet room *after the fact*, which was the whole point.
+  Second, nothing restarts it — so `>` reverts to the slow path until somebody notices and runs
+  `start` again, which is the same silent degradation one level up.
+
+  Not implemented, deliberately: the fix is more supervision, and tonight's lesson is that
+  supervision claims need live evidence. It cannot be verified while the relay is stopped and the
+  room is closed. Candidate shape: an exit record written by a wrapper rather than by the dying
+  process, plus a scheduled `start` that is a no-op when the port already answers (`start` is
+  already idempotent for this reason). A reboot-survival story is the same decision about a
+  credential at rest that D-092 declined to make quietly.
+
 - **A seat with a live resident process reads `offline`, and the fix reverses a deliberate
   choice — so it needs a decision.** Flagged vaguely three times; now measured. On
   `room_01M0DGWSXDA360CT6YJ85W`, with `scripts/wake_channel.py` connected for 45 minutes and its
